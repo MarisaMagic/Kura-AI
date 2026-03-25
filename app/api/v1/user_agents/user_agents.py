@@ -1,0 +1,119 @@
+from fastapi import APIRouter, File, Query, UploadFile
+from tortoise.expressions import Q
+
+from app.controllers.user import user_controller
+from app.controllers.user_agent import user_agent_controller
+from app.core.ctx import CTX_USER_ID
+from app.models.user_agent import UserAgent
+from app.schemas.base import Fail, Success, SuccessExtra
+from app.schemas.user_agent import UserAgentCreate, UserAgentUpdate
+from app.utils.user_agent_avatar import (
+    agent_avatar_url,
+    remove_agent_avatar_file,
+    save_uploaded_agent_avatar,
+)
+
+router = APIRouter()
+
+
+async def _enrich_row(row: dict, username: str) -> dict:
+    fn = row.get("avatar_filename")
+    row["avatar_url"] = agent_avatar_url(username, fn if fn else None)
+    return row
+
+
+@router.get("/list", summary="我的智能体列表", tags=["智能体模块"])
+async def list_user_agents(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    user_id = CTX_USER_ID.get()
+    user_obj = await user_controller.get(id=user_id)
+    username = user_obj.username
+    q = Q(user_id=user_id)
+    total, objs = await user_agent_controller.list(page=page, page_size=page_size, search=q, order=["-id"])
+    data = []
+    for obj in objs:
+        d = await obj.to_dict()
+        await _enrich_row(d, username)
+        data.append(d)
+    return SuccessExtra(data=data, total=total, page=page, page_size=page_size)
+
+
+@router.get("/get", summary="智能体详情", tags=["智能体模块"])
+async def get_user_agent(agent_id: int = Query(..., description="智能体 ID")):
+    user_id = CTX_USER_ID.get()
+    user_obj = await user_controller.get(id=user_id)
+    obj = await user_agent_controller.get_owned(agent_id, user_id)
+    if not obj:
+        return Fail(code=404, msg="智能体不存在或无权限访问")
+    d = await obj.to_dict()
+    await _enrich_row(d, user_obj.username)
+    return Success(data=d)
+
+
+@router.post("/create", summary="创建智能体", tags=["智能体模块"])
+async def create_user_agent(body: UserAgentCreate):
+    user_id = CTX_USER_ID.get()
+    payload = body.model_dump()
+    payload["user_id"] = user_id
+    obj = await UserAgent.create(**payload)
+    user_obj = await user_controller.get(id=user_id)
+    d = await obj.to_dict()
+    await _enrich_row(d, user_obj.username)
+    return Success(data=d, msg="创建成功")
+
+
+@router.post("/update", summary="更新智能体", tags=["智能体模块"])
+async def update_user_agent(body: UserAgentUpdate):
+    user_id = CTX_USER_ID.get()
+    obj = await user_agent_controller.get_owned(body.id, user_id)
+    if not obj:
+        return Fail(code=404, msg="智能体不存在或无权限访问")
+    payload = body.model_dump(exclude={"id"})
+    obj = obj.update_from_dict(payload)
+    await obj.save()
+    user_obj = await user_controller.get(id=user_id)
+    d = await obj.to_dict()
+    await _enrich_row(d, user_obj.username)
+    return Success(data=d, msg="更新成功")
+
+
+@router.delete("/delete", summary="删除智能体", tags=["智能体模块"])
+async def delete_user_agent(agent_id: int = Query(..., description="智能体 ID")):
+    user_id = CTX_USER_ID.get()
+    user_obj = await user_controller.get(id=user_id)
+    obj = await user_agent_controller.get_owned(agent_id, user_id)
+    if not obj:
+        return Fail(code=404, msg="智能体不存在或无权限访问")
+    fn = obj.avatar_filename
+    await obj.delete()
+    remove_agent_avatar_file(user_obj.username, fn)
+    return Success(msg="删除成功")
+
+
+@router.post("/upload_avatar", summary="上传智能体头像", tags=["智能体模块"])
+async def upload_agent_avatar(
+    agent_id: int = Query(..., description="智能体 ID"),
+    file: UploadFile = File(...),
+):
+    user_id = CTX_USER_ID.get()
+    user_obj = await user_controller.get(id=user_id)
+    username = user_obj.username
+    obj = await user_agent_controller.get_owned(agent_id, user_id)
+    if not obj:
+        return Fail(code=404, msg="智能体不存在或无权限访问")
+    new_name, err = await save_uploaded_agent_avatar(username, file)
+    if err:
+        return Fail(msg=err)
+    old_fn = obj.avatar_filename
+    obj.avatar_filename = new_name
+    await obj.save()
+    remove_agent_avatar_file(username, old_fn)
+    return Success(
+        data={
+            "avatar_url": agent_avatar_url(username, new_name),
+            "avatar_filename": new_name,
+        },
+        msg="上传成功",
+    )

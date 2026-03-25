@@ -7,6 +7,7 @@ from app.controllers.dept import dept_controller
 from app.controllers.user import user_controller
 from app.schemas.base import Fail, Success, SuccessExtra
 from app.schemas.users import *
+from app.utils.avatar import enrich_user_avatar
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ async def list_user(
     total, user_objs = await user_controller.list(page=page, page_size=page_size, search=q)
     data = [await obj.to_dict(m2m=True, exclude_fields=["password"]) for obj in user_objs]
     for item in data:
+        enrich_user_avatar(item)
         dept_id = item.pop("dept_id", None)
         item["dept"] = await (await dept_controller.get(id=dept_id)).to_dict() if dept_id else {}
 
@@ -43,6 +45,7 @@ async def get_user(
 ):
     user_obj = await user_controller.get(id=user_id)
     user_dict = await user_obj.to_dict(exclude_fields=["password"])
+    enrich_user_avatar(user_dict)
     return Success(data=user_dict)
 
 

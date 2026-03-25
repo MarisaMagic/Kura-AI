@@ -18,12 +18,45 @@
     "workbench": {
       "label_workbench": "Workbench",
       "text_hello": "hello, {username}",
-      "text_welcome": "Today is another day full of energy!",
-      "label_number_of_items": "Number of items",
-      "label_upcoming": "Upcoming",
-      "label_information": "Information",
-      "label_project": "Project",
-      "label_more": "More"
+      "text_welcome": "Today is another day full of energy!"
+    },
+    "agents": {
+      "label_avatar": "Avatar",
+      "label_agent_avatar": "Agent avatar",
+      "button_select_avatar": "Choose image",
+      "title_edit_avatar": "Change avatar",
+      "label_basic": "Basic",
+      "label_name": "Agent name",
+      "label_model_name": "Model",
+      "label_api_key_env_name": "API key env var name",
+      "label_description": "Description",
+      "label_system_prompt": "System prompt",
+      "label_enable_web": "Web access",
+      "label_enable_code": "Code tools",
+      "label_dialogue": "Dialogue",
+      "label_opening_message": "Opening message",
+      "label_advanced": "Advanced",
+      "label_temperature": "Temperature",
+      "placeholder_name": "e.g. Support bot",
+      "placeholder_model_name": "e.g. GLM-4, qwen-max",
+      "placeholder_api_key_env_name": "e.g. DASHSCOPE_API_KEY",
+      "placeholder_description": "Short description",
+      "placeholder_system_prompt": "System prompt",
+      "placeholder_opening_message": "Greeting when chat starts",
+      "rule_name": "Name is required",
+      "rule_model_name": "Model is required",
+      "rule_api_key_env_name": "Env var name is required (starts with uppercase letter)",
+      "title_create_agent": "Create agent",
+      "title_edit_agent": "Edit agent",
+      "button_save_config": "Save configuration",
+      "button_clear_config": "Clear configuration",
+      "title_mine_agents": "My agents",
+      "msg_create_ok": "Created",
+      "msg_update_ok": "Saved",
+      "msg_delete_ok": "Deleted",
+      "text_empty_agents": "No agents yet. Create one first.",
+      "text_no_description": "No description",
+      "confirm_delete": "Delete this agent?"
     },
     "profile": {
       "label_profile": "Profile",
@@ -44,7 +77,9 @@
       "message_old_password_required": "Please enter the old password",
       "message_new_password_required": "Please enter a new password",
       "message_password_confirmation_required": "Please enter confirm password",
-      "message_password_confirmation_diff": "Two password inputs are inconsistent"
+      "message_password_confirmation_diff": "Two password inputs are inconsistent",
+      "button_upload_avatar": "Upload avatar",
+      "text_avatar_upload_success": "Avatar uploaded successfully"
     },
     "errors": {
       "label_error": "Error",
@@ -56,7 +91,10 @@
       "update_success": "Update success"
     },
     "buttons": {
-      "update": "Update"
+      "update": "Update",
+      "save": "Save",
+      "edit": "Edit",
+      "delete": "Delete"
     }
   }
 }

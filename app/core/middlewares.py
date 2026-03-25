@@ -54,30 +54,45 @@ class HttpAuditLogMiddleware(BaseHTTPMiddleware):
         self.audit_log_paths = ["/api/v1/auditlog/list"]
         self.max_body_size = 1024 * 1024  # 1MB 响应体大小限制
 
+    async def _append_form_body_args(self, request: Request, args: dict) -> None:
+        try:
+            body = await request.form()
+            for k, v in body.items():
+                if hasattr(v, "filename"):  # 文件上传
+                    args[k] = v.filename
+                elif isinstance(v, list) and v and hasattr(v[0], "filename"):
+                    args[k] = [file.filename for file in v]
+                else:
+                    args[k] = v
+        except Exception:
+            pass
+
     async def get_request_args(self, request: Request) -> dict:
         args = {}
         # 获取查询参数
         for key, value in request.query_params.items():
             args[key] = value
 
-        # 获取请求体
-        if request.method in ["POST", "PUT", "PATCH"]:
-            try:
-                body = await request.json()
+        if request.method not in ["POST", "PUT", "PATCH"]:
+            return args
+
+        content_type = (request.headers.get("content-type") or "").lower()
+        # multipart：不要在中间件里 await request.form()，否则会与 BaseHTTPMiddleware
+        # 叠加消费 body，导致路由里 UploadFile/File(...) 报缺少 file 字段（422）。
+        if "multipart/form-data" in content_type:
+            args["_multipart"] = "skipped"
+            return args
+        # application/x-www-form-urlencoded：可安全解析，无文件流
+        if "application/x-www-form-urlencoded" in content_type:
+            await self._append_form_body_args(request, args)
+            return args
+
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
                 args.update(body)
-            except json.JSONDecodeError:
-                try:
-                    body = await request.form()
-                    # args.update(body)
-                    for k, v in body.items():
-                        if hasattr(v, "filename"):  # 文件上传行为
-                            args[k] = v.filename
-                        elif isinstance(v, list) and v and hasattr(v[0], "filename"):
-                            args[k] = [file.filename for file in v]
-                        else:
-                            args[k] = v
-                except Exception:
-                    pass
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            await self._append_form_body_args(request, args)
 
         return args
 
@@ -118,8 +133,11 @@ class HttpAuditLogMiddleware(BaseHTTPMiddleware):
         if isinstance(v, (str, bytes)):
             try:
                 return json.loads(v)
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, UnicodeDecodeError):
                 pass
+        # response_body 为 JSONField，不能存原始 bytes（如图片流）
+        if isinstance(v, bytes):
+            return {"_omitted": "non_json_binary_response"}
         return v
 
     async def _async_iter(self, items: list[bytes]) -> AsyncGenerator[bytes, None]:

@@ -1,6 +1,8 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from tortoise import Tortoise
 
 from app.core.exceptions import SettingNotFound
@@ -35,6 +37,18 @@ def create_app() -> FastAPI:
     )
     register_exceptions(app)
     register_routers(app, prefix="/api")
+    os.makedirs(settings.USER_AVATAR_ROOT, exist_ok=True)
+    os.makedirs(settings.USER_AGENT_AVATAR_ROOT, exist_ok=True)
+    app.mount(
+        settings.USER_AVATAR_URL_PREFIX,
+        StaticFiles(directory=settings.USER_AVATAR_ROOT),
+        name="user_avatar_files",
+    )
+    app.mount(
+        settings.USER_AGENT_AVATAR_URL_PREFIX,
+        StaticFiles(directory=settings.USER_AGENT_AVATAR_ROOT),
+        name="user_agent_avatar_files",
+    )
     return app
 
 

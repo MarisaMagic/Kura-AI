@@ -17,6 +17,7 @@ class User(BaseModel, TimestampMixin):
     last_login = fields.DatetimeField(null=True, description="最后登录时间", index=True)
     roles = fields.ManyToManyField("models.Role", related_name="user_roles")
     dept_id = fields.IntField(null=True, description="部门ID", index=True)
+    avatar = fields.CharField(max_length=255, null=True, description="头像文件名（存于 user_avatar 目录）")
 
     class Meta:
         table = "user"

@@ -1,5 +1,9 @@
 /** 重置样式 */
 import '@/styles/reset.css'
+/** 思源黑体（简体）：Noto Sans SC，与 Source Han Sans 同源 */
+import '@fontsource/noto-sans-sc/400.css'
+import '@fontsource/noto-sans-sc/500.css'
+import '@fontsource/noto-sans-sc/700.css'
 import 'uno.css'
 import '@/styles/global.scss'
 

@@ -1,6 +1,6 @@
 <script setup>
-import { ref } from 'vue'
-import { NButton, NForm, NFormItem, NInput, NTabPane, NTabs, NImage } from 'naive-ui'
+import { onMounted, ref } from 'vue'
+import { NButton, NForm, NFormItem, NInput, NTabPane, NTabs, NImage, NUpload } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import CommonPage from '@/components/page/CommonPage.vue'
 import { useUserStore } from '@/store'
@@ -18,14 +18,26 @@ const infoForm = ref({
   username: userStore.name,
   email: userStore.email,
 })
+onMounted(async () => {
+  await userStore.getUserInfo()
+  infoForm.value.avatar = userStore.avatar
+})
+
 async function updateProfile() {
   isLoading.value = true
   infoFormRef.value?.validate(async (err) => {
     if (err) return
     await api
-      .updateUser({ ...infoForm.value, id: userStore.userId })
+      .updateUser({
+        id: userStore.userId,
+        username: infoForm.value.username,
+        email: infoForm.value.email,
+      })
       .then(() => {
-        userStore.setUserInfo(infoForm.value)
+        userStore.setUserInfo({
+          username: infoForm.value.username,
+          email: infoForm.value.email,
+        })
         isLoading.value = false
         $message.success(t('common.text.update_success'))
       })
@@ -33,6 +45,25 @@ async function updateProfile() {
         isLoading.value = false
       })
   })
+}
+
+function handleAvatarUpload({ file, onFinish, onError }) {
+  const formData = new FormData()
+  formData.append('file', file.file)
+  api
+    .uploadAvatar(formData)
+    .then((res) => {
+      const url = res.data?.avatar
+      if (url) {
+        userStore.setUserInfo({ avatar: url })
+        infoForm.value.avatar = url
+      }
+      onFinish()
+      $message.success(t('views.profile.text_avatar_upload_success'))
+    })
+    .catch(() => {
+      onError()
+    })
 }
 const infoFormRules = {
   username: [
@@ -134,7 +165,17 @@ function validatePasswordSame(rule, value) {
             class="w-400"
           >
             <NFormItem :label="$t('views.profile.label_avatar')" path="avatar">
-              <NImage width="100" :src="infoForm.avatar"></NImage>
+              <div class="flex flex-col gap-3">
+                <NImage width="100" height="100" :src="infoForm.avatar" object-fit="cover" />
+                <NUpload
+                  :max="1"
+                  :show-file-list="false"
+                  accept="image/png,image/jpeg,image/gif,image/webp"
+                  :custom-request="handleAvatarUpload"
+                >
+                  <NButton size="small">{{ $t('views.profile.button_upload_avatar') }}</NButton>
+                </NUpload>
+              </div>
             </NFormItem>
             <NFormItem :label="$t('views.profile.label_username')" path="username">
               <NInput

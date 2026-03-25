@@ -7,6 +7,7 @@ export default {
   getUserApi: () => request.get('/base/userapi'),
   // profile
   updatePassword: (data = {}) => request.post('/base/update_password', data),
+  uploadAvatar: (data) => request.post('/base/upload_avatar', data),
   // users
   getUserList: (params = {}) => request.get('/user/list', { params }),
   getUserById: (params = {}) => request.get('/user/get', { params }),
@@ -39,4 +40,12 @@ export default {
   deleteDept: (params = {}) => request.delete('/dept/delete', { params }),
   // auditlog
   getAuditLogList: (params = {}) => request.get('/auditlog/list', { params }),
+  // user agents
+  getUserAgentList: (params = {}) => request.get('/user-agent/list', { params }),
+  getUserAgent: (params = {}) => request.get('/user-agent/get', { params }),
+  createUserAgent: (data = {}) => request.post('/user-agent/create', data),
+  updateUserAgent: (data = {}) => request.post('/user-agent/update', data),
+  deleteUserAgent: (params = {}) => request.delete('/user-agent/delete', { params }),
+  uploadUserAgentAvatar: (agentId, data) =>
+    request.post(`/user-agent/upload_avatar?agent_id=${agentId}`, data),
 }

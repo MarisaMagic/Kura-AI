@@ -1,6 +1,8 @@
+import os
+import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter
+from fastapi import APIRouter, File, UploadFile
 
 from app.controllers.user import user_controller
 from app.core.ctx import CTX_USER_ID
@@ -10,6 +12,7 @@ from app.schemas.base import Fail, Success
 from app.schemas.login import *
 from app.schemas.users import UpdatePassword
 from app.settings import settings
+from app.utils.avatar import ALLOWED_AVATAR_EXTENSIONS, avatar_url_from_filename, enrich_user_avatar, safe_avatar_extension
 from app.utils.jwt_utils import create_access_token
 from app.utils.password import get_password_hash, verify_password
 
@@ -42,8 +45,39 @@ async def get_userinfo():
     user_id = CTX_USER_ID.get()
     user_obj = await user_controller.get(id=user_id)
     data = await user_obj.to_dict(exclude_fields=["password"])
-    data["avatar"] = "https://avatars.githubusercontent.com/u/54677442?v=4"
+    enrich_user_avatar(data)
     return Success(data=data)
+
+
+@router.post("/upload_avatar", summary="上传头像", dependencies=[DependAuth])
+async def upload_avatar(file: UploadFile = File(...)):
+    user_id = CTX_USER_ID.get()
+    user_obj = await user_controller.get(id=user_id)
+    ext = safe_avatar_extension(file.filename)
+    if not ext:
+        return Fail(
+            msg=f"仅支持以下格式：{', '.join(sorted(ALLOWED_AVATAR_EXTENSIONS))}",
+        )
+    contents = await file.read()
+    max_bytes = 2 * 1024 * 1024
+    if len(contents) > max_bytes:
+        return Fail(msg="文件大小不能超过 2MB")
+    new_name = f"{uuid.uuid4().hex}{ext}"
+    root = settings.USER_AVATAR_ROOT
+    if user_obj.avatar:
+        old_path = os.path.join(root, user_obj.avatar)
+        if os.path.isfile(old_path):
+            try:
+                os.remove(old_path)
+            except OSError:
+                pass
+    os.makedirs(root, exist_ok=True)
+    path = os.path.join(root, new_name)
+    with open(path, "wb") as f:
+        f.write(contents)
+    user_obj.avatar = new_name
+    await user_obj.save()
+    return Success(data={"avatar": avatar_url_from_filename(new_name)})
 
 
 @router.get("/usermenu", summary="查看用户菜单", dependencies=[DependAuth])

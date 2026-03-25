@@ -12,6 +12,7 @@
     "prettier": "npx prettier --write ."
   },
   "dependencies": {
+    "@fontsource/noto-sans-sc": "^5.2.9",
     "@iconify/json": "^2.2.228",
     "@iconify/vue": "^4.1.1",
     "@unocss/eslint-config": "^0.55.0",
@@ -39,8 +40,8 @@
     "vue-router": "^4.2.4"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^4.2.3",
-    "vite": "^4.4.6"
+    "@vitejs/plugin-vue": "^5.2.4",
+    "vite": "^5.4.21"
   },
   "lint-staged": {
     "*.{js,vue}": [

@@ -18,12 +18,45 @@
     "workbench": {
       "label_workbench": "工作台",
       "text_hello": "hello, {username}",
-      "text_welcome": "今天又是元气满满的一天!",
-      "label_number_of_items": "项目数",
-      "label_upcoming": "待办",
-      "label_information": "消息",
-      "label_project": "项目",
-      "label_more": "更多"
+      "text_welcome": "今天又是元气满满的一天!"
+    },
+    "agents": {
+      "label_avatar": "头像",
+      "label_agent_avatar": "智能体头像",
+      "button_select_avatar": "选择图片",
+      "title_edit_avatar": "修改头像",
+      "label_basic": "基础配置",
+      "label_name": "智能体名称",
+      "label_model_name": "模型",
+      "label_api_key_env_name": "API Key 环境变量名",
+      "label_description": "简介",
+      "label_system_prompt": "提示词",
+      "label_enable_web": "联网能力",
+      "label_enable_code": "写代码能力",
+      "label_dialogue": "对话配置",
+      "label_opening_message": "开场白",
+      "label_advanced": "高级配置",
+      "label_temperature": "温度 (temperature)",
+      "placeholder_name": "例如：客服助手",
+      "placeholder_model_name": "例如：GLM-4、qwen-max",
+      "placeholder_api_key_env_name": "例如：DASHSCOPE_API_KEY",
+      "placeholder_description": "简要介绍智能体用途",
+      "placeholder_system_prompt": "系统提示词",
+      "placeholder_opening_message": "进入对话时的问候语",
+      "rule_name": "请填写智能体名称",
+      "rule_model_name": "请填写模型名称",
+      "rule_api_key_env_name": "请填写环境变量名（大写字母开头）",
+      "title_create_agent": "创建智能体",
+      "title_edit_agent": "编辑智能体",
+      "button_save_config": "保存配置",
+      "button_clear_config": "清空配置",
+      "title_mine_agents": "我的智能体",
+      "msg_create_ok": "创建成功",
+      "msg_update_ok": "保存成功",
+      "msg_delete_ok": "已删除",
+      "text_empty_agents": "暂无智能体，请先在「创建智能体」中添加。",
+      "text_no_description": "暂无简介",
+      "confirm_delete": "确定删除该智能体？"
     },
     "profile": {
       "label_profile": "个人中心",
@@ -44,7 +77,9 @@
       "message_old_password_required": "请输入旧密码",
       "message_new_password_required": "请输入新密码",
       "message_password_confirmation_required": "请再次输入密码",
-      "message_password_confirmation_diff": "两次密码输入不一致"
+      "message_password_confirmation_diff": "两次密码输入不一致",
+      "button_upload_avatar": "上传头像",
+      "text_avatar_upload_success": "头像上传成功"
     },
     "errors": {
       "label_error": "错误页",
@@ -56,7 +91,10 @@
       "update_success": "修改成功"
     },
     "buttons": {
-      "update": "修改"
+      "update": "修改",
+      "save": "保存",
+      "edit": "编辑",
+      "delete": "删除"
     }
   }
 }

@@ -108,6 +108,10 @@ function handleMenuSelect(key, item) {
 </script>
 
 <style lang="scss">
+.side-menu {
+  background: transparent !important;
+}
+
 .side-menu:not(.n-menu--collapsed) {
   .n-menu-item-content {
     &::before {

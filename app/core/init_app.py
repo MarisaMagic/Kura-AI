@@ -4,6 +4,7 @@ from aerich import Command
 from fastapi import FastAPI
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
+from tortoise import Tortoise
 from tortoise.expressions import Q
 
 from app.api import api_router
@@ -44,6 +45,9 @@ def make_middlewares():
             methods=["GET", "POST", "PUT", "DELETE"],
             exclude_paths=[
                 "/api/v1/base/access_token",
+                "/api/v1/base/upload_avatar",
+                "/api/v1/user-agent/upload_avatar",
+                "/api/v1/media/",  # 静态头像等二进制，勿写入审计 JSON
                 "/docs",
                 "/openapi.json",
             ],
@@ -177,9 +181,8 @@ async def init_menus():
 
 
 async def init_apis():
-    apis = await api_controller.model.exists()
-    if not apis:
-        await api_controller.refresh_api()
+    """同步 OpenAPI 路由到 api 表（新增路由后需执行以出现在权限管理中）。"""
+    await api_controller.refresh_api()
 
 
 async def init_db():
@@ -198,6 +201,83 @@ async def init_db():
         await command.init_db(safe=True)
 
     await command.upgrade(run_in_transaction=True)
+    await ensure_user_avatar_column()
+
+
+async def ensure_user_avatar_column() -> None:
+    """旧库可能缺少 avatar 列；aerich 未覆盖时补齐（SQLite）。"""
+    try:
+        conn = Tortoise.get_connection("sqlite")
+    except Exception:
+        return
+    try:
+        await conn.execute_query('ALTER TABLE "user" ADD COLUMN "avatar" VARCHAR(255)')
+        logger.info('Added column "user"."avatar"')
+    except Exception as e:
+        msg = str(e).lower()
+        if "duplicate column" in msg or "already exists" in msg:
+            return
+        logger.warning('ensure_user_avatar_column: %s', e)
+
+
+async def ensure_agent_menus():
+    """智能体侧栏菜单；升级已有库时补录。"""
+    parent = await Menu.filter(path="/agents", parent_id=0).first()
+    if not parent:
+        parent = await Menu.create(
+            menu_type=MenuType.CATALOG,
+            name="智能体",
+            path="/agents",
+            order=3,
+            parent_id=0,
+            icon="material-symbols:smart-toy-outline",
+            is_hidden=False,
+            component="Layout",
+            keepalive=False,
+            redirect="/agents/create",
+        )
+    children_spec = [
+        ("创建智能体", "create", "/agents/create", 1, "material-symbols:add-circle-outline"),
+        ("我的智能体", "mine", "/agents/mine", 2, "material-symbols:list-alt-outline"),
+    ]
+    for name, path_seg, component, order, icon in children_spec:
+        exists = await Menu.filter(parent_id=parent.id, path=path_seg).first()
+        if not exists:
+            await Menu.create(
+                menu_type=MenuType.MENU,
+                name=name,
+                path=path_seg,
+                order=order,
+                parent_id=parent.id,
+                icon=icon,
+                is_hidden=False,
+                component=component,
+                keepalive=False,
+            )
+
+
+async def sync_role_menus_with_all_menus():
+    """新菜单补授给所有角色。"""
+    all_menus = await Menu.all()
+    for role in await Role.all():
+        existing = await role.menus.all()
+        have = {m.id for m in existing}
+        for m in all_menus:
+            if m.id not in have:
+                await role.menus.add(m)
+
+
+async def ensure_user_agent_apis_for_roles():
+    """智能体模块 API 同步到所有角色（新接口上线后自动补授权）。"""
+    agent_apis = await Api.filter(tags="智能体模块")
+    if not agent_apis:
+        return
+    for role in await Role.all():
+        existing = await role.apis.all()
+        have = {a.id for a in existing}
+        for a in agent_apis:
+            if a.id not in have:
+                await role.apis.add(a)
 
 
 async def init_roles():
@@ -229,5 +309,8 @@ async def init_data():
     await init_db()
     await init_superuser()
     await init_menus()
+    await ensure_agent_menus()
+    await sync_role_menus_with_all_menus()
     await init_apis()
     await init_roles()
+    await ensure_user_agent_apis_for_roles()

@@ -5,7 +5,6 @@ venv/
 .vscode
 .ruff_cache/
 .pytest_cache/
-migrations/
 
 db.sqlite3
 db.sqlite3-journal
@@ -14,3 +13,9 @@ db.sqlite3-wal
 
 .DS_Store
 ._.DS_Store
+
+data/
+
+.cursor/
+
+migrations/
