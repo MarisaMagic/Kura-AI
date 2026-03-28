@@ -166,18 +166,11 @@ async def init_menus():
             ),
         ]
         await Menu.bulk_create(children_menu)
-        await Menu.create(
-            menu_type=MenuType.MENU,
-            name="一级菜单",
-            path="/top-menu",
-            order=2,
-            parent_id=0,
-            icon="material-symbols:featured-play-list-outline",
-            is_hidden=False,
-            component="/top-menu",
-            keepalive=False,
-            redirect="",
-        )
+
+
+async def remove_legacy_top_menu_demo():
+    """已移除的演示侧栏项 /top-menu，旧库启动时清理。"""
+    await Menu.filter(path="/top-menu", component="/top-menu").delete()
 
 
 async def init_apis():
@@ -221,39 +214,31 @@ async def ensure_user_avatar_column() -> None:
 
 
 async def ensure_agent_menus():
-    """智能体侧栏菜单；升级已有库时补录。"""
-    parent = await Menu.filter(path="/agents", parent_id=0).first()
-    if not parent:
-        parent = await Menu.create(
-            menu_type=MenuType.CATALOG,
-            name="智能体",
-            path="/agents",
+    """智能体：一级菜单「智能体中心」；创建/编辑为全屏路由，不在侧栏。"""
+    legacy = await Menu.filter(path="/agents", parent_id=0).first()
+    if legacy:
+        await Menu.filter(parent_id=legacy.id).delete()
+        legacy.name = "智能体中心"
+        legacy.path = "/agent-hub"
+        legacy.menu_type = MenuType.MENU
+        legacy.component = "/agent-hub"
+        legacy.redirect = None
+        legacy.icon = legacy.icon or "material-symbols:smart-toy-outline"
+        await legacy.save()
+    hub = await Menu.filter(path="/agent-hub", parent_id=0).first()
+    if not hub:
+        await Menu.create(
+            menu_type=MenuType.MENU,
+            name="智能体中心",
+            path="/agent-hub",
             order=3,
             parent_id=0,
             icon="material-symbols:smart-toy-outline",
             is_hidden=False,
-            component="Layout",
+            component="/agent-hub",
             keepalive=False,
-            redirect="/agents/create",
+            redirect=None,
         )
-    children_spec = [
-        ("创建智能体", "create", "/agents/create", 1, "material-symbols:add-circle-outline"),
-        ("我的智能体", "mine", "/agents/mine", 2, "material-symbols:list-alt-outline"),
-    ]
-    for name, path_seg, component, order, icon in children_spec:
-        exists = await Menu.filter(parent_id=parent.id, path=path_seg).first()
-        if not exists:
-            await Menu.create(
-                menu_type=MenuType.MENU,
-                name=name,
-                path=path_seg,
-                order=order,
-                parent_id=parent.id,
-                icon=icon,
-                is_hidden=False,
-                component=component,
-                keepalive=False,
-            )
 
 
 async def sync_role_menus_with_all_menus():
@@ -310,6 +295,7 @@ async def init_data():
     await init_superuser()
     await init_menus()
     await ensure_agent_menus()
+    await remove_legacy_top_menu_demo()
     await sync_role_menus_with_all_menus()
     await init_apis()
     await init_roles()

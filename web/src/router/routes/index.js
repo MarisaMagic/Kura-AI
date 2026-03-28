@@ -2,6 +2,7 @@ import i18n from '~/i18n'
 const { t } = i18n.global
 
 const Layout = () => import('@/layout/index.vue')
+const AgentEditorLayout = () => import('@/layout/AgentEditorLayout.vue')
 
 export const basicRoutes = [
   {
@@ -115,6 +116,39 @@ export const basicRoutes = [
     meta: {
       title: '登录页',
     },
+  },
+  /** 智能体创建/编辑：无侧栏全屏；勿与后端动态菜单中的 /agents 目录冲突 */
+  {
+    name: 'AgentEditor',
+    path: '/agents',
+    component: AgentEditorLayout,
+    isHidden: true,
+    meta: { order: 98 },
+    children: [
+      {
+        name: 'AgentCreate',
+        path: 'create',
+        component: () => import('@/views/agents/create/index.vue'),
+        meta: {
+          title: t('views.agents.title_create_agent'),
+          hidden: true,
+        },
+      },
+      {
+        name: 'AgentEdit',
+        path: 'edit/:id',
+        component: () => import('@/views/agents/edit/index.vue'),
+        meta: {
+          title: t('views.agents.title_edit_agent'),
+          hidden: true,
+        },
+      },
+    ],
+  },
+  {
+    path: '/agents/mine',
+    redirect: '/agent-hub',
+    isHidden: true,
   },
 ]
 
