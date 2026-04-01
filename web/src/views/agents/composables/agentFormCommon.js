@@ -10,7 +10,7 @@ export function emptyForm() {
   return {
     name: '',
     model_name: '',
-    api_key_env_name: '',
+    api_key: '',
     description: '',
     system_prompt: '',
     enable_web: false,
@@ -32,14 +32,17 @@ export function dataURLtoBlob(dataurl) {
   return new Blob([u8arr], { type: mime })
 }
 
-export function buildAgentFormRules(t) {
-  return {
+export function buildAgentFormRules(t, { isEdit = false } = {}) {
+  const rules = {
     name: { required: true, message: () => t('views.agents.rule_name'), trigger: ['input', 'blur'] },
     model_name: { required: true, message: () => t('views.agents.rule_model_name'), trigger: ['input', 'blur'] },
-    api_key_env_name: {
-      required: true,
-      message: () => t('views.agents.rule_api_key_env_name'),
-      trigger: ['input', 'blur'],
-    },
   }
+  if (!isEdit) {
+    rules.api_key = {
+      required: true,
+      message: () => t('views.agents.rule_api_key'),
+      trigger: ['input', 'blur'],
+    }
+  }
+  return rules
 }

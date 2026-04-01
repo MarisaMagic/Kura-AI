@@ -90,7 +90,10 @@ class HttpAuditLogMiddleware(BaseHTTPMiddleware):
         try:
             body = await request.json()
             if isinstance(body, dict):
-                args.update(body)
+                safe = dict(body)
+                if "api_key" in safe:
+                    safe["api_key"] = "***"
+                args.update(safe)
         except (json.JSONDecodeError, UnicodeDecodeError):
             await self._append_form_body_args(request, args)
 

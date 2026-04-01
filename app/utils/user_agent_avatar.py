@@ -12,7 +12,6 @@ from app.settings import settings
 # 与前端 public/logo.svg 一致，由页面同源加载
 DEFAULT_AGENT_AVATAR_URL = "/logo.svg"
 ALLOWED_AGENT_AVATAR_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-_ENV_NAME_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 def agent_avatar_url(username: str, avatar_filename: str | None) -> str:
@@ -25,10 +24,6 @@ def agent_avatar_url(username: str, avatar_filename: str | None) -> str:
 def safe_agent_avatar_extension(filename: str | None) -> str | None:
     ext = Path(filename or "").suffix.lower()
     return ext if ext in ALLOWED_AGENT_AVATAR_EXTENSIONS else None
-
-
-def validate_api_key_env_name(name: str) -> bool:
-    return bool(name and _ENV_NAME_PATTERN.match(name))
 
 
 def user_agent_avatar_dir(username: str) -> str:

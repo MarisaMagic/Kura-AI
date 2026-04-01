@@ -16,6 +16,7 @@
           ref="formFieldsRef"
           :form="form"
           :rules="rules"
+          :has-saved-api-key="hasSavedApiKey"
           :dialogue-open="dialogueOpen"
           :advanced-open="advancedOpen"
           :avatar-preview="avatarPreview"
@@ -56,9 +57,10 @@ const serverAvatarUrl = ref('')
 const avatarUploadKey = ref(0)
 const dialogueOpen = ref(false)
 const advancedOpen = ref(false)
+const hasSavedApiKey = ref(false)
 
 const form = ref(emptyForm())
-const rules = computed(() => buildAgentFormRules(t))
+const rules = computed(() => buildAgentFormRules(t, { isEdit: true }))
 
 const avatarPreview = computed(() => {
   if (serverAvatarUrl.value) return serverAvatarUrl.value
@@ -83,10 +85,11 @@ async function loadAgent(id) {
     const res = await api.getUserAgent({ agent_id: id })
     const d = res.data
     agentId.value = d.id
+    hasSavedApiKey.value = !!d.has_api_key
     form.value = {
       name: d.name,
       model_name: d.model_name,
-      api_key_env_name: d.api_key_env_name,
+      api_key: '',
       description: d.description || '',
       system_prompt: d.system_prompt || '',
       enable_web: !!d.enable_web,
@@ -99,6 +102,7 @@ async function loadAgent(id) {
     pendingAvatarFile.value = null
   } catch {
     agentId.value = null
+    hasSavedApiKey.value = false
     form.value = emptyForm()
     serverAvatarUrl.value = ''
   } finally {

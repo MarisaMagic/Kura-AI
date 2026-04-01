@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "3488a63e1765035d386f05409663f55c83bfae3b3c61a932744b20ad14244dcf"  # openssl rand -hex 32
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 day
+    # 用户智能体 API Key 字段级加密：优先设置环境变量 API_KEY_ENCRYPTION_KEY（Fernet 密钥，见 cryptography.fernet.Fernet.generate_key()）
+    # 未设置时由 SECRET_KEY 派生（仅适合开发；生产请显式配置独立密钥）
+    API_KEY_ENCRYPTION_KEY: typing.Optional[str] = None
     TORTOISE_ORM: dict = {
         "connections": {
             # SQLite configuration

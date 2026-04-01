@@ -51,10 +51,14 @@
         <n-form-item path="model_name" :label="$t('views.agents.label_model_name')">
           <n-input v-model:value="form.model_name" :placeholder="$t('views.agents.placeholder_model_name')" />
         </n-form-item>
-        <n-form-item path="api_key_env_name" :label="$t('views.agents.label_api_key_env_name')">
+        <n-form-item path="api_key" :label="$t('views.agents.label_api_key')">
           <n-input
-            v-model:value="form.api_key_env_name"
-            :placeholder="$t('views.agents.placeholder_api_key_env_name')"
+            v-model:value="form.api_key"
+            type="password"
+            show-password-on="click"
+            :placeholder="
+              hasSavedApiKey ? $t('views.agents.placeholder_api_key_edit') : $t('views.agents.placeholder_api_key')
+            "
           />
         </n-form-item>
         <n-form-item :label="$t('views.agents.label_description')">
@@ -145,6 +149,7 @@ import TheIcon from '@/components/icon/TheIcon.vue'
 const props = defineProps({
   form: { type: Object, required: true },
   rules: { type: Object, required: true },
+  hasSavedApiKey: { type: Boolean, default: false },
   dialogueOpen: { type: Boolean, default: false },
   advancedOpen: { type: Boolean, default: false },
   avatarPreview: { type: String, default: '' },

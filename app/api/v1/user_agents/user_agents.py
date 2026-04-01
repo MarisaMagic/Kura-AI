@@ -7,6 +7,7 @@ from app.core.ctx import CTX_USER_ID
 from app.models.user_agent import UserAgent
 from app.schemas.base import Fail, Success, SuccessExtra
 from app.schemas.user_agent import UserAgentCreate, UserAgentUpdate
+from app.utils.api_key_crypto import encrypt_api_key
 from app.utils.user_agent_avatar import (
     agent_avatar_url,
     remove_agent_avatar_file,
@@ -16,10 +17,12 @@ from app.utils.user_agent_avatar import (
 router = APIRouter()
 
 
-async def _enrich_row(row: dict, username: str) -> dict:
-    fn = row.get("avatar_filename")
-    row["avatar_url"] = agent_avatar_url(username, fn if fn else None)
-    return row
+async def _public_agent_dict(obj: UserAgent, username: str) -> dict:
+    """不包含密文，附带 has_api_key。"""
+    d = await obj.to_dict(exclude_fields=["api_key_ciphertext"])
+    d["has_api_key"] = bool(obj.api_key_ciphertext)
+    d["avatar_url"] = agent_avatar_url(username, obj.avatar_filename)
+    return d
 
 
 @router.get("/list", summary="我的智能体列表", tags=["智能体模块"])
@@ -34,9 +37,7 @@ async def list_user_agents(
     total, objs = await user_agent_controller.list(page=page, page_size=page_size, search=q, order=["-id"])
     data = []
     for obj in objs:
-        d = await obj.to_dict()
-        await _enrich_row(d, username)
-        data.append(d)
+        data.append(await _public_agent_dict(obj, username))
     return SuccessExtra(data=data, total=total, page=page, page_size=page_size)
 
 
@@ -47,8 +48,7 @@ async def get_user_agent(agent_id: int = Query(..., description="智能体 ID"))
     obj = await user_agent_controller.get_owned(agent_id, user_id)
     if not obj:
         return Fail(code=404, msg="智能体不存在或无权限访问")
-    d = await obj.to_dict()
-    await _enrich_row(d, user_obj.username)
+    d = await _public_agent_dict(obj, user_obj.username)
     return Success(data=d)
 
 
@@ -56,11 +56,12 @@ async def get_user_agent(agent_id: int = Query(..., description="智能体 ID"))
 async def create_user_agent(body: UserAgentCreate):
     user_id = CTX_USER_ID.get()
     payload = body.model_dump()
+    plain = payload.pop("api_key")
+    payload["api_key_ciphertext"] = encrypt_api_key(plain)
     payload["user_id"] = user_id
     obj = await UserAgent.create(**payload)
     user_obj = await user_controller.get(id=user_id)
-    d = await obj.to_dict()
-    await _enrich_row(d, user_obj.username)
+    d = await _public_agent_dict(obj, user_obj.username)
     return Success(data=d, msg="创建成功")
 
 
@@ -71,11 +72,13 @@ async def update_user_agent(body: UserAgentUpdate):
     if not obj:
         return Fail(code=404, msg="智能体不存在或无权限访问")
     payload = body.model_dump(exclude={"id"})
+    api_key = payload.pop("api_key", None)
+    if api_key and api_key.strip():
+        obj.api_key_ciphertext = encrypt_api_key(api_key.strip())
     obj = obj.update_from_dict(payload)
     await obj.save()
     user_obj = await user_controller.get(id=user_id)
-    d = await obj.to_dict()
-    await _enrich_row(d, user_obj.username)
+    d = await _public_agent_dict(obj, user_obj.username)
     return Success(data=d, msg="更新成功")
 
 
