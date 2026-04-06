@@ -7,6 +7,7 @@ class UserAgent(BaseModel, TimestampMixin):
     user = fields.ForeignKeyField("models.User", related_name="user_agents", on_delete=fields.CASCADE)
     name = fields.CharField(max_length=100, description="智能体名称", index=True)
     model_name = fields.CharField(max_length=100, description="模型名称")
+    base_url = fields.CharField(max_length=512, null=True, description="OpenAI 兼容 API Base URL")
     api_key_ciphertext = fields.TextField(null=True, description="加密存储的 API Key")
     description = fields.TextField(null=True, description="简介")
     system_prompt = fields.TextField(null=True, description="提示词")

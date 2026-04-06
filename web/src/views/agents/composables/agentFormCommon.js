@@ -10,6 +10,7 @@ export function emptyForm() {
   return {
     name: '',
     model_name: '',
+    base_url: '',
     api_key: '',
     description: '',
     system_prompt: '',

@@ -51,6 +51,12 @@
         <n-form-item path="model_name" :label="$t('views.agents.label_model_name')">
           <n-input v-model:value="form.model_name" :placeholder="$t('views.agents.placeholder_model_name')" />
         </n-form-item>
+        <n-form-item path="base_url" :label="$t('views.agents.label_base_url')" :show-require-mark="false">
+          <n-input
+            v-model:value="form.base_url"
+            :placeholder="$t('views.agents.placeholder_base_url')"
+          />
+        </n-form-item>
         <n-form-item path="api_key" :label="$t('views.agents.label_api_key')">
           <n-input
             v-model:value="form.api_key"

@@ -89,6 +89,7 @@ async function loadAgent(id) {
     form.value = {
       name: d.name,
       model_name: d.model_name,
+      base_url: d.base_url || '',
       api_key: '',
       description: d.description || '',
       system_prompt: d.system_prompt || '',
