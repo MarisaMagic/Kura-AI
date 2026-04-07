@@ -245,7 +245,7 @@ async def ensure_agent_menus():
         await legacy.save()
     hub = await Menu.filter(path="/agent-hub", parent_id=0).first()
     if not hub:
-        await Menu.create(
+        hub = await Menu.create(
             menu_type=MenuType.MENU,
             name="智能体中心",
             path="/agent-hub",
@@ -257,17 +257,12 @@ async def ensure_agent_menus():
             keepalive=False,
             redirect=None,
         )
-
-
-async def sync_role_menus_with_all_menus():
-    """新菜单补授给所有角色。"""
-    all_menus = await Menu.all()
-    for role in await Role.all():
-        existing = await role.menus.all()
-        have = {m.id for m in existing}
-        for m in all_menus:
-            if m.id not in have:
-                await role.menus.add(m)
+        # 仅在新菜单首次落库时授予已有角色；不在每次启动时把「全库菜单」补回各角色，否则会覆盖管理员在角色里撤掉的菜单。
+        for role in await Role.all():
+            existing = await role.menus.all()
+            have = {m.id for m in existing}
+            if hub.id not in have:
+                await role.menus.add(hub)
 
 
 async def ensure_user_agent_apis_for_roles():
@@ -314,7 +309,6 @@ async def init_data():
     await init_menus()
     await ensure_agent_menus()
     await remove_legacy_top_menu_demo()
-    await sync_role_menus_with_all_menus()
     await init_apis()
     await init_roles()
     await ensure_user_agent_apis_for_roles()
