@@ -59,6 +59,7 @@ class ConversationStorage:
     ) -> None:
         """
         保存对话会话和消息到 PostgreSQL 数据库并更新 Redis 缓存
+        用于用户在对话过程中, 保存最新一轮对话消息到数据库并更新 Redis 缓存
         :param user_id: 用户 ID
         :param agent_id: 智能体 ID
         :param session_id: 会话 ID
@@ -146,6 +147,7 @@ class ConversationStorage:
     def load(self, user_id: int, agent_id: int, session_id: str) -> list:
         """
         从缓存或数据库加载会话消息
+        用于用户打开历史会话时，加载之前的会话消息到对话框中显示
         :param user_id: 用户 ID
         :param agent_id: 智能体 ID
         :param session_id: 会话 ID
@@ -166,6 +168,7 @@ class ConversationStorage:
     def list_session_infos(self, user_id: int, agent_id: int) -> list[dict]:
         """
         获取用户与特定 agent 的所有会话信息列表
+        用于用户打开智能体弹窗时，显示对话历史列表
         :param user_id: 用户 ID
         :param agent_id: 智能体 ID
         :return: 会话列表
@@ -280,6 +283,7 @@ class ConversationStorage:
     def delete_session(self, user_id: int, agent_id: int, session_id: str) -> bool:
         """
         删除指定会话
+        用于用户删除历史会话时，删除数据库中的会话记录并更新 Redis 缓存
         :param user_id: 用户 ID
         :param agent_id: 智能体 ID
         :param session_id: 会话 ID
