@@ -20,7 +20,11 @@
             @keydown.enter.prevent="goCreate"
           >
             <div class="agent-card-create-inner">
-              <TheIcon icon="material-symbols:add-circle-outline" :size="28" class="agent-card-create-icon" />
+              <TheIcon
+                icon="material-symbols:add-circle-outline"
+                :size="28"
+                class="agent-card-create-icon"
+              />
               <span class="agent-card-create-text">{{ $t('views.agents.card_create_agent') }}</span>
             </div>
           </n-card>
@@ -59,11 +63,25 @@
                   {{ $t('views.agents.confirm_delete') }}
                 </n-popconfirm>
               </div>
-              <div class="agent-card-main">
-                <n-avatar round :size="48" :src="item.avatar_url" object-fit="cover" class="agent-card-avatar" />
+              <div
+                class="agent-card-main"
+                role="button"
+                tabindex="0"
+                @click="goChat(item.id)"
+                @keydown.enter.prevent="goChat(item.id)"
+              >
+                <n-avatar
+                  round
+                  :size="48"
+                  :src="item.avatar_url"
+                  object-fit="cover"
+                  class="agent-card-avatar"
+                />
                 <div class="agent-card-text">
                   <div class="agent-card-title">{{ item.name }}</div>
-                  <div class="agent-card-desc">{{ item.description || $t('views.agents.text_no_description') }}</div>
+                  <div class="agent-card-desc">
+                    {{ item.description || $t('views.agents.text_no_description') }}
+                  </div>
                 </div>
               </div>
             </div>
@@ -104,6 +122,10 @@ function goCreate() {
 
 function goEdit(id) {
   router.push({ name: 'AgentEdit', params: { id: String(id) } })
+}
+
+function goChat(id) {
+  router.push({ name: 'AgentChat', params: { agentId: String(id) } })
 }
 
 async function handleDelete(id) {
@@ -174,9 +196,7 @@ onMounted(fetchList)
   height: 100%;
   display: flex;
   flex-direction: column;
-  transition:
-    box-shadow 0.2s ease,
-    border-color 0.2s ease;
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
 .agent-card :deep(.n-card) {
@@ -207,6 +227,7 @@ html.dark .agent-card:hover {
   cursor: pointer;
   border-style: dashed;
   border-width: 1px;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .agent-card--create:hover {
@@ -281,6 +302,14 @@ html.dark .agent-card:hover {
   flex: 1;
   min-height: 0;
   min-width: 0;
+  cursor: pointer;
+  border-radius: 8px;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.agent-card-main:focus-visible {
+  box-shadow: 0 0 0 2px var(--n-primary-color-suppl);
 }
 
 .agent-card-avatar {

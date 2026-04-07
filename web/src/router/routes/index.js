@@ -150,6 +150,25 @@ export const basicRoutes = [
     redirect: '/agent-hub',
     isHidden: true,
   },
+  /** 智能体对话（从智能体中心进入；勿与 /agents 下编辑器路由冲突） */
+  {
+    path: '/agent-hub/chat/:agentId',
+    component: Layout,
+    isHidden: true,
+    children: [
+      {
+        path: '',
+        name: 'AgentChat',
+        component: () => import('@/views/agent-chat/index.vue'),
+        meta: {
+          title: t('views.agents.title_agent_chat'),
+          hidden: true,
+          /** 与后端菜单「智能体中心」的 name 一致，侧栏高亮智能体中心 */
+          activeMenu: '智能体中心',
+        },
+      },
+    ],
+  },
 ]
 
 export const NOT_FOUND_ROUTE = {

@@ -1,8 +1,9 @@
 <template>
-  <div flex items-center>
+  <div min-w-0 flex flex-1 items-center>
     <MenuCollapse />
+    <AgentChatTitle />
   </div>
-  <div ml-auto flex items-center>
+  <div ml-auto flex shrink-0 items-center>
     <ThemeMode />
     <FullScreen />
     <UserAvatar />
@@ -10,6 +11,7 @@
 </template>
 
 <script setup>
+import AgentChatTitle from './components/AgentChatTitle.vue'
 import MenuCollapse from './components/MenuCollapse.vue'
 import FullScreen from './components/FullScreen.vue'
 import UserAvatar from './components/UserAvatar.vue'

@@ -1,3 +1,4 @@
+export * from './agent-chat-header'
 export * from './app'
 export * from './permission'
 export * from './tags'

@@ -4,7 +4,7 @@
       bordered
       collapse-mode="width"
       :collapsed-width="64"
-      :width="220"
+      :width="235"
       :native-scrollbar="false"
       :collapsed="appStore.collapsed"
       :class="

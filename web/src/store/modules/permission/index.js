@@ -49,6 +49,8 @@ function buildRoutes(routes = []) {
           icon: e.icon,
           order: e.order,
           keepAlive: e.keepalive,
+          /** 与侧栏菜单项 key（父级 name）一致，避免隐藏子路由 name 与菜单 key 不一致导致无法选中 */
+          activeMenu: e.name,
         },
       })
     }

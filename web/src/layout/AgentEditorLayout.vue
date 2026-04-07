@@ -5,8 +5,8 @@
         quaternary
         circle
         size="medium"
-        :title="$t('views.agents.title_back_to_hub')"
-        :aria-label="$t('views.agents.title_back_to_hub')"
+        :title="$t('views.agents.title_back')"
+        :aria-label="$t('views.agents.title_back')"
         @click="goBack"
       >
         <TheIcon icon="material-symbols:arrow-back-rounded" :size="22" />
@@ -27,8 +27,13 @@ import TheIcon from '@/components/icon/TheIcon.vue'
 
 const router = useRouter()
 
+/** 优先回到进入本页前的路由；无历史（如直接打开/刷新）时回智能体中心 */
 function goBack() {
-  router.push({ path: '/agent-hub' })
+  if (window.history.state?.back != null) {
+    router.back()
+  } else {
+    router.push({ path: '/agent-hub' })
+  }
 }
 </script>
 
