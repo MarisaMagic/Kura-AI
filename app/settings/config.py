@@ -1,10 +1,16 @@
 import os
 import typing
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, ".env")),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
     VERSION: str = "0.1.0"
     APP_TITLE: str = "Vue FastAPI Admin"
     PROJECT_NAME: str = "Vue FastAPI Admin"
@@ -99,6 +105,22 @@ class Settings(BaseSettings):
         "timezone": "Asia/Shanghai",  # Timezone setting
     }
     DATETIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
+
+    # 智能体对话：PostgreSQL（可与主库分离；未设置 CHAT_DATABASE_URL 时使用 DATABASE_URL）
+    CHAT_DATABASE_URL: typing.Optional[str] = None
+    DATABASE_URL: typing.Optional[str] = None
+    REDIS_URL: str = "redis://127.0.0.1:6379/0"
+    REDIS_KEY_PREFIX: str = "mg_agent"
+    REDIS_CACHE_TTL_SECONDS: int = 300
+
+    @property
+    def chat_database_url(self) -> str:
+        raw = (self.CHAT_DATABASE_URL or self.DATABASE_URL or "").strip()
+        if not raw:
+            raise ValueError(
+                "请配置 CHAT_DATABASE_URL 或 DATABASE_URL（PostgreSQL 连接串）用于智能体聊天存储。"
+            )
+        return raw
 
 
 settings = Settings()

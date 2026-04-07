@@ -125,7 +125,7 @@ function goEdit(id) {
 }
 
 function goChat(id) {
-  router.push({ name: 'AgentChat', params: { agentId: String(id) } })
+  router.push({ name: 'AgentChat', params: { agentId: String(id) }, query: { new: '1' } })
 }
 
 async function handleDelete(id) {

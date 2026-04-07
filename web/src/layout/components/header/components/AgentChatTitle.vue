@@ -66,9 +66,34 @@
           <div class="agent-chat-popover-history-title">
             {{ $t('views.agents.chat_popover_history_title') }}
           </div>
-          <ul class="agent-chat-popover-history-list">
+          <ul v-if="historyLoading" class="agent-chat-popover-history-list">
+            <li class="agent-chat-popover-history-placeholder">{{
+              $t('views.agents.chat_popover_history_loading')
+            }}</li>
+          </ul>
+          <ul v-else-if="historySessions.length === 0" class="agent-chat-popover-history-list">
             <li class="agent-chat-popover-history-placeholder">
               {{ $t('views.agents.chat_popover_history_empty') }}
+            </li>
+          </ul>
+          <ul v-else class="agent-chat-popover-history-list agent-chat-popover-history-list--scroll">
+            <li v-for="s in historySessions" :key="s.session_id" class="agent-chat-popover-history-item">
+              <button
+                type="button"
+                class="agent-chat-popover-history-item-main"
+                @click="openHistorySession(s.session_id)"
+              >
+                <span class="agent-chat-popover-history-title-text">{{ displaySessionTitle(s) }}</span>
+                <span class="agent-chat-popover-history-meta">{{ sessionMetaLine(s) }}</span>
+              </button>
+              <button
+                type="button"
+                class="agent-chat-popover-history-delete"
+                :aria-label="$t('views.agents.chat_popover_history_delete_aria')"
+                @click.stop="deleteHistorySession(s.session_id)"
+              >
+                <TheIcon icon="mdi:delete-outline" :size="18" />
+              </button>
             </li>
           </ul>
         </div>
@@ -78,11 +103,12 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { NAvatar, NPopover } from 'naive-ui'
 import TheIcon from '@/components/icon/TheIcon.vue'
+import api from '@/api'
 import { useAgentChatHeaderStore } from '@/store'
 import { DEFAULT_AVATAR } from '@/views/agents/composables/agentFormCommon.js'
 
@@ -92,6 +118,70 @@ const { t } = useI18n()
 const headerStore = useAgentChatHeaderStore()
 
 const popoverShow = ref(false)
+const historyLoading = ref(false)
+const historySessions = ref([])
+
+function displaySessionTitle(s) {
+  const p = (s.last_user_preview || '').trim()
+  if (p) return p
+  return t('views.agents.chat_popover_history_no_title')
+}
+
+function sessionMetaLine(s) {
+  const name = (s.agent_name || headerStore.agentTitle || '').trim()
+  const dt = (s.updated_at_display || '').trim()
+  if (name && dt) return `${name} · ${dt}`
+  return name || dt || '—'
+}
+
+async function openHistorySession(sessionId) {
+  if (!headerStore.agentId) return
+  popoverShow.value = false
+  await router.push({
+    name: 'AgentChat',
+    params: { agentId: String(headerStore.agentId) },
+    query: { session: sessionId },
+  })
+}
+
+async function loadHistorySessions() {
+  if (!headerStore.agentId) {
+    historySessions.value = []
+    return
+  }
+  historyLoading.value = true
+  try {
+    const res = await api.getAgentChatSessions({ agent_id: headerStore.agentId })
+    historySessions.value = res.data?.sessions || []
+  } catch {
+    historySessions.value = []
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function deleteHistorySession(sessionId) {
+  if (!headerStore.agentId) return
+  if (!window.confirm(t('views.agents.chat_popover_history_delete_confirm'))) return
+  try {
+    await api.deleteAgentChatSession({ agent_id: headerStore.agentId, session_id: sessionId })
+    window.$message?.success(t('views.agents.chat_popover_history_delete_ok'))
+    await loadHistorySessions()
+    if (route.query.session === sessionId) {
+      await router.replace({
+        name: 'AgentChat',
+        params: { agentId: String(headerStore.agentId) },
+        query: { new: '1' },
+      })
+    }
+  } catch {
+    window.$message?.error(t('views.agents.chat_popover_history_delete_fail'))
+  }
+}
+
+watch(popoverShow, (show) => {
+  if (show) loadHistorySessions()
+})
 
 const visible = computed(() => route.name === 'AgentChat')
 
@@ -124,13 +214,17 @@ function goEdit() {
   margin-left: 16px;
   display: flex;
   align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .agent-chat-title-btn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  max-width: min(420px, 50vw);
+  max-width: 100%;
+  min-width: 0;
   padding: 6px 10px;
   margin: 0;
   border: none;
@@ -147,6 +241,9 @@ function goEdit() {
 }
 
 .agent-chat-title-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 17px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -318,6 +415,108 @@ html.dark .agent-chat-popover-history-title {
 
 html.dark .agent-chat-popover-history-placeholder {
   color: rgba(255, 255, 255, 0.45);
+}
+
+.agent-chat-popover-history-list--scroll {
+  /* 约 4 条会话高度，其余滚动 */
+  max-height: 288px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.agent-chat-popover-history-item {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 6px;
+  margin-bottom: 8px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  overflow: hidden;
+}
+
+.agent-chat-popover-history-item:hover {
+  background: #f1f5f9;
+}
+
+html.dark .agent-chat-popover-history-item {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+html.dark .agent-chat-popover-history-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.agent-chat-popover-history-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 4px 10px 12px;
+  margin: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+.agent-chat-popover-history-title-text {
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+html.dark .agent-chat-popover-history-title-text {
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.agent-chat-popover-history-meta {
+  font-size: 12px;
+  color: #64748b;
+}
+
+html.dark .agent-chat-popover-history-meta {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.agent-chat-popover-history-delete {
+  flex-shrink: 0;
+  width: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: #94a3b8;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.agent-chat-popover-history-delete:hover {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+html.dark .agent-chat-popover-history-delete {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+html.dark .agent-chat-popover-history-delete:hover {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.12);
 }
 </style>
 

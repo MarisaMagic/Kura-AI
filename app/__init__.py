@@ -22,6 +22,14 @@ except ImportError:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_data()
+    try:
+        from app.chat.database import init_chat_db
+
+        init_chat_db()
+    except Exception as e:
+        from app.log import logger
+
+        logger.error("PostgreSQL 聊天库初始化失败（智能体对话将不可用）: %s", e)
     yield
     await Tortoise.close_connections()
 

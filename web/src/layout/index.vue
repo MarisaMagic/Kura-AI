@@ -21,7 +21,7 @@
         dark="bg-dark border-0"
         :style="`height: ${header.height}px`"
       >
-        <AppHeader />
+        <AppHeader class="min-w-0 flex-1" />
       </header>
       <section flex-1 overflow-hidden bg-white dark:bg-dark>
         <AppMain />

@@ -48,4 +48,14 @@ export default {
   deleteUserAgent: (params = {}) => request.delete('/user-agent/delete', { params }),
   uploadUserAgentAvatar: (agentId, data) =>
     request.post(`/user-agent/upload_avatar?agent_id=${agentId}`, data),
+  /** 智能体对话（DependAuth，不走菜单权限） */
+  getAgentChatSessions: (params = {}) => request.get('/user-agent/chat/sessions', { params }),
+  getAgentChatSessionMessages: (agentId, sessionId) =>
+    request.get(`/user-agent/chat/sessions/${encodeURIComponent(sessionId)}`, {
+      params: { agent_id: agentId },
+    }),
+  deleteAgentChatSession: ({ agent_id, session_id }) =>
+    request.delete(`/user-agent/chat/sessions/${encodeURIComponent(session_id)}`, {
+      params: { agent_id },
+    }),
 }

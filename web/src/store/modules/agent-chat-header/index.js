@@ -9,6 +9,8 @@ export const useAgentChatHeaderStore = defineStore('agentChatHeader', {
     subtitle: '',
     creatorName: '',
     agentId: null,
+    /** 当前会话标题（首条用户消息摘要），顶栏居中展示 */
+    sessionTitle: '',
   }),
   actions: {
     setAgentMeta({ title, avatarUrl, subtitle, creatorName, agentId } = {}) {
@@ -21,12 +23,16 @@ export const useAgentChatHeaderStore = defineStore('agentChatHeader', {
     setAgentTitle(title) {
       this.agentTitle = title || ''
     },
+    setSessionTitle(title) {
+      this.sessionTitle = (title && String(title).trim()) || ''
+    },
     clear() {
       this.agentTitle = ''
       this.avatarUrl = ''
       this.subtitle = ''
       this.creatorName = ''
       this.agentId = null
+      this.sessionTitle = ''
     },
   },
 })
