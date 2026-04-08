@@ -8,17 +8,17 @@
 
 ### 智能体中心
 
-[](./deploy/sample-picture/agent-hub.png)
+![](./deploy/sample-picture/agent-hub.png)
 
 ### 智能体对话
 
-[](./deploy/sample-picture/agent-chat-1.png)
+![](./deploy/sample-picture/agent-chat-1.png)
 
-[](./deploy/sample-picture/agent-chat-2.png)
+![](./deploy/sample-picture/agent-chat-2.png)
 
 ### 会话列表
 
-[](./deploy/sample-picture/session-list.png)
+![](./deploy/sample-picture/session-list.png)
 
 ### 本地启动
 #### 后端
