@@ -1,5 +1,3 @@
-import shutil
-
 from aerich import Command
 from fastapi import FastAPI
 from fastapi.middleware import Middleware
@@ -187,13 +185,8 @@ async def init_db():
         pass
 
     await command.init()
-    try:
-        await command.migrate()
-    except AttributeError:
-        logger.warning("unable to retrieve model history from database, model history will be created from scratch")
-        shutil.rmtree("migrations")
-        await command.init_db(safe=True)
-
+    # 不在启动时调用 command.migrate()：会对比模型生成迁移，SQLite 对「改列」会报 NotSupportError。
+    # 变更模型请在开发机执行 `aerich migrate` 并提交迁移；启动时只执行已有迁移。
     await command.upgrade(run_in_transaction=True)
     await ensure_user_avatar_column()
     await ensure_user_agent_base_url_column()

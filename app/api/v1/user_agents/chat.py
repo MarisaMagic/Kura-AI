@@ -12,6 +12,8 @@ from fastapi.responses import StreamingResponse
 from app.chat.agent_service import chat_with_agent_stream, chat_with_agent_sync
 from app.chat.storage import storage
 from app.controllers.user_agent import user_agent_controller
+from app.controllers.user_agent_recent import list_recent_agents_public, touch_recent_agent
+from app.models.user_agent import UserAgent
 from app.core.dependency import AuthControl
 from app.models import User
 from app.schemas.agent_chat import (
@@ -68,6 +70,7 @@ async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(
     session_id = (request.session_id or "default_session").strip() or "default_session"
     try:
         resp = chat_with_agent_sync(ua, request.message.strip(), user_id, request.agent_id, session_id)
+        await touch_recent_agent(user_id, request.agent_id)
         return Success(data=ChatResponse(**resp).model_dump())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -90,6 +93,7 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
         try:
             async for chunk in chat_with_agent_stream(ua, request.message.strip(), user_id, request.agent_id, session_id):
                 yield chunk
+            await touch_recent_agent(user_id, request.agent_id)
         except Exception as e:
             err = {"type": "error", "content": str(e)}
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
@@ -105,27 +109,101 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
     )
 
 
+def _enrich_session_rows(ua, items: list[dict]) -> list[SessionInfo]:
+    agent_name = (ua.name or "").strip()
+    enriched = []
+    for x in items:
+        row = dict(x)
+        row.setdefault("last_user_preview", "")
+        row.setdefault("agent_id", ua.id)
+        row["agent_name"] = agent_name
+        row["updated_at_display"] = _session_updated_at_display(row.get("updated_at") or "")
+        enriched.append(SessionInfo(**row))
+    return enriched
+
+
+async def _enrich_all_user_sessions(user_id: int, items: list[dict]) -> list[SessionInfo]:
+    """跨智能体会话列表：按 agent_id 批量补全智能体名称。"""
+    agent_ids = list({int(x["agent_id"]) for x in items if x.get("agent_id") is not None})
+    names: dict[int, str] = {}
+    if agent_ids:
+        agents = await UserAgent.filter(user_id=user_id, id__in=agent_ids).all()
+        for a in agents:
+            names[a.id] = (a.name or "").strip()
+    enriched = []
+    for x in items:
+        row = dict(x)
+        row.setdefault("last_user_preview", "")
+        aid = row.get("agent_id")
+        if aid is not None:
+            row["agent_id"] = int(aid)
+            row["agent_name"] = names.get(int(aid), "")
+        else:
+            row["agent_name"] = ""
+        row["updated_at_display"] = _session_updated_at_display(row.get("updated_at") or "")
+        enriched.append(SessionInfo(**row))
+    return enriched
+
+
 @router.get("/chat/sessions", summary="当前用户在某智能体下的会话列表", tags=["智能体模块"])
 async def list_chat_sessions(
     agent_id: int = Query(..., description="智能体 ID"),
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=100,
+        description="分页条数；不传则返回全量（兼容旧客户端，走缓存）",
+    ),
+    offset: int = Query(0, ge=0, description="分页偏移"),
     current_user: User = Depends(AuthControl.is_authed),
 ):
     user_id = current_user.id
     ua = await user_agent_controller.get_owned(agent_id, user_id)
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
-    items = storage.list_session_infos(user_id, agent_id)
-    agent_name = (ua.name or "").strip()
-    enriched = []
-    for x in items:
-        row = dict(x)
-        row.setdefault("last_user_preview", "")
-        row["agent_name"] = agent_name
-        row["updated_at_display"] = _session_updated_at_display(row.get("updated_at") or "")
-        enriched.append(SessionInfo(**row))
-    sessions = enriched
-    sessions.sort(key=lambda x: x.updated_at, reverse=True)
-    return Success(data=SessionListResponse(sessions=sessions).model_dump())
+
+    if limit is None:
+        items = storage.list_session_infos(user_id, agent_id)
+        enriched = _enrich_session_rows(ua, items)
+        enriched.sort(key=lambda x: x.updated_at, reverse=True)
+        body = SessionListResponse(
+            sessions=enriched,
+            total=len(enriched),
+            has_more=False,
+        )
+        return Success(data=body.model_dump())
+
+    items, total = storage.list_session_infos_paginated(user_id, agent_id, limit, offset)
+    enriched = _enrich_session_rows(ua, items)
+    has_more = offset + len(enriched) < total
+    body = SessionListResponse(
+        sessions=enriched,
+        total=total,
+        has_more=has_more,
+    )
+    return Success(data=body.model_dump())
+
+
+@router.get(
+    "/chat/sessions/all",
+    summary="当前用户全部智能体下的会话列表（按最近时间，分页）",
+    tags=["智能体模块"],
+)
+async def list_chat_sessions_all(
+    limit: int = Query(30, ge=1, le=100, description="分页条数"),
+    offset: int = Query(0, ge=0, description="分页偏移"),
+    current_user: User = Depends(AuthControl.is_authed),
+):
+    user_id = current_user.id
+    items, total = storage.list_session_infos_all_paginated(user_id, limit, offset)
+    enriched = await _enrich_all_user_sessions(user_id, items)
+    has_more = offset + len(enriched) < total
+    body = SessionListResponse(
+        sessions=enriched,
+        total=total,
+        has_more=has_more,
+    )
+    return Success(data=body.model_dump())
 
 
 @router.get(
@@ -174,3 +252,23 @@ async def delete_chat_session(
         raise HTTPException(status_code=404, detail="会话不存在")
     body = SessionDeleteResponse(session_id=session_id, message="已删除会话").model_dump()
     return Success(data=body)
+
+
+@router.get("/recent_agents", summary="最近使用的智能体（最多3个）", tags=["智能体模块"])
+async def get_recent_agents(current_user: User = Depends(AuthControl.is_authed)):
+    user_id = current_user.id
+    agents = await list_recent_agents_public(user_id)
+    return Success(data={"agents": agents})
+
+
+@router.post("/recent_agents/touch", summary="记录使用某智能体（更新最近使用并裁剪为最多3条）", tags=["智能体模块"])
+async def post_recent_agents_touch(
+    agent_id: int = Query(..., description="智能体 ID"),
+    current_user: User = Depends(AuthControl.is_authed),
+):
+    user_id = current_user.id
+    ok = await touch_recent_agent(user_id, agent_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
+    agents = await list_recent_agents_public(user_id)
+    return Success(data={"agents": agents})

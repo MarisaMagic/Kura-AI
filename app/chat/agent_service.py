@@ -1,4 +1,6 @@
-"""LangChain Agent 对话（同步 invoke + 异步 SSE 流式）。"""
+"""
+LangChain Agent 对话（同步 invoke + 异步 SSE 流式）。
+"""
 
 from __future__ import annotations
 

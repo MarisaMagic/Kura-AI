@@ -30,12 +30,15 @@ class SessionInfo(BaseModel):
     updated_at: str
     message_count: int
     last_user_preview: str = ""
+    agent_id: int | None = None
     agent_name: str = ""
     updated_at_display: str = ""
 
 
 class SessionListResponse(BaseModel):
     sessions: list[SessionInfo]
+    total: int = 0
+    has_more: bool = False
 
 
 class SessionDeleteResponse(BaseModel):

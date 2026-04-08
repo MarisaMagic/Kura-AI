@@ -16,6 +16,33 @@ from app.chat.db_models import ChatSession as ChatSessionRow
 
 
 class ConversationStorage:
+    def _build_session_info_dict(self, db, s: ChatSessionRow) -> dict:
+        """
+        由会话 ORM 行生成列表项（预览与计数），供全量列表与分页列表复用。
+        """
+        count = db.query(ChatMessageRow).filter(ChatMessageRow.session_ref_id == s.id).count()
+        last_human = (
+            db.query(ChatMessageRow)
+            .filter(
+                ChatMessageRow.session_ref_id == s.id,
+                ChatMessageRow.message_type == "human",
+            )
+            .order_by(desc(ChatMessageRow.id))
+            .first()
+        )
+        preview = ""
+        if last_human and (last_human.content or "").strip():
+            preview = (last_human.content or "").strip().replace("\n", " ")
+            if len(preview) > 120:
+                preview = preview[:120] + "…"
+        return {
+            "session_id": s.session_id,
+            "agent_id": s.agent_id,
+            "updated_at": s.updated_at.isoformat(),
+            "message_count": count,
+            "last_user_preview": preview,
+        }
+
     @staticmethod
     def _messages_cache_key(user_id: int, agent_id: int, session_id: str) -> str:
         """
@@ -29,6 +56,13 @@ class ConversationStorage:
         生成会话缓存的 Redis 键
         """
         return f"chat_sessions:{user_id}:{agent_id}"
+
+    @staticmethod
+    def _sessions_all_cache_key(user_id: int) -> str:
+        """
+        当前用户跨全部智能体的会话列表（有序，与侧栏「最近对话」分页一致）
+        """
+        return f"chat_sessions_all:{user_id}"
 
     @staticmethod
     def _to_langchain_messages(records: list[dict]) -> list:
@@ -141,6 +175,7 @@ class ConversationStorage:
             cache.set_json(self._messages_cache_key(user_id, agent_id, session_id), serialized)
             # 8. 删除会话缓存 (使用 _sessions_cache_key)
             cache.delete(self._sessions_cache_key(user_id, agent_id))
+            cache.delete(self._sessions_all_cache_key(user_id))
         finally:
             db.close()
 
@@ -185,42 +220,66 @@ class ConversationStorage:
             sessions = (
                 db.query(ChatSessionRow)
                 .filter(ChatSessionRow.user_id == user_id, ChatSessionRow.agent_id == agent_id)
-                .order_by(ChatSessionRow.updated_at.desc())
+                .order_by(desc(ChatSessionRow.updated_at), desc(ChatSessionRow.id))
                 .all()
             )
-            result = [] # 会话信息列表
-            # 遍历会话列表, 获取会话信息
-            for s in sessions:
-                count = db.query(ChatMessageRow).filter(ChatMessageRow.session_ref_id == s.id).count() # 获取会话消息数量
-                # 获取最后一条人类消息
-                last_human = (
-                    db.query(ChatMessageRow)
-                    .filter(
-                        ChatMessageRow.session_ref_id == s.id,
-                        ChatMessageRow.message_type == "human",
-                    )
-                    .order_by(desc(ChatMessageRow.id))
-                    .first()
-                )
-                preview = "" # 最后一条人类消息的预览文本
-                if last_human and (last_human.content or "").strip():
-                    preview = (last_human.content or "").strip().replace("\n", " ")
-                    if len(preview) > 120:
-                        preview = preview[:120] + "…"
-                # 将会话信息添加到会话信息列表 (session_id, updated_at, message_count, last_user_preview)
-                result.append(
-                    {
-                        "session_id": s.session_id,
-                        "updated_at": s.updated_at.isoformat(),
-                        "message_count": count,
-                        "last_user_preview": preview,
-                    }
-                )
+            result = [self._build_session_info_dict(db, s) for s in sessions]
             # 3. 更新 Redis 缓存 (使用 _sessions_cache_key)
             # 将会话信息列表添加到 Redis 缓存
             cache.set_json(self._sessions_cache_key(user_id, agent_id), result)
             # 返回会话信息列表
             return result
+        finally:
+            db.close()
+
+    def list_session_infos_paginated(
+        self, user_id: int, agent_id: int, limit: int, offset: int
+    ) -> tuple[list[dict], int]:
+        """
+        分页查询会话列表（直接查库，不走全量 Redis 缓存）。
+        按 updated_at 降序，同时间以 id 降序。
+        """
+        db = SessionLocal()
+        try:
+            q = db.query(ChatSessionRow).filter(
+                ChatSessionRow.user_id == user_id,
+                ChatSessionRow.agent_id == agent_id,
+            )
+            total = q.count()
+            rows = (
+                q.order_by(desc(ChatSessionRow.updated_at), desc(ChatSessionRow.id))
+                .offset(offset)
+                .limit(limit)
+                .all()
+            )
+            items = [self._build_session_info_dict(db, s) for s in rows]
+            return items, total
+        finally:
+            db.close()
+
+    def list_session_infos_all_paginated(
+        self, user_id: int, limit: int, offset: int
+    ) -> tuple[list[dict], int]:
+        """
+        分页查询当前用户全部智能体下的会话（不按 agent 过滤），按 updated_at 降序。
+        优先读 Redis 全量列表缓存（与单智能体 list_session_infos 类似），未命中则查库并回填。
+        """
+        key = self._sessions_all_cache_key(user_id)
+        cached = cache.get_json(key)
+        if cached is not None:
+            total = len(cached)
+            return cached[offset : offset + limit], total
+
+        db = SessionLocal()
+        try:
+            q = db.query(ChatSessionRow).filter(ChatSessionRow.user_id == user_id)
+            rows = (
+                q.order_by(desc(ChatSessionRow.updated_at), desc(ChatSessionRow.id)).all()
+            )
+            items = [self._build_session_info_dict(db, s) for s in rows]
+            cache.set_json(key, items)
+            total = len(items)
+            return items[offset : offset + limit], total
         finally:
             db.close()
 
@@ -313,6 +372,7 @@ class ConversationStorage:
             cache.delete(self._messages_cache_key(user_id, agent_id, session_id))
             # 删除 Redis 缓存 (使用 _sessions_cache_key)
             cache.delete(self._sessions_cache_key(user_id, agent_id))
+            cache.delete(self._sessions_all_cache_key(user_id))
             return True
         finally:
             db.close()
