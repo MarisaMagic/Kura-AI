@@ -14,8 +14,7 @@ class UserAgent(BaseModel, TimestampMixin):
     enable_web = fields.BooleanField(default=False, description="联网能力")
     enable_code = fields.BooleanField(default=False, description="写代码能力")
     opening_message = fields.TextField(null=True, description="开场白")
-    # SQLite 列默认仍为 0.7（见迁移）；应用层默认 0.1 由 Pydantic / 前端表单提供
-    temperature = fields.FloatField(default=0.7, description="温度")
+    temperature = fields.FloatField(default=0.1, description="温度")
     avatar_filename = fields.CharField(max_length=255, null=True, description="自定义头像文件名")
 
     class Meta:
