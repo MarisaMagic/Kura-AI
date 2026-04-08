@@ -22,6 +22,17 @@
                   <TheIcon icon="mdi:account-outline" :size="16" />
                   <span>{{ $t('views.agents.chat_label_creator') }} · {{ userStore.name }}</span>
                 </p>
+                <div
+                  v-if="hasIntroOpeningText"
+                  class="agent-chat-intro-opening"
+                >
+                  <n-spin v-if="introOpeningRunning && !introOpeningDisplayed" size="small" />
+                  <div
+                    v-else-if="introOpeningDisplayed"
+                    class="agent-chat-intro-opening-md"
+                    v-html="renderAgentChatMarkdown(introOpeningDisplayed)"
+                  />
+                </div>
               </div>
             </transition>
 
@@ -254,6 +265,14 @@ const sessionPhase = ref('intro')
 const messages = ref([])
 const inputText = ref('')
 const sending = ref(false)
+/** 新建对话 intro 内本地流式展示的开场白（不入库） */
+const introOpeningDisplayed = ref('')
+const introOpeningRunning = ref(false)
+let introOpeningGeneration = 0
+
+const INTRO_OPENING_START_DELAY_MS = 450
+const INTRO_OPENING_CHAR_DELAY_MS = 72
+
 const pendingFiles = ref([])
 const bodyScrollRef = ref(null)
 /** 是否在滚动容器底部附近（用于隐藏「回到底部」） */
@@ -335,55 +354,97 @@ async function loadMessagesForSession(agentId, sid) {
   scrollBodyToBottom()
 }
 
+const hasIntroOpeningText = computed(() => {
+  const s = String(agent.value?.opening_message || '').trim()
+  return s.length > 0
+})
+
+function stopIntroOpening() {
+  introOpeningGeneration += 1
+  introOpeningDisplayed.value = ''
+  introOpeningRunning.value = false
+}
+
+async function maybeStartIntroOpening() {
+  if (!getToken()) return
+  if (!agent.value) return
+  if (pageLoading.value || loadError.value) return
+  const full = String(agent.value.opening_message || '').trim()
+  if (!full) return
+  if (sessionPhase.value !== 'intro') return
+  if (messages.value.length > 0) return
+
+  introOpeningGeneration += 1
+  const gen = introOpeningGeneration
+  introOpeningDisplayed.value = ''
+  introOpeningRunning.value = true
+
+  await nextTick()
+  await new Promise((r) => setTimeout(r, INTRO_OPENING_START_DELAY_MS))
+  if (gen !== introOpeningGeneration) return
+
+  for (let i = 0; i < full.length; i += 1) {
+    if (gen !== introOpeningGeneration) return
+    introOpeningDisplayed.value += full[i]
+    await new Promise((r) => setTimeout(r, INTRO_OPENING_CHAR_DELAY_MS))
+  }
+  if (gen !== introOpeningGeneration) return
+  introOpeningRunning.value = false
+}
+
 async function initChatSessionState() {
   if (!agent.value) return
   const agentId = agent.value.id
   const token = getToken()
   if (!token) return
 
-  if (route.query.new === '1' || route.query.new === 1) {
-    clearStoredSessionId(agentId)
+  try {
+    if (route.query.new === '1' || route.query.new === 1) {
+      clearStoredSessionId(agentId)
+      sessionId.value = `session_${Date.now()}`
+      messages.value = []
+      sessionPhase.value = 'intro'
+      ignoreNextQueryWatch.value = true
+      await router.replace({
+        name: 'AgentChat',
+        params: { agentId: String(agentId) },
+        query: {},
+      })
+      return
+    }
+
+    const sid = route.query.session
+    if (sid && typeof sid === 'string') {
+      try {
+        await loadMessagesForSession(agentId, sid)
+        persistSessionId(agentId, sid)
+      } catch {
+        sessionId.value = `session_${Date.now()}`
+        messages.value = []
+        sessionPhase.value = 'intro'
+      }
+      return
+    }
+
+    const stored = readStoredSessionId(agentId)
+    if (stored) {
+      sessionId.value = stored
+      try {
+        await loadMessagesForSession(agentId, stored)
+      } catch {
+        sessionId.value = `session_${Date.now()}`
+        messages.value = []
+        sessionPhase.value = 'intro'
+      }
+      return
+    }
+
     sessionId.value = `session_${Date.now()}`
     messages.value = []
     sessionPhase.value = 'intro'
-    ignoreNextQueryWatch.value = true
-    await router.replace({
-      name: 'AgentChat',
-      params: { agentId: String(agentId) },
-      query: {},
-    })
-    return
+  } finally {
+    await maybeStartIntroOpening()
   }
-
-  const sid = route.query.session
-  if (sid && typeof sid === 'string') {
-    try {
-      await loadMessagesForSession(agentId, sid)
-      persistSessionId(agentId, sid)
-    } catch {
-      sessionId.value = `session_${Date.now()}`
-      messages.value = []
-      sessionPhase.value = 'intro'
-    }
-    return
-  }
-
-  const stored = readStoredSessionId(agentId)
-  if (stored) {
-    sessionId.value = stored
-    try {
-      await loadMessagesForSession(agentId, stored)
-    } catch {
-      sessionId.value = `session_${Date.now()}`
-      messages.value = []
-      sessionPhase.value = 'intro'
-    }
-    return
-  }
-
-  sessionId.value = `session_${Date.now()}`
-  messages.value = []
-  sessionPhase.value = 'intro'
 }
 
 const agentAvatarSrc = computed(() => agent.value?.avatar_url || DEFAULT_AVATAR)
@@ -524,7 +585,8 @@ async function loadAgent() {
   }
 }
 
-function restartChat() {
+async function restartChat() {
+  stopIntroOpening()
   if (abortController) {
     abortController.abort()
     abortController = null
@@ -539,13 +601,15 @@ function restartChat() {
   sessionId.value = `session_${Date.now()}`
   if (aid) persistSessionId(aid, sessionId.value)
   ignoreNextQueryWatch.value = true
-  router.replace({
+  await router.replace({
     name: 'AgentChat',
     params: { agentId: String(route.params.agentId) },
     query: {},
   })
   agentSidebarStore.bumpRefresh()
   window.$message?.success(t('views.agents.chat_msg_restart_ok'))
+  await nextTick()
+  await maybeStartIntroOpening()
 }
 
 async function submitMessage() {
@@ -575,6 +639,10 @@ async function submitMessage() {
     role: 'user',
     content: rawInput || text,
     attachments: attachments.length ? attachments : undefined,
+  }
+
+  if (sessionPhase.value === 'intro') {
+    stopIntroOpening()
   }
 
   const wasIntro = sessionPhase.value === 'intro'
@@ -712,6 +780,7 @@ async function submitMessage() {
 watch(
   () => route.params.agentId,
   (newId, oldId) => {
+    stopIntroOpening()
     if (abortController) {
       abortController.abort()
       abortController = null
@@ -795,6 +864,10 @@ watch(
 
 watch(sessionPhase, () => nextTick(() => updateScrollBottomState()))
 
+watch(introOpeningDisplayed, () => {
+  nextTick(() => scrollBodyToBottom())
+})
+
 onMounted(async () => {
   if (getToken()) {
     try {
@@ -808,6 +881,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  stopIntroOpening()
   if (abortController) {
     abortController.abort()
     abortController = null
@@ -971,6 +1045,29 @@ html.dark .agent-chat-intro-avatar {
   gap: 6px;
   font-size: 13px;
   color: var(--n-text-color-3);
+}
+
+/* 与 .agent-chat-intro-sub 同宽：不 stretch，避免 <p> 撑满整列 */
+.agent-chat-intro-opening {
+  margin-top: 20px;
+  max-width: 560px;
+  text-align: left;
+  min-height: 24px;
+}
+
+.agent-chat-intro-opening-md {
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--n-text-color-2);
+  word-break: break-word;
+}
+
+.agent-chat-intro-opening-md :deep(p) {
+  margin: 0.35em 0;
+}
+
+.agent-chat-intro-opening-md :deep(p:first-child) {
+  margin-top: 0;
 }
 
 /* —— 信息流（助手左对齐；用户右对齐气泡）—— */
