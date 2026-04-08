@@ -70,6 +70,15 @@ pnpm i # 或者 npm i
 pnpm dev
 ```
 
+#### 数据库
+
+使用 docker 部署 PostgreSQL、Redis、Milvus 镜像服务:
+
+```sh
+# 读取当前目录下的 docker-compose.yml 文件，并启动其中定义的所有服务。
+docker compose up -d
+```
+
 ### 目录说明
 
 ```
