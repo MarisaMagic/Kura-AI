@@ -262,14 +262,22 @@ class ConversationStorage:
     ) -> tuple[list[dict], int]:
         """
         分页查询当前用户全部智能体下的会话（不按 agent 过滤），按 updated_at 降序。
-        优先读 Redis 全量列表缓存（与单智能体 list_session_infos 类似），未命中则查库并回填。
+        优先读 Redis 全量列表缓存，未命中则查库并回填。
+        用于用户打开侧栏「最近对话」时，显示全部智能体下的会话列表
+        :param user_id: 用户 ID
+        :param limit: 分页条数
+        :param offset: 分页偏移
+        :return: 会话列表
         """
+        # 1. 检查 Redis 全量列表缓存, 如果存在则直接返回
         key = self._sessions_all_cache_key(user_id)
         cached = cache.get_json(key)
         if cached is not None:
+            # 返回分页后的会话列表
             total = len(cached)
             return cached[offset : offset + limit], total
 
+        # 2. 如果 Redis 全量列表缓存不存在, 则从数据库加载会话列表
         db = SessionLocal()
         try:
             q = db.query(ChatSessionRow).filter(ChatSessionRow.user_id == user_id)
@@ -277,8 +285,11 @@ class ConversationStorage:
                 q.order_by(desc(ChatSessionRow.updated_at), desc(ChatSessionRow.id)).all()
             )
             items = [self._build_session_info_dict(db, s) for s in rows]
+            # 3. 更新 Redis 全量列表缓存 (使用 _sessions_all_cache_key)
+            # 将会话列表添加到 Redis 全量列表缓存
             cache.set_json(key, items)
             total = len(items)
+            # 返回分页后的会话列表
             return items[offset : offset + limit], total
         finally:
             db.close()
