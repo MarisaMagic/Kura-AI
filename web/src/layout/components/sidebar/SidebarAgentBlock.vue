@@ -234,6 +234,10 @@ html.dark .layout-sider-agent-label {
   border-color: #e2e8f0;
 }
 
+.layout-sider-agent-row--current .layout-sider-agent-row-text {
+  font-weight: 600;
+}
+
 html.dark .layout-sider-agent-row--current {
   background: rgba(255, 255, 255, 0.08);
   border-color: rgba(255, 255, 255, 0.1);

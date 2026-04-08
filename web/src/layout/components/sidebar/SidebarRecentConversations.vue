@@ -491,6 +491,11 @@ html.dark .layout-sider-history-session--active {
   background: rgba(255, 255, 255, 0.1);
 }
 
+.layout-sider-history-session--active .layout-sider-history-session-title,
+.layout-sider-history-session--active .layout-sider-history-session-meta {
+  font-weight: 600;
+}
+
 .layout-sider-history-session-main {
   flex: 1;
   min-width: 0;
