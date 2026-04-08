@@ -2,11 +2,11 @@
   <AppPage :show-footer="false" scroll-in-parent class="agent-chat-page !p-0">
     <div class="agent-chat-layout">
       <n-spin :show="pageLoading" class="agent-chat-spin">
-        <div v-if="loadError" class="agent-chat-error">
-          {{ $t('views.agents.chat_error_load_agent') }}
-        </div>
-        <template v-else>
-          <div ref="bodyScrollRef" class="agent-chat-body" @scroll.passive="onBodyScroll">
+          <div v-if="loadError" class="agent-chat-error">
+            {{ $t('views.agents.chat_error_load_agent') }}
+          </div>
+          <template v-else>
+            <div ref="bodyScrollRef" class="agent-chat-body" @scroll.passive="onBodyScroll">
             <transition name="agent-chat-fade">
               <div v-if="sessionPhase === 'intro'" key="intro" class="agent-chat-intro">
                 <n-avatar
@@ -236,7 +236,7 @@ import TheIcon from '@/components/icon/TheIcon.vue'
 import api from '@/api'
 import { getToken } from '@/utils'
 import { renderAgentChatMarkdown } from '@/utils/agentChatMarkdown'
-import { useAgentChatHeaderStore, useUserStore } from '@/store'
+import { useAgentChatHeaderStore, useAgentSidebarStore, useRecentAgentsStore, useUserStore } from '@/store'
 import { DEFAULT_AVATAR } from '@/views/agents/composables/agentFormCommon.js'
 
 const { t } = useI18n()
@@ -244,6 +244,8 @@ const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 const agentChatHeaderStore = useAgentChatHeaderStore()
+const agentSidebarStore = useAgentSidebarStore()
+const recentAgentsStore = useRecentAgentsStore()
 
 const pageLoading = ref(true)
 const loadError = ref(false)
@@ -518,6 +520,7 @@ async function loadAgent() {
   }
   if (agent.value) {
     await initChatSessionState()
+    agentSidebarStore.bumpRefresh()
   }
 }
 
@@ -541,6 +544,7 @@ function restartChat() {
     params: { agentId: String(route.params.agentId) },
     query: {},
   })
+  agentSidebarStore.bumpRefresh()
   window.$message?.success(t('views.agents.chat_msg_restart_ok'))
 }
 
@@ -623,6 +627,8 @@ async function submitMessage() {
       throw new Error(detail)
     }
 
+    await recentAgentsStore.touch(agentId)
+
     const reader = response.body?.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
@@ -699,6 +705,7 @@ async function submitMessage() {
     abortController = null
     if (agentId && sessionId.value) persistSessionId(agentId, sessionId.value)
     scrollBodyToBottom()
+    agentSidebarStore.bumpRefresh()
   }
 }
 

@@ -96,7 +96,16 @@
       "chat_copy_md_tooltip": "复制 Markdown 原文",
       "chat_copy_success": "已复制到剪贴板",
       "chat_copy_fail": "复制失败，请检查浏览器权限",
-      "chat_go_bottom": "回到底部"
+      "chat_go_bottom": "回到底部",
+      "chat_sidebar_section_agents": "智能体",
+      "chat_sidebar_section_history": "最近对话",
+      "chat_sidebar_recent_agent": "最近使用",
+      "chat_sidebar_more_agents": "更多智能体",
+      "chat_sidebar_loading": "加载中…",
+      "chat_sidebar_empty": "暂无对话",
+      "chat_sidebar_delete": "删除会话",
+      "chat_sidebar_load_more": "加载更多…",
+      "chat_sidebar_no_recent_agents": "暂无最近使用，请从智能体中心进入对话"
     },
     "profile": {
       "label_profile": "个人中心",

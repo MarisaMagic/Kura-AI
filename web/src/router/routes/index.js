@@ -7,26 +7,8 @@ const AgentEditorLayout = () => import('@/layout/AgentEditorLayout.vue')
 export const basicRoutes = [
   {
     path: '/',
-    redirect: '/workbench', // 默认跳转到首页
+    redirect: '/agent-hub',
     meta: { order: 0 },
-  },
-  {
-    name: t('views.workbench.label_workbench'),
-    path: '/workbench',
-    component: Layout,
-    children: [
-      {
-        path: '',
-        component: () => import('@/views/workbench/index.vue'),
-        name: `${t('views.workbench.label_workbench')}Default`,
-        meta: {
-          title: t('views.workbench.label_workbench'),
-          icon: 'icon-park-outline:workbench',
-          affix: true,
-        },
-      },
-    ],
-    meta: { order: 1 },
   },
   {
     name: t('views.profile.label_profile'),
@@ -51,6 +33,7 @@ export const basicRoutes = [
     name: 'ErrorPage',
     path: '/error-page',
     component: Layout,
+    isHidden: true,
     redirect: '/error-page/404',
     meta: {
       title: t('views.errors.label_error'),

@@ -16,6 +16,14 @@
 import { usePermissionStore, useAppStore } from '@/store'
 import { renderCustomIcon, renderIcon, isExternal } from '@/utils'
 
+const props = defineProps({
+  /** 传入则只渲染该子集；不传则使用权限侧栏全部菜单 */
+  menuRoutes: {
+    type: Array,
+    default: null,
+  },
+})
+
 const router = useRouter()
 const curRoute = useRoute()
 const permissionStore = usePermissionStore()
@@ -24,7 +32,8 @@ const appStore = useAppStore()
 const activeKey = computed(() => curRoute.meta?.activeMenu || curRoute.name)
 
 const menuOptions = computed(() => {
-  return permissionStore.menus.map((item) => getMenuItem(item)).sort((a, b) => a.order - b.order)
+  const source = props.menuRoutes != null ? props.menuRoutes : permissionStore.menus
+  return source.map((item) => getMenuItem(item)).sort((a, b) => a.order - b.order)
 })
 
 const menu = ref(null)

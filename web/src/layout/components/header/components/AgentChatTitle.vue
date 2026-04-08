@@ -92,7 +92,7 @@
                 :aria-label="$t('views.agents.chat_popover_history_delete_aria')"
                 @click.stop="deleteHistorySession(s.session_id)"
               >
-                <TheIcon icon="mdi:delete-outline" :size="18" />
+                <TheIcon icon="mdi:delete-outline" :size="16" />
               </button>
             </li>
           </ul>
@@ -427,13 +427,14 @@ html.dark .agent-chat-popover-history-placeholder {
 .agent-chat-popover-history-item {
   display: flex;
   flex-direction: row;
-  align-items: stretch;
+  align-items: center;
   gap: 6px;
   margin-bottom: 8px;
   border-radius: 10px;
   background: #f8fafc;
   border: 1px solid #e2e8f0;
   overflow: hidden;
+  padding-right: 4px;
 }
 
 .agent-chat-popover-history-item:hover {
@@ -492,13 +493,15 @@ html.dark .agent-chat-popover-history-meta {
 
 .agent-chat-popover-history-delete {
   flex-shrink: 0;
-  width: 36px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
   margin: 0;
   padding: 0;
   border: none;
+  border-radius: 50%;
   background: transparent;
   cursor: pointer;
   color: #94a3b8;
@@ -507,7 +510,7 @@ html.dark .agent-chat-popover-history-meta {
 
 .agent-chat-popover-history-delete:hover {
   color: #ef4444;
-  background: rgba(239, 68, 68, 0.08);
+  background: rgba(239, 68, 68, 0.1);
 }
 
 html.dark .agent-chat-popover-history-delete {
@@ -516,7 +519,7 @@ html.dark .agent-chat-popover-history-delete {
 
 html.dark .agent-chat-popover-history-delete:hover {
   color: #f87171;
-  background: rgba(248, 113, 113, 0.12);
+  background: rgba(248, 113, 113, 0.15);
 }
 </style>
 

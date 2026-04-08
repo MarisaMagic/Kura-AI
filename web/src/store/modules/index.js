@@ -1,5 +1,7 @@
 export * from './agent-chat-header'
+export * from './agent-sidebar'
 export * from './app'
 export * from './permission'
+export * from './recent-agents'
 export * from './tags'
 export * from './user'

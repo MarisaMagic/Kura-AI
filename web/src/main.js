@@ -1,3 +1,5 @@
+import 'virtual:svg-icons-register'
+
 /** 重置样式 */
 import '@/styles/reset.css'
 /** 思源黑体（简体）：Noto Sans SC，与 Source Han Sans 同源 */

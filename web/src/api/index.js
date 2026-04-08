@@ -50,6 +50,8 @@ export default {
     request.post(`/user-agent/upload_avatar?agent_id=${agentId}`, data),
   /** 智能体对话（DependAuth，不走菜单权限） */
   getAgentChatSessions: (params = {}) => request.get('/user-agent/chat/sessions', { params }),
+  /** 当前用户全部智能体下的会话（按最近时间） */
+  getAgentChatSessionsAll: (params = {}) => request.get('/user-agent/chat/sessions/all', { params }),
   getAgentChatSessionMessages: (agentId, sessionId) =>
     request.get(`/user-agent/chat/sessions/${encodeURIComponent(sessionId)}`, {
       params: { agent_id: agentId },
@@ -58,4 +60,6 @@ export default {
     request.delete(`/user-agent/chat/sessions/${encodeURIComponent(session_id)}`, {
       params: { agent_id },
     }),
+  getRecentAgents: () => request.get('/user-agent/recent_agents'),
+  touchRecentAgent: (params = {}) => request.post('/user-agent/recent_agents/touch', null, { params }),
 }

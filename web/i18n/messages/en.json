@@ -96,7 +96,16 @@
       "chat_copy_md_tooltip": "Copy Markdown source",
       "chat_copy_success": "Copied to clipboard",
       "chat_copy_fail": "Copy failed; check browser permissions",
-      "chat_go_bottom": "Scroll to bottom"
+      "chat_go_bottom": "Scroll to bottom",
+      "chat_sidebar_section_agents": "Agents",
+      "chat_sidebar_section_history": "Recent conversations",
+      "chat_sidebar_recent_agent": "Recently used",
+      "chat_sidebar_more_agents": "More agents",
+      "chat_sidebar_loading": "Loading…",
+      "chat_sidebar_empty": "No conversations yet",
+      "chat_sidebar_delete": "Delete conversation",
+      "chat_sidebar_load_more": "Load more…",
+      "chat_sidebar_no_recent_agents": "No recent agents yet. Open a chat from the agent hub."
     },
     "profile": {
       "label_profile": "Profile",
