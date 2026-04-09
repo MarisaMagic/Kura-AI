@@ -17,6 +17,7 @@ db.sqlite3-wal
 data/
 
 .cursor/
+.env
 
 migrations/
 
