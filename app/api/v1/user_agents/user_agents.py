@@ -8,6 +8,8 @@ from app.models.user_agent import UserAgent
 from app.schemas.base import Fail, Success, SuccessExtra
 from app.schemas.user_agent import UserAgentCreate, UserAgentUpdate
 from app.utils.api_key_crypto import encrypt_api_key
+from app.kb.kb_scope import kb_scope_for
+from app.kb.kb_service import purge_kb_for_scope
 from app.utils.user_agent_avatar import (
     agent_avatar_url,
     remove_agent_avatar_file,
@@ -90,8 +92,13 @@ async def delete_user_agent(agent_id: int = Query(..., description="智能体 ID
     if not obj:
         return Fail(code=404, msg="智能体不存在或无权限访问")
     fn = obj.avatar_filename
+    aid = obj.id
     await obj.delete()
     remove_agent_avatar_file(user_obj.username, fn)
+    try:
+        purge_kb_for_scope(kb_scope_for(user_id, aid), user_id, aid)
+    except Exception:
+        pass
     return Success(msg="删除成功")
 
 
