@@ -34,7 +34,11 @@ class ParentChunkStore:
         return f"kb_parent_chunk:{chunk_id}"
 
     def upsert_documents(self, docs: List[dict]) -> int:
-        """批量插入或更新知识库父级分块"""
+        """
+        批量插入或更新知识库父级分块
+        :param docs: 知识库父级分块列表
+        :return: 插入或更新的父块数量
+        """
         if not docs:
             return 0
         # 创建 PostgreSQL 会话
@@ -81,7 +85,11 @@ class ParentChunkStore:
         return upserted
 
     def get_documents_by_ids(self, chunk_ids: List[str]) -> List[dict]:
-        """根据 chunk_ids 获取知识库父级分块"""
+        """
+        根据 chunk_ids 获取知识库父级分块
+        :param chunk_ids: 分块ID列表
+        :return: 知识库父级分块列表
+        """
         if not chunk_ids:
             return []
         ordered: dict[str, dict] = {}
@@ -114,7 +122,11 @@ class ParentChunkStore:
         return [ordered[i] for i in chunk_ids if i in ordered]
 
     def delete_by_kb_scope(self, kb_scope: str) -> int:
-        """根据 kb_scope 删除知识库父级分块"""
+        """
+        根据 kb_scope 删除知识库父级分块
+        :param kb_scope: 知识库范围
+        :return: 删除的父块数量
+        """
         if not kb_scope:
             return 0
         db = SessionLocal()
@@ -138,7 +150,12 @@ class ParentChunkStore:
             db.close()
 
     def delete_by_kb_scope_and_filename(self, kb_scope: str, filename: str) -> int:
-        """根据 kb_scope 和 filename 删除知识库父级分块"""
+        """
+        根据 kb_scope 和 filename 删除知识库父级分块
+        :param kb_scope: 知识库范围
+        :param filename: 文件名
+        :return: 删除的父块数量
+        """
         if not kb_scope or not filename:
             return 0
         db = SessionLocal()

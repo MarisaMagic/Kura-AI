@@ -15,6 +15,11 @@ def _dense_dim() -> int:
 
 
 def milvus_escape(s: str) -> str:
+    """
+    转义 Milvus 过滤表达式中的特殊字符
+    :param s: 字符串
+    :return: 转义后的字符串
+    """
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
@@ -342,6 +347,7 @@ class MilvusManager:
     def delete(self, filter_expr: str) -> None:
         """
         删除数据
+        根据过滤表达式删除 Milvus 中的数据
         :param filter_expr: 过滤表达式
         :return: None
         """
