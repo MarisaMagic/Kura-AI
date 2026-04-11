@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     CORS_ALLOW_HEADERS: typing.List = ["*"]
 
     DEBUG: bool = True
+    # 为 True 时，用户每轮对话在服务端终端打印：知识库工具返回内容、含工具结果后的完整 LLM 输入消息
+    DEBUG_AGENT_KB_PROMPT: bool = True
 
     PROJECT_ROOT: str = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     BASE_DIR: str = os.path.abspath(os.path.join(PROJECT_ROOT, os.pardir))
@@ -112,6 +114,31 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://127.0.0.1:6379/0"
     REDIS_KEY_PREFIX: str = "mg_agent"
     REDIS_CACHE_TTL_SECONDS: int = 300
+    # 智能体对话异步 Job（刷新后可重连 SSE）在 Redis 中的 TTL（秒）
+    CHAT_JOB_TTL_SECONDS: int = 86400
+
+    # 全局嵌入（DashScope 兼容 OpenAI /embeddings）
+    EMBEDDING_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    EMBEDDING_MODEL: str = "text-embedding-v3"
+    EMBEDDING_API_KEY: typing.Optional[str] = None
+    EMBEDDING_DIM: int = 1024
+    EMBEDDING_BATCH_SIZE: int = 10
+
+    # Milvus
+    MILVUS_HOST: str = "127.0.0.1"
+    MILVUS_PORT: str = "19530"
+    MILVUS_COLLECTION: str = "mg_agent_kb"
+
+    # 智能体知识库文档根目录：data/user_agent_docs/user_{id}/{agent_id}/
+    USER_AGENT_KB_DOCS_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_docs")
+
+    # RAG：可选单独指定打分模型；未设置则与智能体对话模型相同
+    RAG_GRADE_MODEL: typing.Optional[str] = None
+
+    # Auto-merge / 叶子层（与 SuperMew 一致）
+    AUTO_MERGE_ENABLED: bool = True
+    AUTO_MERGE_THRESHOLD: int = 2
+    LEAF_RETRIEVE_LEVEL: int = 3
 
     @property
     def chat_database_url(self) -> str:
