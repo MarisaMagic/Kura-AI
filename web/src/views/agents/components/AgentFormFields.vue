@@ -24,12 +24,12 @@
               />
             </div>
             <n-upload
-              :key="avatarUploadKey"
+              :key="`${avatarUploadKey}-${innerUploadKey}`"
               accept="image/png,image/jpeg,image/gif,image/webp"
               :max="1"
               :show-file-list="false"
               :default-upload="false"
-              @change="(o) => emit('avatar-change', o)"
+              @change="onAvatarUploadChange"
             >
               <n-button
                 class="agent-avatar-edit-btn"
@@ -145,12 +145,20 @@
       </div>
     </section>
   </n-form>
+
+  <AgentAvatarCropModal
+    :show="cropModalShow"
+    :file="cropSourceFile"
+    @update:show="onCropModalShowUpdate"
+    @confirm="onAvatarCropConfirm"
+  />
 </template>
 
 <script setup>
 import { ref } from 'vue'
 import { NButton, NForm, NFormItem, NImage, NInput, NSlider, NSwitch, NUpload } from 'naive-ui'
 import TheIcon from '@/components/icon/TheIcon.vue'
+import AgentAvatarCropModal from '@/views/agents/components/AgentAvatarCropModal.vue'
 
 const props = defineProps({
   form: { type: Object, required: true },
@@ -166,6 +174,37 @@ const props = defineProps({
 const emit = defineEmits(['avatar-change', 'update:dialogueOpen', 'update:advancedOpen'])
 
 const formInnerRef = ref(null)
+const innerUploadKey = ref(0)
+const cropModalShow = ref(false)
+const cropSourceFile = ref(null)
+
+function onAvatarUploadChange(options) {
+  const f = options.fileList?.[0]?.file
+  const list = options.fileList || []
+  if (!f && list.length === 0) {
+    emit('avatar-change', options)
+    return
+  }
+  if (f) {
+    cropSourceFile.value = f
+    cropModalShow.value = true
+  }
+}
+
+function onCropModalShowUpdate(val) {
+  const wasOpen = cropModalShow.value
+  cropModalShow.value = val
+  if (wasOpen && !val && cropSourceFile.value) {
+    innerUploadKey.value += 1
+    cropSourceFile.value = null
+  }
+}
+
+function onAvatarCropConfirm(croppedFile) {
+  cropSourceFile.value = null
+  innerUploadKey.value += 1
+  emit('avatar-change', { fileList: [{ file: croppedFile }] })
+}
 
 function toggleDialogue() {
   emit('update:dialogueOpen', !props.dialogueOpen)
