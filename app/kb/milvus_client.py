@@ -45,7 +45,7 @@ class MilvusManager:
         """
         self.host = (settings.MILVUS_HOST or "127.0.0.1").strip()
         self.port = (settings.MILVUS_PORT or "19530").strip()
-        self.collection_name = (settings.MILVUS_COLLECTION or "mg_agent_kb").strip()
+        self.collection_name = (settings.MILVUS_COLLECTION or "kura_ai_kb").strip()
         self.uri = f"http://{self.host}:{self.port}"
         self.client: MilvusClient | None = None
 
@@ -61,7 +61,7 @@ class MilvusManager:
     def init_collection(self, dense_dim: int | None = None) -> None:
         """
         初始化 Milvus 集合
-        创建一个名为 mg_agent_kb 的集合，并添加以下字段：
+        创建一个名为 kura_ai_kb 的集合，并添加以下字段：
         - id: 主键
         - dense_embedding: 密集向量
         - sparse_embedding: 稀疏向量
