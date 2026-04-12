@@ -387,16 +387,26 @@ watch(
 <style scoped>
 .layout-sider-history {
   padding: 8px 10px 12px;
+  box-sizing: border-box;
+}
+
+.layout-sider-history:not(.layout-sider-history--collapsed) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .layout-sider-history--collapsed {
-  padding: 6px 0 8px;
+  padding: 2px 0 8px;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
   align-items: center;
+  justify-content: flex-start;
 }
 
 .layout-sider-history-label {
+  flex-shrink: 0;
   font-size: 12px;
   color: #94a3b8;
   margin-bottom: 8px;
@@ -435,10 +445,19 @@ html.dark .layout-sider-history-label {
 }
 
 .layout-sider-history-scroll {
-  max-height: 280px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding-right: 2px;
-  scrollbar-width: thin;
+  overflow-x: hidden;
+  /* 隐藏滚动条，仍可滚动 */
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.layout-sider-history-scroll::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .layout-sider-history-scroll--popover {

@@ -41,6 +41,16 @@
                   quaternary
                   circle
                   size="small"
+                  :title="$t('views.agents.kb_configure')"
+                  :aria-label="$t('views.agents.kb_configure')"
+                  @click="goKnowledgeBase(item.id)"
+                >
+                  <TheIcon icon="material-symbols:menu-book-outline" :size="20" />
+                </n-button>
+                <n-button
+                  quaternary
+                  circle
+                  size="small"
                   :title="$t('common.buttons.edit')"
                   :aria-label="$t('common.buttons.edit')"
                   @click="goEdit(item.id)"
@@ -122,6 +132,10 @@ function goCreate() {
 
 function goEdit(id) {
   router.push({ name: 'AgentEdit', params: { id: String(id) } })
+}
+
+function goKnowledgeBase(id) {
+  router.push({ name: 'AgentKnowledgeBase', params: { agentId: String(id) } })
 }
 
 function goChat(id) {

@@ -126,6 +126,15 @@ export const basicRoutes = [
           hidden: true,
         },
       },
+      {
+        name: 'AgentKnowledgeBase',
+        path: 'kb/:agentId',
+        component: () => import('@/views/agents/knowledge-base/index.vue'),
+        meta: {
+          title: t('views.agents.title_knowledge_base'),
+          hidden: true,
+        },
+      },
     ],
   },
   {

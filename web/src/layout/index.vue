@@ -5,7 +5,7 @@
       collapse-mode="width"
       :collapsed-width="64"
       :width="235"
-      :native-scrollbar="false"
+      :native-scrollbar="true"
       :collapsed="appStore.collapsed"
       :class="
         appStore.collapsed ? 'bg-white dark:bg-dark' : 'bg-hex-f5f6fb dark:bg-hex-101014'
@@ -74,8 +74,29 @@ watchEffect(() => {
 </script>
 
 <style scoped>
-/* 让侧栏底色铺满，避免内层滚动容器覆盖主题默认背景 */
+/*
+ * native-scrollbar=false 时侧栏用 NScrollbar 包裹，.n-layout-sider-scroll-container 不存在，
+ * 外层仍会滚动。改为 native + 禁止本容器滚动，仅 Sidebar 内 .layout-sider-history-scroll 滚动。
+ */
+.layout-sider {
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+
 .layout-sider :deep(.n-layout-sider-scroll-container) {
   background: transparent !important;
+  overflow: hidden !important;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.layout-sider :deep(.n-layout-sider-scroll-container > *) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 </style>

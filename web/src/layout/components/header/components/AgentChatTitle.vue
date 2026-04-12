@@ -418,10 +418,18 @@ html.dark .agent-chat-popover-history-placeholder {
 }
 
 .agent-chat-popover-history-list--scroll {
-  /* 约 4 条会话高度，其余滚动 */
+  /* 约 4 条会话高度，其余滚动；隐藏滚动条但保留滚动 */
   max-height: 288px;
   overflow-y: auto;
   padding-right: 2px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.agent-chat-popover-history-list--scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .agent-chat-popover-history-item {

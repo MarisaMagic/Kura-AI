@@ -67,5 +67,33 @@ class RedisCache:
         except Exception:
             return
 
+    def rpush_json(self, key: str, value: Any) -> int:
+        """列表尾部追加 JSON 元素，返回列表长度。"""
+        try:
+            payload = json.dumps(value, ensure_ascii=False)
+            return int(self._get_client().rpush(self._key(key), payload))
+        except Exception:
+            return 0
+
+    def lrange_str(self, key: str, start: int, end: int) -> list[str]:
+        """按索引范围读取列表元素（字符串）。"""
+        try:
+            raw = self._get_client().lrange(self._key(key), start, end)
+            return list(raw) if raw else []
+        except Exception:
+            return []
+
+    def llen(self, key: str) -> int:
+        try:
+            return int(self._get_client().llen(self._key(key)))
+        except Exception:
+            return 0
+
+    def expire(self, key: str, seconds: int) -> None:
+        try:
+            self._get_client().expire(self._key(key), seconds)
+        except Exception:
+            pass
+
 
 cache = RedisCache()

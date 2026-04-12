@@ -184,7 +184,7 @@ watch(
 }
 
 .layout-sider-agent--collapsed {
-  padding: 6px 0 8px;
+  padding: 4px 0 2px;
   display: flex;
   justify-content: center;
   align-items: center;

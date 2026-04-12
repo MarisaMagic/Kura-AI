@@ -1,10 +1,10 @@
 <p align="center">
   <a href="https://github.com/mizhexiaoxiao/vue-fastapi-admin">
-    <img alt="Vue FastAPI Admin Logo" width="200" src="https://github.com/mizhexiaoxiao/vue-fastapi-admin/blob/main/deploy/sample-picture/logo.svg">
+    <img alt="Kura AI Logo" width="200" src="https://github.com/mizhexiaoxiao/vue-fastapi-admin/blob/main/deploy/sample-picture/logo.svg">
   </a>
 </p>
 
-<h1 align="center">MG-Agent</h1>
+<h1 align="center">Kura AI</h1>
 
 ### 智能体中心
 

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from app.chat.agent_service import chat_with_agent_stream, chat_with_agent_sync
+from app.chat.chat_job import create_chat_job, get_job_meta, iter_job_sse_events, verify_job_owner
 from app.chat.storage import storage
 from app.controllers.user_agent import user_agent_controller
 from app.controllers.user_agent_recent import list_recent_agents_public, touch_recent_agent
@@ -17,6 +18,7 @@ from app.models.user_agent import UserAgent
 from app.core.dependency import AuthControl
 from app.models import User
 from app.schemas.agent_chat import (
+    ChatJobCreateResponse,
     ChatRequest,
     ChatResponse,
     MessageInfo,
@@ -74,7 +76,14 @@ async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     session_id = (request.session_id or "default_session").strip() or "default_session"
     try:
-        resp = chat_with_agent_sync(ua, request.message.strip(), user_id, request.agent_id, session_id)
+        resp = chat_with_agent_sync(
+            ua,
+            request.message.strip(),
+            user_id,
+            request.agent_id,
+            session_id,
+            use_knowledge_retrieval=request.use_knowledge_retrieval,
+        )
         await touch_recent_agent(user_id, request.agent_id)
         return Success(data=ChatResponse(**resp).model_dump())
     except ValueError as e:
@@ -109,7 +118,14 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
     async def event_generator():
         try:
             # 调用智能体异步对话函数，流式返回响应
-            async for chunk in chat_with_agent_stream(ua, request.message.strip(), user_id, request.agent_id, session_id):
+            async for chunk in chat_with_agent_stream(
+                ua,
+                request.message.strip(),
+                user_id,
+                request.agent_id,
+                session_id,
+                use_knowledge_retrieval=request.use_knowledge_retrieval,
+            ):
                 yield chunk
             # 更新最近使用智能体
             await touch_recent_agent(user_id, request.agent_id)
@@ -119,6 +135,67 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
 
     # 返回流式响应
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/chat/jobs", summary="创建异步对话 Job（可刷新后重连 SSE）", tags=["智能体模块"])
+async def create_chat_job_endpoint(request: ChatRequest, current_user: User = Depends(AuthControl.is_authed)):
+    user_id = current_user.id
+    ua = await user_agent_controller.get_owned(request.agent_id, user_id)
+    if not ua:
+        raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
+    session_id = (request.session_id or "default_session").strip() or "default_session"
+    job_id, is_dup = await create_chat_job(
+        user_id=user_id,
+        agent_id=request.agent_id,
+        session_id=session_id,
+        message=request.message.strip(),
+        use_knowledge_retrieval=request.use_knowledge_retrieval,
+    )
+    if is_dup:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "该会话已有进行中的生成任务，请使用 existing_job_id 重连 SSE。",
+                "existing_job_id": job_id,
+            },
+        )
+    return Success(data=ChatJobCreateResponse(job_id=job_id).model_dump())
+
+
+@router.get("/chat/jobs/{job_id}", summary="查询对话 Job 状态", tags=["智能体模块"])
+async def get_chat_job_endpoint(job_id: str, current_user: User = Depends(AuthControl.is_authed)):
+    meta = get_job_meta(job_id)
+    if not meta or int(meta.get("user_id", -1)) != int(current_user.id):
+        raise HTTPException(status_code=404, detail="任务不存在或无权限")
+    return Success(data=meta)
+
+
+@router.get(
+    "/chat/jobs/{job_id}/stream",
+    summary="订阅对话 Job 的 SSE（支持 since_seq 断点续传）",
+    tags=["智能体模块"],
+)
+async def chat_job_stream_endpoint(
+    job_id: str,
+    since_seq: int = Query(0, ge=0, description="从 Redis 事件列表的下标开始接收（重连时传入已收到条数）"),
+    current_user: User = Depends(AuthControl.is_authed),
+):
+    if not verify_job_owner(job_id, current_user.id):
+        raise HTTPException(status_code=404, detail="任务不存在或无权限")
+
+    async def event_generator():
+        async for line in iter_job_sse_events(job_id, since_seq=since_seq):
+            yield line
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -307,6 +384,7 @@ async def get_chat_session_messages(
             content=m["content"],
             timestamp=m["timestamp"],
             rag_trace=m.get("rag_trace"),
+            rag_steps=m.get("rag_steps"),
         )
         for m in raw
     ]

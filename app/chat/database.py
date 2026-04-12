@@ -52,7 +52,14 @@ def init_chat_db() -> None:
     """
     import app.chat.db_models  # noqa: F401
 
+    from sqlalchemy import text
+
     Base.metadata.create_all(bind=engine)
+    # create_all 不会为已有表添加新列，需显式迁移
+    with engine.begin() as conn:
+        conn.execute(
+            text("ALTER TABLE mg_chat_messages ADD COLUMN IF NOT EXISTS rag_steps JSON")
+        )
 
 
 def get_db_session() -> Session:

@@ -79,9 +79,11 @@
                         >
                           <TheIcon icon="mdi:lightbulb-outline" :size="16" class="agent-chat-thinking-icon" />
                           <span>{{
-                            m.pending
-                              ? $t('views.agents.chat_feed_thinking')
-                              : $t('views.agents.chat_feed_thinking_done')
+                            m.pending && m.ragSteps?.length
+                              ? m.ragSteps[m.ragSteps.length - 1].label
+                              : m.pending
+                                ? $t('views.agents.chat_feed_thinking')
+                                : $t('views.agents.chat_feed_thinking_done')
                           }}</span>
                           <TheIcon
                             :icon="m.thinkingOpen ? 'mdi:chevron-up' : 'mdi:chevron-down'"
@@ -90,17 +92,54 @@
                           />
                         </button>
                         <div v-show="m.thinkingOpen" class="agent-chat-thinking-panel">
-                          {{ $t('views.agents.chat_feed_thinking_placeholder') }}
+                          <div v-if="m.ragSteps?.length" class="agent-chat-thinking-steps">
+                            <div
+                              v-for="(step, sIdx) in m.ragSteps"
+                              :key="sIdx"
+                              class="agent-chat-thinking-step-line"
+                            >
+                              <span class="agent-chat-thinking-step-icon">{{ step.icon || '▸' }}</span>
+                              <span class="agent-chat-thinking-step-label">{{ step.label }}</span>
+                              <span v-if="step.detail" class="agent-chat-thinking-step-detail">{{
+                                step.detail
+                              }}</span>
+                            </div>
+                          </div>
+                          <p v-else class="agent-chat-thinking-placeholder">
+                            {{ $t('views.agents.chat_feed_thinking_placeholder') }}
+                          </p>
+                          <details v-if="m.ragTrace && Object.keys(m.ragTrace).length" class="agent-chat-rag-trace">
+                            <summary>{{ $t('views.agents.chat_thinking_trace_summary') }}</summary>
+                            <div class="agent-chat-rag-trace-lines">
+                              <div v-if="m.ragTrace.retrieval_mode" class="agent-chat-trace-line">
+                                {{ $t('views.agents.chat_thinking_trace_mode') }}：{{
+                                  m.ragTrace.retrieval_mode
+                                }}
+                              </div>
+                              <div v-if="m.ragTrace.retrieval_stage" class="agent-chat-trace-line">
+                                {{ $t('views.agents.chat_thinking_trace_stage') }}：{{
+                                  m.ragTrace.retrieval_stage
+                                }}
+                              </div>
+                              <div v-if="m.ragTrace.grade_score" class="agent-chat-trace-line">
+                                {{ $t('views.agents.chat_thinking_trace_grade') }}：{{
+                                  m.ragTrace.grade_score
+                                }}
+                              </div>
+                              <div v-if="m.ragTrace.rewrite_strategy" class="agent-chat-trace-line">
+                                {{ m.ragTrace.rewrite_strategy }}
+                              </div>
+                            </div>
+                          </details>
                         </div>
                       </div>
 
                       <div class="agent-chat-feed-body">
-                        <template v-if="m.pending">
-                          <n-spin size="small" />
-                        </template>
-                        <template v-else>
-                          <div class="agent-chat-md" v-html="renderAgentChatMarkdown(m.content)" />
-                        </template>
+                        <div
+                          v-if="!m.pending"
+                          class="agent-chat-md"
+                          v-html="renderAgentChatMarkdown(m.content)"
+                        />
                       </div>
                       <div
                         v-if="!m.pending && (m.content || '').trim()"
@@ -156,6 +195,15 @@
                   </template>
                   {{ $t('views.agents.chat_button_restart') }}
                 </n-button>
+                <div class="agent-chat-kb-toggle">
+                  <n-switch
+                    :value="useKnowledgeRetrieval"
+                    :disabled="sending"
+                    size="small"
+                    @update:value="onKbToggle"
+                  />
+                  <span class="agent-chat-kb-toggle-label">{{ $t('views.agents.chat_kb_retrieval') }}</span>
+                </div>
                 <span v-if="showGoBottomButton" class="agent-chat-toolbar-go">
                   <n-tooltip :show-arrow="false" placement="top-end">
                     <template #trigger>
@@ -220,7 +268,6 @@
                     circle
                     class="agent-chat-send"
                     :disabled="sendDisabled"
-                    :loading="sending"
                     :title="$t('views.agents.chat_button_send')"
                     @click="submitMessage"
                   >
@@ -241,7 +288,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useEventListener } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { NAvatar, NButton, NInput, NSpin, NTag, NTooltip, NUpload } from 'naive-ui'
+import { NAvatar, NButton, NInput, NSpin, NSwitch, NTag, NTooltip, NUpload } from 'naive-ui'
 import AppPage from '@/components/page/AppPage.vue'
 import TheIcon from '@/components/icon/TheIcon.vue'
 import api from '@/api'
@@ -265,6 +312,8 @@ const sessionPhase = ref('intro')
 const messages = ref([])
 const inputText = ref('')
 const sending = ref(false)
+/** 开启时允许后端注册知识库检索工具；关闭则仅通用知识（按会话持久化，新会话默认关） */
+const useKnowledgeRetrieval = ref(false)
 /** 新建对话 intro 内本地流式展示的开场白（不入库） */
 const introOpeningDisplayed = ref('')
 const introOpeningRunning = ref(false)
@@ -301,12 +350,11 @@ function onBodyScroll() {
 }
 const uploadResetKey = ref(0)
 const sessionId = ref(`session_${Date.now()}`)
-let abortController = null
 let fileIdSeq = 0
 const baseDocTitle = import.meta.env.VITE_TITLE || ''
 const baseApi = import.meta.env.VITE_BASE_API || '/api/v1'
 
-const SESSION_KEY_PREFIX = 'mg_agent_chat_session_'
+const SESSION_KEY_PREFIX = 'kura_ai_chat_session_'
 const ignoreNextQueryWatch = ref(false)
 
 function sessionStorageKey(agentId) {
@@ -337,6 +385,238 @@ function clearStoredSessionId(agentId) {
   }
 }
 
+/** 按 agentId + sessionId 记忆知识库开关，刷新后保持；新 session 无记录时默认关 */
+const KB_TOGGLE_PREFIX = 'kura_ai_kb_'
+
+function kbToggleStorageKey(agentId, sid) {
+  return `${KB_TOGGLE_PREFIX}${agentId}_${sid}`
+}
+
+function readKbPreference(agentId, sid) {
+  if (!agentId || !sid) return false
+  try {
+    const v = sessionStorage.getItem(kbToggleStorageKey(agentId, sid))
+    if (v === null) return false
+    return v === 'true'
+  } catch {
+    return false
+  }
+}
+
+function writeKbPreference(agentId, sid, val) {
+  try {
+    if (agentId && sid) sessionStorage.setItem(kbToggleStorageKey(agentId, sid), val ? 'true' : 'false')
+  } catch {
+    /* ignore */
+  }
+}
+
+function applyKbPreferenceForCurrentSession() {
+  const aid = agent.value?.id
+  if (!aid) return
+  useKnowledgeRetrieval.value = readKbPreference(aid, sessionId.value)
+}
+
+function onKbToggle(val) {
+  useKnowledgeRetrieval.value = val
+  const aid = agent.value?.id
+  if (aid && sessionId.value) writeKbPreference(aid, sessionId.value, val)
+}
+
+const PENDING_JOB_PREFIX = 'kura_ai_chat_job_'
+
+function pendingJobStorageKey(agentId, sid) {
+  return `${PENDING_JOB_PREFIX}${agentId}_${sid}`
+}
+
+function savePendingChatJob(agentId, sid, payload) {
+  try {
+    if (agentId && sid && payload?.job_id) {
+      sessionStorage.setItem(pendingJobStorageKey(agentId, sid), JSON.stringify(payload))
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function readPendingChatJob(agentId, sid) {
+  try {
+    const s = sessionStorage.getItem(pendingJobStorageKey(agentId, sid))
+    if (!s) return null
+    return JSON.parse(s)
+  } catch {
+    return null
+  }
+}
+
+function clearPendingChatJob(agentId, sid) {
+  try {
+    if (agentId && sid) sessionStorage.removeItem(pendingJobStorageKey(agentId, sid))
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 将单条 SSE JSON 事件应用到助手消息行（与流式接口字段一致） */
+function applyChatSsePayload(data, idx) {
+  if (idx === -1) return
+  if (data.type === 'content') {
+    const row = messages.value[idx]
+    messages.value[idx] = {
+      ...row,
+      content: (row.content || '') + (data.content || ''),
+      pending: false,
+      thinkingOpen: row.thinkingOpen ?? false,
+      ragSteps: row.ragSteps || [],
+      ragTrace: row.ragTrace ?? null,
+    }
+  } else if (data.type === 'rag_step') {
+    const cur = messages.value[idx]
+    const nextSteps = [...(cur.ragSteps || []), data.step || {}]
+    messages.value[idx] = {
+      ...cur,
+      ragSteps: nextSteps,
+      thinkingOpen: true,
+      pending: cur.pending,
+    }
+  } else if (data.type === 'trace') {
+    const cur = messages.value[idx]
+    messages.value[idx] = {
+      ...cur,
+      ragTrace: data.rag_trace || null,
+      pending: cur.pending,
+    }
+  } else if (data.type === 'error') {
+    const cur = messages.value[idx]
+    messages.value[idx] = {
+      ...cur,
+      content: `${cur.content || ''}\n[Error: ${data.content}]`,
+      pending: false,
+      thinkingOpen: cur.thinkingOpen ?? false,
+      ragSteps: cur.ragSteps || [],
+      ragTrace: cur.ragTrace ?? null,
+    }
+  } else if (data.type === 'done') {
+    const row = messages.value[idx]
+    messages.value[idx] = { ...row, pending: false }
+  }
+}
+
+async function readChatJobSseStream(reader, decoder, idx, jobId, agentId, initialSeq = 0) {
+  let buffer = ''
+  let seq = initialSeq
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+
+    let eventEndIndex
+    while ((eventEndIndex = buffer.indexOf('\n\n')) !== -1) {
+      const eventStr = buffer.slice(0, eventEndIndex)
+      buffer = buffer.slice(eventEndIndex + 2)
+
+      if (!eventStr.startsWith('data: ')) continue
+      const dataStr = eventStr.slice(6)
+      if (dataStr === '[DONE]') {
+        clearPendingChatJob(agentId, sessionId.value)
+        continue
+      }
+      try {
+        const data = JSON.parse(dataStr)
+        applyChatSsePayload(data, idx)
+        seq += 1
+        savePendingChatJob(agentId, sessionId.value, { job_id: jobId, seq })
+        if (data.type === 'done') {
+          clearPendingChatJob(agentId, sessionId.value)
+        }
+      } catch (e) {
+        console.warn('SSE parse error:', e)
+      }
+    }
+    scrollBodyToBottom()
+  }
+  if (idx !== -1 && messages.value[idx]?.pending) {
+    const row = messages.value[idx]
+    messages.value[idx] = { ...row, pending: false }
+  }
+}
+
+async function maybeResumePendingChatJob() {
+  const agentId = agent.value?.id
+  const token = getToken()
+  if (!agentId || !token || sending.value || pageLoading.value || loadError.value) return
+
+  const pj = readPendingChatJob(agentId, sessionId.value)
+  if (!pj?.job_id) return
+
+  try {
+    const metaRes = await fetch(`${baseApi}/user-agent/chat/jobs/${pj.job_id}`, {
+      headers: { token },
+    })
+    if (!metaRes.ok) {
+      clearPendingChatJob(agentId, sessionId.value)
+      return
+    }
+    const metaBody = await metaRes.json()
+    const meta = metaBody.data ?? metaBody
+    if (meta.status !== 'running') {
+      clearPendingChatJob(agentId, sessionId.value)
+      return
+    }
+  } catch {
+    return
+  }
+
+  const last = messages.value[messages.value.length - 1]
+  let idx = -1
+  // 复用当前页里「仍在生成」的助手气泡时，只需从已收条数继续拉；刷新后从接口重载历史时没有未落库的助手行，会走 else 新建空气泡，必须从 Redis 下标 0 重放，否则会丢掉 pj.seq 之前的已生成内容。
+  const reuseAssistantRow = last?.role === 'assistant' && last?.pending
+  if (reuseAssistantRow) {
+    idx = messages.value.length - 1
+  } else {
+    const assistantId = `a-resume-${Date.now()}`
+    messages.value.push({
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      pending: true,
+      thinkingOpen: true,
+      ragSteps: [],
+      ragTrace: null,
+    })
+    idx = messages.value.length - 1
+    sessionPhase.value = 'chat'
+  }
+
+  sending.value = true
+  const sinceSeq = reuseAssistantRow ? (pj.seq ?? 0) : 0
+  try {
+    const streamRes = await fetch(
+      `${baseApi}/user-agent/chat/jobs/${pj.job_id}/stream?since_seq=${sinceSeq}`,
+      {
+        headers: { token },
+      }
+    )
+    if (!streamRes.ok) {
+      clearPendingChatJob(agentId, sessionId.value)
+      return
+    }
+    const reader = streamRes.body?.getReader()
+    const decoder = new TextDecoder()
+    if (!reader) return
+    await readChatJobSseStream(reader, decoder, idx, pj.job_id, agentId, sinceSeq)
+    await recentAgentsStore.touch(agentId)
+  } catch (e) {
+    console.warn('resume job stream:', e)
+  } finally {
+    sending.value = false
+    scrollBodyToBottom()
+    agentSidebarStore.bumpRefresh()
+  }
+}
+
 async function loadMessagesForSession(agentId, sid) {
   const res = await api.getAgentChatSessionMessages(agentId, sid)
   const rows = res.data?.messages || []
@@ -346,6 +626,8 @@ async function loadMessagesForSession(agentId, sid) {
     content: row.content || '',
     pending: false,
     thinkingOpen: row.type === 'human' ? undefined : false,
+    ragSteps: Array.isArray(row.rag_steps) ? row.rag_steps : [],
+    ragTrace: row.rag_trace || null,
   }))
   messages.value = list
   sessionId.value = sid
@@ -443,17 +725,20 @@ async function initChatSessionState() {
     messages.value = []
     sessionPhase.value = 'intro'
   } finally {
+    applyKbPreferenceForCurrentSession()
     await maybeStartIntroOpening()
+    await maybeResumePendingChatJob()
   }
 }
 
 const agentAvatarSrc = computed(() => agent.value?.avatar_url || DEFAULT_AVATAR)
 
-/** 顶部会话标题：首条用户消息摘要，否则智能体名 */
+/** 顶部会话标题：最新一条用户提问摘要，否则智能体名 */
 const chatSessionTitle = computed(() => {
-  const firstUser = messages.value.find((m) => m.role === 'user' && (m.content || '').trim())
-  if (firstUser) {
-    const line = (firstUser.content || '').trim().replace(/\s+/g, ' ')
+  const users = messages.value.filter((m) => m.role === 'user' && (m.content || '').trim())
+  const lastUser = users.length ? users[users.length - 1] : null
+  if (lastUser) {
+    const line = (lastUser.content || '').trim().replace(/\s+/g, ' ')
     if (line.length > 48) return `${line.slice(0, 48)}…`
     return line
   }
@@ -587,10 +872,6 @@ async function loadAgent() {
 
 async function restartChat() {
   stopIntroOpening()
-  if (abortController) {
-    abortController.abort()
-    abortController = null
-  }
   const aid = agent.value?.id
   if (aid) clearStoredSessionId(aid)
   messages.value = []
@@ -600,6 +881,7 @@ async function restartChat() {
   uploadResetKey.value += 1
   sessionId.value = `session_${Date.now()}`
   if (aid) persistSessionId(aid, sessionId.value)
+  applyKbPreferenceForCurrentSession()
   ignoreNextQueryWatch.value = true
   await router.replace({
     name: 'AgentChat',
@@ -654,6 +936,8 @@ async function submitMessage() {
   pendingFiles.value = []
   uploadResetKey.value += 1
   scrollBodyToBottom()
+  // 立即持久化 session_id，避免刷新后 pending job 的 session 与 sessionStorage 不一致
+  persistSessionId(agentId, sessionId.value)
 
   const assistantId = `a-${Date.now()}`
   messages.value.push({
@@ -662,15 +946,16 @@ async function submitMessage() {
     content: '',
     pending: true,
     thinkingOpen: false,
+    ragSteps: [],
+    ragTrace: null,
   })
   sending.value = true
   scrollBodyToBottom()
 
   const idx = messages.value.findIndex((m) => m.id === assistantId)
-  abortController = new AbortController()
 
   try {
-    const response = await fetch(`${baseApi}/user-agent/chat/stream`, {
+    const postRes = await fetch(`${baseApi}/user-agent/chat/jobs`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -680,14 +965,51 @@ async function submitMessage() {
         agent_id: agentId,
         message: text,
         session_id: sessionId.value,
+        use_knowledge_retrieval: useKnowledgeRetrieval.value,
       }),
-      signal: abortController.signal,
     })
 
-    if (!response.ok) {
-      let detail = `HTTP ${response.status}`
+    let jobId
+    let startSeq = 0
+    if (postRes.status === 409) {
+      const errBody = await postRes.json()
+      jobId = errBody.detail?.existing_job_id
+      if (!jobId) {
+        throw new Error(
+          typeof errBody.detail === 'string' ? errBody.detail : errBody.detail?.message || '任务冲突'
+        )
+      }
+      const pj = readPendingChatJob(agentId, sessionId.value)
+      startSeq = pj?.seq ?? 0
+    } else if (!postRes.ok) {
+      let detail = `HTTP ${postRes.status}`
       try {
-        const errBody = await response.json()
+        const errBody = await postRes.json()
+        detail = errBody.detail || errBody.msg || detail
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail)
+    } else {
+      const body = await postRes.json()
+      jobId = body.data?.job_id
+      if (!jobId) throw new Error('未返回 job_id')
+      savePendingChatJob(agentId, sessionId.value, { job_id: jobId, seq: 0 })
+    }
+
+    await recentAgentsStore.touch(agentId)
+
+    const streamRes = await fetch(
+      `${baseApi}/user-agent/chat/jobs/${jobId}/stream?since_seq=${startSeq}`,
+      {
+        headers: { token },
+      }
+    )
+
+    if (!streamRes.ok) {
+      let detail = `HTTP ${streamRes.status}`
+      try {
+        const errBody = await streamRes.json()
         detail = errBody.detail || errBody.msg || detail
       } catch {
         /* ignore */
@@ -695,82 +1017,28 @@ async function submitMessage() {
       throw new Error(detail)
     }
 
-    await recentAgentsStore.touch(agentId)
-
-    const reader = response.body?.getReader()
+    const reader = streamRes.body?.getReader()
     const decoder = new TextDecoder()
-    let buffer = ''
-
     if (!reader) {
       throw new Error('No response body')
     }
 
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-
-      let eventEndIndex
-      while ((eventEndIndex = buffer.indexOf('\n\n')) !== -1) {
-        const eventStr = buffer.slice(0, eventEndIndex)
-        buffer = buffer.slice(eventEndIndex + 2)
-
-        if (!eventStr.startsWith('data: ')) continue
-        const dataStr = eventStr.slice(6)
-        if (dataStr === '[DONE]') continue
-        try {
-          const data = JSON.parse(dataStr)
-          if (data.type === 'content' && idx !== -1) {
-            const row = messages.value[idx]
-            messages.value[idx] = {
-              ...row,
-              content: (row.content || '') + (data.content || ''),
-              pending: false,
-              thinkingOpen: row.thinkingOpen ?? false,
-            }
-          } else if (data.type === 'error' && idx !== -1) {
-            const cur = messages.value[idx]
-            messages.value[idx] = {
-              ...cur,
-              content: `${cur.content || ''}\n[Error: ${data.content}]`,
-              pending: false,
-              thinkingOpen: cur.thinkingOpen ?? false,
-            }
-          } else if (idx !== -1) {
-            const cur = messages.value[idx]
-            messages.value[idx] = { ...cur, pending: false, thinkingOpen: cur.thinkingOpen ?? false }
-          }
-        } catch (e) {
-          console.warn('SSE parse error:', e)
-        }
-      }
-      scrollBodyToBottom()
-    }
+    await readChatJobSseStream(reader, decoder, idx, jobId, agentId, startSeq)
   } catch (error) {
-    if (error?.name === 'AbortError') {
-      if (idx !== -1) {
-        const row = messages.value[idx]
-        const cur = row.content
-        messages.value[idx] = {
-          ...row,
-          content: cur ? `${cur}\n\n_${t('views.agents.chat_msg_aborted')}_` : t('views.agents.chat_msg_aborted'),
-          pending: false,
-          thinkingOpen: row.thinkingOpen ?? false,
-        }
-      }
-    } else if (idx !== -1) {
+    clearPendingChatJob(agentId, sessionId.value)
+    if (idx !== -1) {
       const row = messages.value[idx]
       messages.value[idx] = {
         ...row,
         content: t('views.agents.chat_msg_stream_error') + `：${error?.message || error}`,
         pending: false,
         thinkingOpen: row.thinkingOpen ?? false,
+        ragSteps: row.ragSteps || [],
+        ragTrace: row.ragTrace ?? null,
       }
     }
   } finally {
     sending.value = false
-    abortController = null
     if (agentId && sessionId.value) persistSessionId(agentId, sessionId.value)
     scrollBodyToBottom()
     agentSidebarStore.bumpRefresh()
@@ -781,10 +1049,6 @@ watch(
   () => route.params.agentId,
   (newId, oldId) => {
     stopIntroOpening()
-    if (abortController) {
-      abortController.abort()
-      abortController = null
-    }
     if (oldId !== undefined && newId !== oldId) {
       agentChatHeaderStore.clear()
       messages.value = []
@@ -882,10 +1146,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopIntroOpening()
-  if (abortController) {
-    abortController.abort()
-    abortController = null
-  }
   document.title = baseDocTitle
   agentChatHeaderStore.clear()
 })
@@ -1234,6 +1494,108 @@ html.dark .agent-chat-thinking-panel {
   border-color: rgba(255, 255, 255, 0.08);
 }
 
+.agent-chat-thinking-placeholder {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+html.dark .agent-chat-thinking-placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.agent-chat-thinking-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.agent-chat-thinking-step-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #475569;
+}
+
+html.dark .agent-chat-thinking-step-line {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.agent-chat-thinking-step-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.agent-chat-thinking-step-label {
+  font-weight: 500;
+  color: #334155;
+}
+
+html.dark .agent-chat-thinking-step-label {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.agent-chat-thinking-step-detail {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-size: 11px;
+  color: #64748b;
+  word-break: break-word;
+}
+
+html.dark .agent-chat-thinking-step-detail {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.agent-chat-rag-trace {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed #e2e8f0;
+  font-size: 12px;
+}
+
+html.dark .agent-chat-rag-trace {
+  border-top-color: rgba(255, 255, 255, 0.1);
+}
+
+.agent-chat-rag-trace summary {
+  cursor: pointer;
+  font-weight: 500;
+  color: #475569;
+  list-style: none;
+}
+
+.agent-chat-rag-trace summary::-webkit-details-marker {
+  display: none;
+}
+
+html.dark .agent-chat-rag-trace summary {
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.agent-chat-rag-trace-lines {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-chat-trace-line {
+  font-size: 11px;
+  line-height: 1.45;
+  color: #64748b;
+  word-break: break-word;
+}
+
+html.dark .agent-chat-trace-line {
+  color: rgba(255, 255, 255, 0.45);
+}
+
 .agent-chat-feed-body {
   font-size: 16px;
   line-height: 1.6;
@@ -1283,6 +1645,18 @@ html.dark .agent-chat-footer {
   align-items: center;
   gap: 10px;
   margin-bottom: 10px;
+}
+
+.agent-chat-kb-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--n-text-color-2);
+}
+
+.agent-chat-kb-toggle-label {
+  user-select: none;
 }
 
 .agent-chat-toolbar-go {

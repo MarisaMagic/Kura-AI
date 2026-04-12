@@ -2,7 +2,7 @@
 
 export const DEFAULT_AVATAR = `${import.meta.env.BASE_URL}logo.svg`.replace(/\/{2,}/, '/')
 
-export const CREATE_DRAFT_KEY = 'mg-agent:user-agent-create-draft'
+export const CREATE_DRAFT_KEY = 'kura-ai:user-agent-create-draft'
 export const CREATE_DRAFT_VERSION = 1
 export const MAX_AVATAR_DRAFT_BYTES = 1.5 * 1024 * 1024
 

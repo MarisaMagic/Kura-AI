@@ -62,4 +62,12 @@ export default {
     }),
   getRecentAgents: () => request.get('/user-agent/recent_agents'),
   touchRecentAgent: (params = {}) => request.post('/user-agent/recent_agents/touch', null, { params }),
+  /** 知识库（DependAuth） */
+  getKbDocuments: (params = {}) => request.get('/user-agent/kb/documents', { params }),
+  uploadKbDocument: (agentId, data) =>
+    request.post(`/user-agent/kb/upload?agent_id=${agentId}`, data, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    }),
+  deleteKbDocument: ({ agent_id, filename }) =>
+    request.delete('/user-agent/kb/document', { params: { agent_id, filename } }),
 }
