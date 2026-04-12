@@ -158,29 +158,37 @@ onMounted(async () => {
   margin-bottom: 24px;
 }
 .agent-page-title {
-  font-size: 1.25rem;
-  font-weight: 600;
   margin: 0 0 8px;
+  font-size: clamp(26px, 2.8vw, 32px);
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: 0.04em;
+  color: var(--n-text-color);
 }
 .agent-kb-subtitle {
   color: var(--n-text-color-3);
-  font-size: 0.9rem;
+  font-size: 15px;
+  line-height: 1.4;
 }
 .agent-kb-section {
   margin-bottom: 32px;
 }
 .agent-kb-h2 {
-  font-size: 1rem;
+  font-size: 18px;
   font-weight: 600;
+  line-height: 1.35;
   margin: 0 0 8px;
+  color: var(--n-text-color);
 }
 .agent-kb-hint {
   color: var(--n-text-color-3);
-  font-size: 0.85rem;
+  font-size: 14px;
+  line-height: 1.5;
   margin: 0 0 12px;
 }
 .agent-kb-empty {
   color: var(--n-text-color-3);
+  font-size: 14px;
   padding: 16px 0;
 }
 </style>
