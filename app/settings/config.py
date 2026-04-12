@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     )
 
     VERSION: str = "0.1.0"
-    APP_TITLE: str = "Vue FastAPI Admin"
-    PROJECT_NAME: str = "Vue FastAPI Admin"
+    APP_TITLE: str = "Kura AI"
+    PROJECT_NAME: str = "Kura AI"
     APP_DESCRIPTION: str = "Description"
 
     CORS_ORIGINS: typing.List = ["*"]
@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     CHAT_DATABASE_URL: typing.Optional[str] = None
     DATABASE_URL: typing.Optional[str] = None
     REDIS_URL: str = "redis://127.0.0.1:6379/0"
-    REDIS_KEY_PREFIX: str = "mg_agent"
+    REDIS_KEY_PREFIX: str = "kura_ai"
     REDIS_CACHE_TTL_SECONDS: int = 300
     # 智能体对话异步 Job（刷新后可重连 SSE）在 Redis 中的 TTL（秒）
     CHAT_JOB_TTL_SECONDS: int = 86400
@@ -127,7 +127,7 @@ class Settings(BaseSettings):
     # Milvus
     MILVUS_HOST: str = "127.0.0.1"
     MILVUS_PORT: str = "19530"
-    MILVUS_COLLECTION: str = "mg_agent_kb"
+    MILVUS_COLLECTION: str = "kura_ai_kb"
 
     # 智能体知识库文档根目录：data/user_agent_docs/user_{id}/{agent_id}/
     USER_AGENT_KB_DOCS_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_docs")

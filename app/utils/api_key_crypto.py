@@ -15,7 +15,7 @@ from app.settings.config import settings
 def _fernet() -> Fernet:
     if settings.API_KEY_ENCRYPTION_KEY:
         return Fernet(settings.API_KEY_ENCRYPTION_KEY.strip().encode())
-    digest = hashlib.sha256((settings.SECRET_KEY + "\x1dMG-Agent:user-agent-api-key").encode()).digest()
+    digest = hashlib.sha256((settings.SECRET_KEY + "\x1dKura AI:user-agent-api-key").encode()).digest()
     return Fernet(base64.urlsafe_b64encode(digest))
 
 
