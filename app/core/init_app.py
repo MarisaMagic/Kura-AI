@@ -45,7 +45,9 @@ def make_middlewares():
                 "/api/v1/base/access_token",
                 "/api/v1/base/upload_avatar",
                 "/api/v1/user-agent/upload_avatar",
-                r".*user-agent/chat/stream$",  # SSE 流式响应，勿缓冲整包写入审计
+                r".*user-agent/chat/stream$",  # POST 直连 SSE，勿缓冲整包写入审计
+                r".*user-agent/chat/jobs/[^/]+/stream$",  # Job 订阅 SSE（刷新可重连），勿缓冲
+                r".*user-agent/kb/upload$",
                 "/api/v1/media/",  # 静态头像等二进制，勿写入审计 JSON
                 "/docs",
                 "/openapi.json",
