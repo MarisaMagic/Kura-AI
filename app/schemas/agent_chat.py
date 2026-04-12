@@ -13,6 +13,10 @@ class ChatRequest(BaseModel):
     agent_id: int = Field(..., description="智能体 ID")
     message: str = Field(..., min_length=1, description="用户消息")
     session_id: Optional[str] = Field("default_session", description="会话 ID，前端生成")
+    use_knowledge_retrieval: bool = Field(
+        True,
+        description="为 True 时允许知识库检索工具；为 False 时仅通用知识回答",
+    )
 
 
 class ChatResponse(BaseModel):
@@ -32,11 +36,13 @@ class MessageInfo(BaseModel):
     :param content: 消息内容
     :param timestamp: 消息时间戳
     :param rag_trace: RAG 追踪信息
+    :param rag_steps: 检索步骤（与 SSE rag_step 一致，用于历史回放）
     """
     type: str
     content: str
     timestamp: str
     rag_trace: Optional[dict[str, Any]] = None
+    rag_steps: Optional[list[dict[str, Any]]] = None
 
 
 class SessionMessagesResponse(BaseModel):
@@ -87,3 +93,9 @@ class SessionDeleteResponse(BaseModel):
     """
     session_id: str
     message: str
+
+
+class ChatJobCreateResponse(BaseModel):
+    """创建异步对话 Job 的响应（刷新后可按 job_id 重连 SSE）。"""
+
+    job_id: str
