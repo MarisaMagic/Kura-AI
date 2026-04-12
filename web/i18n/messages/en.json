@@ -102,6 +102,7 @@
       "chat_popover_history_empty": "No conversation history yet",
       "chat_popover_back_hub_short": "Agent hub",
       "chat_popover_edit_short": "Edit agent",
+      "chat_popover_kb_short": "Knowledge base",
       "chat_feed_ai_badge": "AI",
       "chat_feed_thinking": "Thinking…",
       "chat_feed_thinking_done": "Thinking finished",

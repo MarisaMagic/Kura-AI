@@ -58,6 +58,19 @@
               $t('views.agents.chat_popover_edit_short')
             }}</span>
           </button>
+          <button
+            type="button"
+            class="agent-chat-popover-action"
+            :disabled="!headerStore.agentId"
+            @click="goKnowledgeBase"
+          >
+            <span class="agent-chat-popover-action-circle">
+              <TheIcon icon="mdi:book-open-variant" :size="22" />
+            </span>
+            <span class="agent-chat-popover-action-label">{{
+              $t('views.agents.chat_popover_kb_short')
+            }}</span>
+          </button>
         </div>
 
         <div class="agent-chat-popover-divider" />
@@ -207,6 +220,12 @@ function goEdit() {
   popoverShow.value = false
   router.push({ name: 'AgentEdit', params: { id: String(headerStore.agentId) } })
 }
+
+function goKnowledgeBase() {
+  if (!headerStore.agentId) return
+  popoverShow.value = false
+  router.push({ name: 'AgentKnowledgeBase', params: { agentId: String(headerStore.agentId) } })
+}
 </script>
 
 <style scoped>
@@ -318,11 +337,9 @@ html.dark .agent-chat-popover-creator {
 }
 
 .agent-chat-popover-actions {
-  display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 28px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 6px;
   margin-top: 22px;
 }
 
@@ -331,7 +348,8 @@ html.dark .agent-chat-popover-creator {
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  max-width: 104px;
+  min-width: 0;
+  max-width: none;
   padding: 0;
   border: none;
   background: none;
