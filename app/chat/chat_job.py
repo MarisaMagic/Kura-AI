@@ -17,28 +17,46 @@ from app.settings import settings
 
 
 def _meta_key(job_id: str) -> str:
+    """
+    获取 Job 元数据 key
+    """
     return f"chat_job:{job_id}:meta"
 
 
 def _events_key(job_id: str) -> str:
+    """
+    获取 Job 事件 key
+    """
     return f"chat_job:{job_id}:events"
 
 
 def _active_key(user_id: int, agent_id: int, session_id: str) -> str:
+    """
+    获取 Job 活动 key
+    """
     return f"chat_job_active:{user_id}:{agent_id}:{session_id}"
 
 
 def _ttl() -> int:
+    """
+    获取 Job 过期时间
+    """
     return int(getattr(settings, "CHAT_JOB_TTL_SECONDS", 86400))
 
 
 async def _touch_meta_ttl(job_id: str) -> None:
+    """
+    更新 Job 元数据和事件的过期时间
+    """
     t = _ttl()
     await asyncio.to_thread(cache.expire, _meta_key(job_id), t)
     await asyncio.to_thread(cache.expire, _events_key(job_id), t)
 
 
 async def _append_event(job_id: str, seq: int, data: dict[str, Any]) -> None:
+    """
+    追加 Job 事件
+    """
     wrapped = {"seq": seq, "data": data}
     await asyncio.to_thread(cache.rpush_json, _events_key(job_id), wrapped)
     await _touch_meta_ttl(job_id)
@@ -56,6 +74,9 @@ async def create_chat_job(
     创建 Job：若同会话已有 running 任务则返回 (existing_job_id, True)。
     否则返回 (new_job_id, False)。
     """
+    # 检查是否已有 running 任务
+    # 如果已有 running 任务，则返回 (existing_job_id, True)
+    # 否则返回 (new_job_id, False)
     ak = _active_key(user_id, agent_id, session_id)
     existing = await asyncio.to_thread(cache.get_json, ak)
     if isinstance(existing, dict) and existing.get("job_id"):
@@ -64,7 +85,9 @@ async def create_chat_job(
         if meta and meta.get("status") == "running":
             return ej, True
 
+    # 创建新的 Job
     job_id = uuid.uuid4().hex
+    # 创建 Job 元数据
     meta = {
         "job_id": job_id,
         "user_id": user_id,
@@ -73,9 +96,12 @@ async def create_chat_job(
         "status": "running",
         "error": None,
     }
+    # 存储 Job 元数据，放入事件循环绑定的线程池里执行
     await asyncio.to_thread(cache.set_json, _meta_key(job_id), meta, _ttl())
+    # 存储 Job 活动 key，放入事件循环绑定的线程池里执行
     await asyncio.to_thread(cache.set_json, ak, {"job_id": job_id}, _ttl())
 
+    # 创建异步任务执行对话
     asyncio.create_task(
         _run_chat_job(
             job_id=job_id,
@@ -103,13 +129,16 @@ async def _run_chat_job(
     ak = _active_key(user_id, agent_id, session_id)
     seq = 0
     try:
+        # 获取智能体
         ua = await user_agent_controller.get_owned(agent_id, user_id)
+        # 如果智能体不存在或无权限，则返回错误
         if not ua:
             await _append_event(job_id, seq, {"type": "error", "content": "智能体不存在或无权限"})
             seq += 1
             await _finish_meta(job_id, status="failed", error="智能体不存在")
             return
 
+        # 异步迭代流式事件
         async for ev in iter_chat_stream_events(
             ua,
             message,
@@ -118,10 +147,13 @@ async def _run_chat_job(
             session_id,
             use_knowledge_retrieval=use_knowledge_retrieval,
         ):
+            # 追加事件
             await _append_event(job_id, seq, ev)
             seq += 1
 
+        # 完成任务
         await _finish_meta(job_id, status="completed", error=None)
+        # 更新最近使用智能体
         try:
             await touch_recent_agent(user_id, agent_id)
         except Exception:
@@ -134,6 +166,9 @@ async def _run_chat_job(
 
 
 async def _finish_meta(job_id: str, *, status: str, error: str | None) -> None:
+    """
+    完成任务
+    """
     meta = await asyncio.to_thread(cache.get_json, _meta_key(job_id))
     if not isinstance(meta, dict):
         meta = {"job_id": job_id}
@@ -143,6 +178,9 @@ async def _finish_meta(job_id: str, *, status: str, error: str | None) -> None:
 
 
 def get_job_meta(job_id: str) -> dict[str, Any] | None:
+    """
+    获取 Job 元数据
+    """
     raw = cache.get_json(_meta_key(job_id))
     return raw if isinstance(raw, dict) else None
 
@@ -154,9 +192,13 @@ async def iter_job_sse_events(
 ) -> Any:
     """
     异步迭代 SSE 行（不含外层 StreamingResponse），从 Redis 列表下标 since_seq 起追更直至任务结束。
+    前端收流：从 Redis 列表下标 since_seq 起追更直至任务结束
     """
+    # 从 Redis 列表下标 since_seq 起追更直至任务结束
     next_idx = max(0, since_seq)
+    # 循环直到任务结束
     while True:
+        # 从 Redis 列表下标 next_idx 起获取一条数据
         chunk = await asyncio.to_thread(cache.lrange_str, _events_key(job_id), next_idx, next_idx)
         if chunk:
             try:
@@ -181,7 +223,14 @@ async def iter_job_sse_events(
 
 
 def verify_job_owner(job_id: str, user_id: int) -> bool:
+    """
+    验证 Job 是否属于用户
+    """
+    # 获取 Job 元数据
     meta = get_job_meta(job_id)
+    # 如果 Job 元数据不存在，则返回 False
     if not meta:
         return False
+    # 如果 Job 元数据中的 user_id 与传入的 user_id 不匹配，则返回 False
+    # 否则返回 True
     return int(meta.get("user_id", -1)) == int(user_id)

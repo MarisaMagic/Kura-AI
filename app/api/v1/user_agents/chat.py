@@ -148,11 +148,22 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
 
 @router.post("/chat/jobs", summary="创建异步对话 Job（可刷新后重连 SSE）", tags=["智能体模块"])
 async def create_chat_job_endpoint(request: ChatRequest, current_user: User = Depends(AuthControl.is_authed)):
+    """
+    创建异步对话 Job（可刷新后重连 SSE）
+    :param request: 请求体
+    :param current_user: 当前用户
+    :return: Success
+    """
+    # 获取当前用户ID
     user_id = current_user.id
+    # 获取用户配置的智能体信息
     ua = await user_agent_controller.get_owned(request.agent_id, user_id)
+    # 如果智能体不存在或无权限访问，则返回404错误
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
+    # 获取会话ID
     session_id = (request.session_id or "default_session").strip() or "default_session"
+    # 创建异步对话 Job
     job_id, is_dup = await create_chat_job(
         user_id=user_id,
         agent_id=request.agent_id,
@@ -161,6 +172,7 @@ async def create_chat_job_endpoint(request: ChatRequest, current_user: User = De
         use_knowledge_retrieval=request.use_knowledge_retrieval,
     )
     if is_dup:
+        # 如果已有进行中的生成任务，则返回409错误
         raise HTTPException(
             status_code=409,
             detail={
@@ -168,11 +180,19 @@ async def create_chat_job_endpoint(request: ChatRequest, current_user: User = De
                 "existing_job_id": job_id,
             },
         )
+    # 返回创建异步对话 Job 响应
     return Success(data=ChatJobCreateResponse(job_id=job_id).model_dump())
 
 
 @router.get("/chat/jobs/{job_id}", summary="查询对话 Job 状态", tags=["智能体模块"])
 async def get_chat_job_endpoint(job_id: str, current_user: User = Depends(AuthControl.is_authed)):
+    """
+    查询对话 Job 状态
+    :param job_id: Job ID
+    :param current_user: 当前用户
+    :return: Success
+    """
+    # 获取 Job 元数据
     meta = get_job_meta(job_id)
     if not meta or int(meta.get("user_id", -1)) != int(current_user.id):
         raise HTTPException(status_code=404, detail="任务不存在或无权限")
@@ -189,13 +209,24 @@ async def chat_job_stream_endpoint(
     since_seq: int = Query(0, ge=0, description="从 Redis 事件列表的下标开始接收（重连时传入已收到条数）"),
     current_user: User = Depends(AuthControl.is_authed),
 ):
+    """
+    订阅对话 Job 的 SSE（支持 since_seq 断点续传）
+    :param job_id: Job ID
+    :param since_seq: 从 Redis 事件列表的下标开始接收（重连时传入已收到条数）
+    :param current_user: 当前用户
+    :return: StreamingResponse
+    """
+    # 验证 Job 是否属于用户
     if not verify_job_owner(job_id, current_user.id):
         raise HTTPException(status_code=404, detail="任务不存在或无权限")
 
+    # 定义事件生成器
     async def event_generator():
+        # 异步迭代 SSE 行
         async for line in iter_job_sse_events(job_id, since_seq=since_seq):
             yield line
 
+    # 返回流式响应
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
