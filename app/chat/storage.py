@@ -141,10 +141,12 @@ class ConversationStorage:
             # 遍历新消息列表, 创建 ChatMessageRow 对象并添加新消息到数据库
             for idx, msg in enumerate(messages):
                 rag_trace = None
+                rag_steps = None
                 # 检查额外消息数据, 如果有 RAG 追踪信息, 则添加到消息中
                 if extra_message_data and idx < len(extra_message_data):
                     extra = extra_message_data[idx] or {}
                     rag_trace = extra.get("rag_trace")
+                    rag_steps = extra.get("rag_steps")
 
                 # 创建 ChatMessageRow 对象并添加新消息到数据库
                 db.add(
@@ -154,6 +156,7 @@ class ConversationStorage:
                         content=str(msg.content),
                         timestamp=now,
                         rag_trace=rag_trace,
+                        rag_steps=rag_steps,
                     )
                 )
                 # 将新消息添加到序列化列表
@@ -163,6 +166,7 @@ class ConversationStorage:
                         "content": str(msg.content),
                         "timestamp": now.isoformat(),
                         "rag_trace": rag_trace,
+                        "rag_steps": rag_steps,
                     }
                 )
 
@@ -339,6 +343,7 @@ class ConversationStorage:
                     "content": row.content,
                     "timestamp": row.timestamp.isoformat(),
                     "rag_trace": row.rag_trace,
+                    "rag_steps": row.rag_steps,
                 }
                 for row in rows
             ]
