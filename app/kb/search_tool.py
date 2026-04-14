@@ -68,6 +68,12 @@ def make_search_knowledge_tool(kb_scope: str, llm_config: dict[str, Any]) -> Str
 
     return StructuredTool.from_function(
         name="search_knowledge_base",
-        description="Search for information in this agent's knowledge base using hybrid retrieval (dense + sparse vectors).",
+        description=(
+            "在本智能体「知识库」中检索与用户问题相关的文档片段（向量+稀疏混合检索）。"
+            "适用于：问题可能依赖已入库的领域文档、产品说明、政策条文等。"
+            "不适用于：仅依赖当前对话里临时上传的会话附件列表（那是另一类附件，见 read_session_attachment）。"
+            "调用约束：同一用户提问轮次内最多成功检索一次；得到工具返回后应直接整合为最终回答，勿重复检索。"
+            "若返回无相关片段，应如实说明。"
+        ),
         func=_search_knowledge_base,
     )
