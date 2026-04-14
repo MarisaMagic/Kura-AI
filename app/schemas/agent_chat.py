@@ -1,6 +1,6 @@
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ChatRequest(BaseModel):
@@ -9,14 +9,42 @@ class ChatRequest(BaseModel):
     :param agent_id: 智能体 ID
     :param message: 用户消息
     :param session_id: 会话 ID，前端生成
+    :param attachment_ids: 本会话内已上传附件 ID（见上传接口）
     """
     agent_id: int = Field(..., description="智能体 ID")
-    message: str = Field(..., min_length=1, description="用户消息")
+    message: str = Field("", description="用户消息；可与 attachment_ids 二选一或同时使用")
     session_id: Optional[str] = Field("default_session", description="会话 ID，前端生成")
     use_knowledge_retrieval: bool = Field(
         True,
         description="为 True 时允许知识库检索工具；为 False 时仅通用知识回答",
     )
+    attachment_ids: list[str] = Field(default_factory=list, description="本会话已上传附件 ID 列表")
+
+    @field_validator("attachment_ids")
+    @classmethod
+    def _limit_attachment_ids(cls, v: list[str]) -> list[str]:
+        from app.settings import settings
+
+        mx = int(getattr(settings, "CHAT_UPLOAD_MAX_FILES_PER_MESSAGE", 5))
+        if len(v) > mx:
+            raise ValueError(f"单条消息引用附件数量不能超过 {mx}")
+        return v
+
+    @model_validator(mode="after")
+    def _message_or_attachments(self) -> "ChatRequest":
+        if not (self.message or "").strip() and not self.attachment_ids:
+            raise ValueError("message 与 attachment_ids 至少填写一项")
+        return self
+
+
+class ChatAttachmentUploadResponse(BaseModel):
+    """会话附件上传结果"""
+
+    id: str
+    filename: str
+    kind: str
+    mime: str
+    size_bytes: int
 
 
 class ChatResponse(BaseModel):
@@ -33,13 +61,15 @@ class MessageInfo(BaseModel):
     """
     消息信息
     :param type: 消息类型
-    :param content: 消息内容
+    :param content: 消息内容（文本预览）
+    :param content_json: LangChain 消息整块 JSON（多模态 image_ref 等）
     :param timestamp: 消息时间戳
     :param rag_trace: RAG 追踪信息
     :param rag_steps: 检索步骤（与 SSE rag_step 一致，用于历史回放）
     """
     type: str
-    content: str
+    content: Any = ""
+    content_json: Optional[dict[str, Any]] = None
     timestamp: str
     rag_trace: Optional[dict[str, Any]] = None
     rag_steps: Optional[list[dict[str, Any]]] = None

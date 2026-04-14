@@ -17,6 +17,10 @@ class UserAgentCommon(BaseModel):
     enable_code: bool = False
     opening_message: Optional[str] = None
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
+    supports_vision: bool = Field(
+        default=False,
+        description="启用后允许本会话图片附件以多模态理解（需模型支持视觉）；关闭时上传图片将被拒绝",
+    )
 
     @field_validator("base_url", mode="before")
     @classmethod
