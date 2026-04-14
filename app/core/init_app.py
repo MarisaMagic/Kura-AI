@@ -48,6 +48,7 @@ def make_middlewares():
                 r".*user-agent/chat/stream$",  # POST 直连 SSE，勿缓冲整包写入审计
                 r".*user-agent/chat/jobs/[^/]+/stream$",  # Job 订阅 SSE（刷新可重连），勿缓冲
                 r".*user-agent/kb/upload$",
+                r".*user-agent/chat/attachments/upload$",
                 "/api/v1/media/",  # 静态头像等二进制，勿写入审计 JSON
                 "/docs",
                 "/openapi.json",
@@ -192,6 +193,7 @@ async def init_db():
     await command.upgrade(run_in_transaction=True)
     await ensure_user_avatar_column()
     await ensure_user_agent_base_url_column()
+    await ensure_user_agent_supports_vision_column()
 
 
 async def ensure_user_avatar_column() -> None:
@@ -224,6 +226,24 @@ async def ensure_user_agent_base_url_column() -> None:
         if "duplicate column" in msg or "already exists" in msg:
             return
         logger.warning('ensure_user_agent_base_url_column: %s', e)
+
+
+async def ensure_user_agent_supports_vision_column() -> None:
+    """旧库可能缺少 supports_vision 列；aerich 未覆盖时补齐（SQLite）。"""
+    try:
+        conn = Tortoise.get_connection("sqlite")
+    except Exception:
+        return
+    try:
+        await conn.execute_query(
+            'ALTER TABLE "user_agent" ADD COLUMN "supports_vision" INTEGER NOT NULL DEFAULT 0'
+        )
+        logger.info('Added column "user_agent"."supports_vision"')
+    except Exception as e:
+        msg = str(e).lower()
+        if "duplicate column" in msg or "already exists" in msg:
+            return
+        logger.warning('ensure_user_agent_supports_vision_column: %s', e)
 
 
 async def ensure_agent_menus():

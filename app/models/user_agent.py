@@ -16,6 +16,10 @@ class UserAgent(BaseModel, TimestampMixin):
     opening_message = fields.TextField(null=True, description="开场白")
     temperature = fields.FloatField(default=0.1, description="温度")
     avatar_filename = fields.CharField(max_length=255, null=True, description="自定义头像文件名")
+    supports_vision = fields.BooleanField(
+        default=False,
+        description="启用后允许会话中的图片附件以多模态方式理解（需模型支持视觉）",
+    )
 
     class Meta:
         table = "user_agent"
