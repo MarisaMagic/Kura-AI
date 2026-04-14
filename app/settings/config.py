@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     CORS_ALLOW_HEADERS: typing.List = ["*"]
 
     DEBUG: bool = True
-    # 为 True 时，用户每轮对话在服务端终端打印：知识库工具返回内容、含工具结果后的完整 LLM 输入消息
+    # 为 True 时，每次调用 LLM 前在服务端终端打印完整输入消息列表（含系统/用户/工具等）
     DEBUG_AGENT_KB_PROMPT: bool = True
 
     PROJECT_ROOT: str = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
@@ -131,6 +131,13 @@ class Settings(BaseSettings):
 
     # 智能体知识库文档根目录：data/user_agent_docs/user_{id}/{agent_id}/
     USER_AGENT_KB_DOCS_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_docs")
+    # 会话对话附件：data/user_agent_uploads/user_{id}/{agent_id}/{session}/
+    USER_AGENT_CHAT_UPLOAD_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_uploads")
+    # 单次请求：附件个数、单文件大小（字节）、会话附件总大小上限
+    CHAT_UPLOAD_MAX_FILES_PER_MESSAGE: int = 5
+    CHAT_UPLOAD_MAX_BYTES_PER_FILE: int = 15 * 1024 * 1024
+    CHAT_UPLOAD_MAX_SESSION_BYTES: int = 80 * 1024 * 1024
+    CHAT_UPLOAD_MAX_ATTACHMENTS_PER_SESSION: int = 80
 
     # RAG：可选单独指定打分模型；未设置则与智能体对话模型相同
     RAG_GRADE_MODEL: typing.Optional[str] = None
