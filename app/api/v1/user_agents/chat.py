@@ -6,10 +6,11 @@ import json
 import re
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.chat.agent_service import chat_with_agent_stream, chat_with_agent_sync
+from app.chat.attachment_service import save_uploaded_file
 from app.chat.chat_job import create_chat_job, get_job_meta, iter_job_sse_events, verify_job_owner
 from app.chat.storage import storage
 from app.controllers.user_agent import user_agent_controller
@@ -18,6 +19,7 @@ from app.models.user_agent import UserAgent
 from app.core.dependency import AuthControl
 from app.models import User
 from app.schemas.agent_chat import (
+    ChatAttachmentUploadResponse,
     ChatJobCreateResponse,
     ChatRequest,
     ChatResponse,
@@ -30,6 +32,43 @@ from app.schemas.agent_chat import (
 from app.schemas.base import Success
 
 router = APIRouter()
+
+
+@router.post("/chat/attachments/upload", summary="上传会话附件（先上传再发消息）", tags=["智能体模块"])
+async def upload_chat_attachment(
+    agent_id: int = Query(..., description="智能体 ID"),
+    session_id: str = Query("default_session", description="会话 ID，与对话一致"),
+    file: UploadFile = File(...),
+    current_user: User = Depends(AuthControl.is_authed),
+):
+    """
+    将文件保存到服务端并在本会话下登记，返回 attachment_id，供随后 Chat 请求的 attachment_ids 引用。
+    :param agent_id: 智能体 ID
+    :param session_id: 会话 ID，与对话一致
+    :param file: 上传文件
+    :param current_user: 当前用户
+    :return: Success
+    """
+    user_id = current_user.id
+    ua = await user_agent_controller.get_owned(agent_id, user_id)
+    if not ua:
+        raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
+    sid = (session_id or "default_session").strip() or "default_session"
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="空文件")
+    try:
+        # 保存上传文件, 返回附件ID、文件名、文件类型、文件大小
+        data = save_uploaded_file( 
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=sid,
+            original_filename=file.filename or "file",
+            raw=raw,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return Success(data=ChatAttachmentUploadResponse(**data).model_dump())  # 返回附件上传结果
 
 
 def _session_updated_at_display(iso_ts: str) -> str:
@@ -83,6 +122,7 @@ async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(
             request.agent_id,
             session_id,
             use_knowledge_retrieval=request.use_knowledge_retrieval,
+            attachment_ids=request.attachment_ids or None,
         )
         await touch_recent_agent(user_id, request.agent_id)
         return Success(data=ChatResponse(**resp).model_dump())
@@ -125,6 +165,7 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
                 request.agent_id,
                 session_id,
                 use_knowledge_retrieval=request.use_knowledge_retrieval,
+                attachment_ids=request.attachment_ids or None,
             ):
                 yield chunk
             # 更新最近使用智能体
@@ -170,6 +211,7 @@ async def create_chat_job_endpoint(request: ChatRequest, current_user: User = De
         session_id=session_id,
         message=request.message.strip(),
         use_knowledge_retrieval=request.use_knowledge_retrieval,
+        attachment_ids=request.attachment_ids or None, # 接收附件ID列表
     )
     if is_dup:
         # 如果已有进行中的生成任务，则返回409错误
@@ -412,7 +454,8 @@ async def get_chat_session_messages(
     messages = [
         MessageInfo(
             type=m["type"],
-            content=m["content"],
+            content=m.get("content", ""),
+            content_json=m.get("content_json"),
             timestamp=m["timestamp"],
             rag_trace=m.get("rag_trace"),
             rag_steps=m.get("rag_steps"),

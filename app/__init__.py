@@ -47,6 +47,7 @@ def create_app() -> FastAPI:
     register_routers(app, prefix="/api")
     os.makedirs(settings.USER_AVATAR_ROOT, exist_ok=True)
     os.makedirs(settings.USER_AGENT_AVATAR_ROOT, exist_ok=True)
+    os.makedirs(settings.USER_AGENT_CHAT_UPLOAD_ROOT, exist_ok=True)
     app.mount(
         settings.USER_AVATAR_URL_PREFIX,
         StaticFiles(directory=settings.USER_AVATAR_ROOT),
