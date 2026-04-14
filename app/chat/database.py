@@ -60,6 +60,9 @@ def init_chat_db() -> None:
         conn.execute(
             text("ALTER TABLE mg_chat_messages ADD COLUMN IF NOT EXISTS rag_steps JSON")
         )
+        conn.execute(
+            text("ALTER TABLE mg_chat_messages ADD COLUMN IF NOT EXISTS content_json JSON")
+        )
 
 
 def get_db_session() -> Session:

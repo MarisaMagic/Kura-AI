@@ -13,6 +13,7 @@ from app.chat.cache import cache
 from app.chat.database import SessionLocal
 from app.chat.db_models import ChatMessage as ChatMessageRow
 from app.chat.db_models import ChatSession as ChatSessionRow
+from app.chat.message_codec import envelope_to_langchain_message, msg_content_to_str, serialize_message_envelope
 
 
 class ConversationStorage:
@@ -31,8 +32,14 @@ class ConversationStorage:
             .first()
         )
         preview = ""
-        if last_human and (last_human.content or "").strip():
-            preview = (last_human.content or "").strip().replace("\n", " ")
+        if last_human:
+            if last_human.content_json and isinstance(last_human.content_json, dict):
+                env = last_human.content_json
+                lc = env.get("lc")
+                preview = msg_content_to_str(lc).strip()
+            elif (last_human.content or "").strip():
+                preview = (last_human.content or "").strip()
+            preview = preview.replace("\n", " ")
             if len(preview) > 120:
                 preview = preview[:120] + "…"
         return {
@@ -73,6 +80,10 @@ class ConversationStorage:
         messages = []
         for msg_data in records:
             msg_type = msg_data.get("type")
+            cj = msg_data.get("content_json")
+            if cj and isinstance(cj, dict) and cj.get("v"):
+                messages.append(envelope_to_langchain_message(cj))
+                continue
             content = msg_data.get("content", "")
             if msg_type == "human":
                 messages.append(HumanMessage(content=content))
@@ -148,12 +159,18 @@ class ConversationStorage:
                     rag_trace = extra.get("rag_trace")
                     rag_steps = extra.get("rag_steps")
 
+                envelope = serialize_message_envelope(msg)
+                preview = msg_content_to_str(getattr(msg, "content", ""))
+                if len(preview) > 65500:
+                    preview = preview[:65500] + "…"
+
                 # 创建 ChatMessageRow 对象并添加新消息到数据库
                 db.add(
                     ChatMessageRow(
                         session_ref_id=session.id,
                         message_type=msg.type,
-                        content=str(msg.content),
+                        content=preview,
+                        content_json=envelope,
                         timestamp=now,
                         rag_trace=rag_trace,
                         rag_steps=rag_steps,
@@ -163,7 +180,8 @@ class ConversationStorage:
                 serialized.append(
                     {
                         "type": msg.type,
-                        "content": str(msg.content),
+                        "content": preview,
+                        "content_json": envelope,
                         "timestamp": now.isoformat(),
                         "rag_trace": rag_trace,
                         "rag_steps": rag_steps,
@@ -337,16 +355,19 @@ class ConversationStorage:
                 .all()
             )
             # 将消息记录转换为字典列表
-            result = [
-                {
+            result = []
+            for row in rows:
+                env = row.content_json if isinstance(row.content_json, dict) else None
+                item = {
                     "type": row.message_type,
                     "content": row.content,
                     "timestamp": row.timestamp.isoformat(),
                     "rag_trace": row.rag_trace,
                     "rag_steps": row.rag_steps,
                 }
-                for row in rows
-            ]
+                if env:
+                    item["content_json"] = env
+                result.append(item)
             # 3. 更新 Redis 缓存 (使用 _messages_cache_key)
             # 将消息列表添加到 Redis 缓存
             cache.set_json(self._messages_cache_key(user_id, agent_id, session_id), result)
