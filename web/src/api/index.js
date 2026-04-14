@@ -56,6 +56,16 @@ export default {
     request.get(`/user-agent/chat/sessions/${encodeURIComponent(sessionId)}`, {
       params: { agent_id: agentId },
     }),
+  /** 会话附件上传（先上传再发消息，返回 data.id 作为 attachment_ids） */
+  uploadChatAttachment: (agentId, sessionId, file) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return request.post(
+      `/user-agent/chat/attachments/upload?agent_id=${agentId}&session_id=${encodeURIComponent(sessionId)}`,
+      fd,
+      { headers: { 'Content-Type': 'multipart/form-data' } },
+    )
+  },
   deleteAgentChatSession: ({ agent_id, session_id }) =>
     request.delete(`/user-agent/chat/sessions/${encodeURIComponent(session_id)}`, {
       params: { agent_id },

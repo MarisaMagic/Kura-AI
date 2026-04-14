@@ -95,6 +95,7 @@ async function loadAgent(id) {
       system_prompt: d.system_prompt || '',
       enable_web: !!d.enable_web,
       enable_code: !!d.enable_code,
+      supports_vision: !!d.supports_vision,
       opening_message: d.opening_message || '',
       temperature: d.temperature ?? 0.1,
     }

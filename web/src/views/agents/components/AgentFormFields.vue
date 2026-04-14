@@ -83,6 +83,10 @@
               <span class="agent-enable-label">{{ $t('views.agents.label_enable_code') }}</span>
               <n-switch v-model:value="form.enable_code" />
             </div>
+            <div class="agent-enable-pair agent-enable-pair--wide">
+              <span class="agent-enable-label">{{ $t('views.agents.label_supports_vision') }}</span>
+              <n-switch v-model:value="form.supports_vision" />
+            </div>
           </div>
         </n-form-item>
       </div>
@@ -371,6 +375,12 @@ html.dark .section-header {
 
 .agent-enable-row-item {
   margin-bottom: 0;
+}
+
+.agent-enable-pair--wide .agent-enable-label {
+  max-width: 12em;
+  white-space: normal;
+  line-height: 1.35;
 }
 
 .agent-avatar-box {

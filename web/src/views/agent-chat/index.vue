@@ -49,8 +49,19 @@
                       <div class="agent-chat-user-bubble">
                         <div class="agent-chat-user-text">{{ m.content }}</div>
                       </div>
-                      <div v-if="m.attachments?.length" class="agent-chat-msg-files agent-chat-msg-files--user">
-                        {{ m.attachments.map((a) => a.name).join(', ') }}
+                      <div
+                        v-if="m.attachments?.length"
+                        class="agent-chat-attachment-boxes agent-chat-attachment-boxes--user"
+                      >
+                        <div
+                          v-for="(a, ai) in m.attachments"
+                          :key="`ua-${m.id}-${ai}`"
+                          class="agent-chat-file-box agent-chat-file-box--readonly"
+                          :title="a.name"
+                        >
+                          <TheIcon :icon="chatAttachmentIcon(a)" :size="18" class="agent-chat-file-box-icon" />
+                          <span class="agent-chat-file-box-name">{{ a.name }}</span>
+                        </div>
                       </div>
                     </div>
                   </template>
@@ -176,8 +187,16 @@
                           {{ $t('views.agents.chat_copy_md_tooltip') }}
                         </n-tooltip>
                       </div>
-                      <div v-if="m.attachments?.length" class="agent-chat-msg-files">
-                        {{ m.attachments.map((a) => a.name).join(', ') }}
+                      <div v-if="m.attachments?.length" class="agent-chat-attachment-boxes">
+                        <div
+                          v-for="(a, ai) in m.attachments"
+                          :key="`aa-${m.id}-${ai}`"
+                          class="agent-chat-file-box agent-chat-file-box--readonly"
+                          :title="a.name"
+                        >
+                          <TheIcon :icon="chatAttachmentIcon(a)" :size="18" class="agent-chat-file-box-icon" />
+                          <span class="agent-chat-file-box-name">{{ a.name }}</span>
+                        </div>
                       </div>
                     </div>
                   </template>
@@ -223,6 +242,26 @@
               </div>
 
               <div class="agent-chat-composer">
+                <div v-if="pendingFiles.length" class="agent-chat-pending-attachments">
+                  <div
+                    v-for="(f, idx) in pendingFiles"
+                    :key="f.id"
+                    class="agent-chat-file-box agent-chat-file-box--pending"
+                    :title="f.name"
+                  >
+                    <TheIcon :icon="chatAttachmentIcon(f)" :size="18" class="agent-chat-file-box-icon" />
+                    <span class="agent-chat-file-box-name">{{ f.name }}</span>
+                    <button
+                      type="button"
+                      class="agent-chat-file-box-remove"
+                      :aria-label="$t('views.agents.chat_remove_attachment')"
+                      :disabled="sending"
+                      @click="removePendingFile(idx)"
+                    >
+                      <TheIcon icon="mdi:close" :size="16" />
+                    </button>
+                  </div>
+                </div>
                 <n-input
                   v-model:value="inputText"
                   type="textarea"
@@ -237,7 +276,7 @@
                   <n-upload
                     :key="uploadResetKey"
                     :show-file-list="false"
-                    :max="5"
+                    :max="MAX_CHAT_ATTACHMENTS"
                     multiple
                     accept="*/*"
                     :custom-request="handleUploadRequest"
@@ -252,17 +291,6 @@
                       <TheIcon icon="mdi:paperclip" :size="22" />
                     </n-button>
                   </n-upload>
-                  <div class="agent-chat-files-preview">
-                    <n-tag
-                      v-for="(f, idx) in pendingFiles"
-                      :key="f.id"
-                      closable
-                      size="small"
-                      @close="removePendingFile(idx)"
-                    >
-                      {{ f.name }}
-                    </n-tag>
-                  </div>
                   <n-button
                     type="primary"
                     circle
@@ -288,7 +316,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useEventListener } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { NAvatar, NButton, NInput, NSpin, NSwitch, NTag, NTooltip, NUpload } from 'naive-ui'
+import { NAvatar, NButton, NInput, NSpin, NSwitch, NTooltip, NUpload } from 'naive-ui'
 import AppPage from '@/components/page/AppPage.vue'
 import TheIcon from '@/components/icon/TheIcon.vue'
 import api from '@/api'
@@ -351,6 +379,71 @@ function onBodyScroll() {
 const uploadResetKey = ref(0)
 const sessionId = ref(`session_${Date.now()}`)
 let fileIdSeq = 0
+/** 与后端 CHAT_UPLOAD_MAX_FILES_PER_MESSAGE 对齐 */
+const MAX_CHAT_ATTACHMENTS = 5
+
+/** 气泡内仅展示文本块；附件用下方卡片展示（与历史 content_json 一致） */
+function userContentFromHistoryRow(row) {
+  const cj = row.content_json
+  if (cj && cj.lc != null) {
+    const lc = cj.lc
+    if (typeof lc === 'string') return lc
+    if (Array.isArray(lc)) {
+      const parts = []
+      for (const b of lc) {
+        if (typeof b === 'string') parts.push(b)
+        else if (b && b.type === 'text' && b.text) parts.push(b.text)
+        else if (b && (b.type === 'image_ref' || b.type === 'file_ref')) {
+          /* 附件见 attachmentsFromHistoryRow */
+        }
+      }
+      const s = parts.join('\n').trim()
+      if (s) return s
+    }
+  }
+  return row.content || ''
+}
+
+/** 从历史消息的 content_json 解析附件列表（含刷新/重开会话） */
+function attachmentsFromHistoryRow(row) {
+  if (row.type !== 'human') return undefined
+  const cj = row.content_json
+  if (!cj || cj.lc == null) return undefined
+  const lc = cj.lc
+  if (!Array.isArray(lc)) return undefined
+  const out = []
+  for (const b of lc) {
+    if (!b || typeof b !== 'object') continue
+    if (b.type === 'image_ref') {
+      out.push({
+        name: (b.filename && String(b.filename).trim()) || t('views.agents.chat_attachment_image_fallback'),
+        kind: 'image',
+        mime: b.mime || '',
+      })
+    } else if (b.type === 'file_ref') {
+      out.push({
+        name:
+          (b.filename && String(b.filename).trim()) ||
+          (b.attachment_id && String(b.attachment_id)) ||
+          t('views.agents.chat_attachment_file_fallback'),
+        kind: b.kind || 'other',
+        mime: b.mime || '',
+      })
+    }
+  }
+  return out.length ? out : undefined
+}
+
+function chatAttachmentIcon(att) {
+  const kind = String(att.kind || '').toLowerCase()
+  const mime = String(att.mime || '').toLowerCase()
+  const name = String(att.name || '').toLowerCase()
+  if (kind === 'image' || mime.startsWith('image/')) return 'mdi:file-image-outline'
+  if (kind === 'table' || mime.includes('spreadsheet') || /\.(csv|xlsx?|xls)$/i.test(name))
+    return 'mdi:table-large'
+  if (kind === 'document' || mime === 'application/pdf' || /\.pdf$/i.test(name)) return 'mdi:file-pdf-box'
+  return 'mdi:file-document-outline'
+}
 const baseDocTitle = import.meta.env.VITE_TITLE || ''
 const baseApi = import.meta.env.VITE_BASE_API || '/api/v1'
 
@@ -620,15 +713,23 @@ async function maybeResumePendingChatJob() {
 async function loadMessagesForSession(agentId, sid) {
   const res = await api.getAgentChatSessionMessages(agentId, sid)
   const rows = res.data?.messages || []
-  const list = rows.map((row, i) => ({
-    id: `hist-${i}-${row.timestamp}`,
-    role: row.type === 'human' ? 'user' : 'assistant',
-    content: row.content || '',
-    pending: false,
-    thinkingOpen: row.type === 'human' ? undefined : false,
-    ragSteps: Array.isArray(row.rag_steps) ? row.rag_steps : [],
-    ragTrace: row.rag_trace || null,
-  }))
+  const list = rows.map((row, i) => {
+    const role = row.type === 'human' ? 'user' : 'assistant'
+    const base = {
+      id: `hist-${i}-${row.timestamp}`,
+      role,
+      content: userContentFromHistoryRow(row),
+      pending: false,
+      thinkingOpen: row.type === 'human' ? undefined : false,
+      ragSteps: Array.isArray(row.rag_steps) ? row.rag_steps : [],
+      ragTrace: row.rag_trace || null,
+    }
+    if (role === 'user') {
+      const att = attachmentsFromHistoryRow(row)
+      if (att) base.attachments = att
+    }
+    return base
+  })
   messages.value = list
   sessionId.value = sid
   sessionPhase.value = list.length > 0 ? 'chat' : 'intro'
@@ -811,7 +912,11 @@ function handleUploadRequest({ onFinish }) {
 }
 
 function onUploadChange(options) {
-  const fileList = options.fileList || []
+  const rawList = options.fileList || []
+  if (rawList.length > MAX_CHAT_ATTACHMENTS) {
+    window.$message?.warning(t('views.agents.chat_attachments_limit', { n: MAX_CHAT_ATTACHMENTS }))
+  }
+  const fileList = rawList.slice(0, MAX_CHAT_ATTACHMENTS)
   pendingFiles.value = fileList.map((item) => {
     const raw = item.file
     const fileObj = raw instanceof File ? raw : raw?.file
@@ -819,6 +924,8 @@ function onUploadChange(options) {
       id: ++fileIdSeq,
       name: fileObj?.name || item.name || 'file',
       file: fileObj,
+      kind: '',
+      mime: (fileObj && fileObj.type) || '',
     }
   })
 }
@@ -903,12 +1010,8 @@ async function submitMessage() {
   }
 
   const rawInput = inputText.value.trim()
-  let text = rawInput
-  const attachments = pendingFiles.value.map((p) => ({ name: p.name }))
-  if (!text && attachments.length === 0) return
-  if (!text && attachments.length > 0) {
-    text = attachments.map((a) => a.name).join(', ')
-  }
+  const pendingSnapshot = [...pendingFiles.value]
+  if (!rawInput && pendingSnapshot.length === 0) return
 
   const agentId = Number(route.params.agentId)
   if (!Number.isFinite(agentId)) {
@@ -916,11 +1019,39 @@ async function submitMessage() {
     return
   }
 
+  sending.value = true
+  const attachmentIds = []
+  const attachmentsForDisplay = []
+  try {
+    for (const p of pendingSnapshot) {
+      if (!p.file) continue
+      const res = await api.uploadChatAttachment(agentId, sessionId.value, p.file)
+      const aid = res.data?.id
+      if (!aid) continue
+      attachmentIds.push(aid)
+      const d = res.data || {}
+      attachmentsForDisplay.push({
+        name: d.filename || p.name,
+        kind: d.kind || p.kind || '',
+        mime: d.mime || p.mime || '',
+      })
+    }
+  } catch {
+    sending.value = false
+    return
+  }
+
+  if (!rawInput && attachmentIds.length === 0) {
+    sending.value = false
+    return
+  }
   const userMsg = {
     id: `u-${Date.now()}`,
     role: 'user',
-    content: rawInput || text,
-    attachments: attachments.length ? attachments : undefined,
+    content:
+      rawInput ||
+      (attachmentIds.length ? t('views.agents.chat_msg_attachment_only') : ''),
+    attachments: attachmentsForDisplay.length ? attachmentsForDisplay : undefined,
   }
 
   if (sessionPhase.value === 'intro') {
@@ -949,7 +1080,6 @@ async function submitMessage() {
     ragSteps: [],
     ragTrace: null,
   })
-  sending.value = true
   scrollBodyToBottom()
 
   const idx = messages.value.findIndex((m) => m.id === assistantId)
@@ -963,9 +1093,10 @@ async function submitMessage() {
       },
       body: JSON.stringify({
         agent_id: agentId,
-        message: text,
+        message: rawInput,
         session_id: sessionId.value,
         use_knowledge_retrieval: useKnowledgeRetrieval.value,
+        attachment_ids: attachmentIds,
       }),
     })
 
@@ -1385,11 +1516,6 @@ html.dark .agent-chat-user-bubble {
   background: rgba(255, 255, 255, 0.07);
 }
 
-.agent-chat-msg-files--user {
-  max-width: min(85%, 520px);
-  text-align: right;
-}
-
 .agent-chat-feed-avatar {
   flex-shrink: 0;
 }
@@ -1611,16 +1737,6 @@ html.dark .agent-chat-user-text {
   color: rgba(255, 255, 255, 0.9);
 }
 
-.agent-chat-msg-files {
-  margin-top: 8px;
-  font-size: 12px;
-  color: #64748b;
-}
-
-html.dark .agent-chat-msg-files {
-  color: rgba(255, 255, 255, 0.45);
-}
-
 .agent-chat-footer {
   flex-shrink: 0;
   padding: 12px 20px 20px;
@@ -1722,18 +1838,104 @@ html.dark .agent-chat-input :deep(.n-input__placeholder) {
   margin-top: 4px;
 }
 
-.agent-chat-files-preview {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-
 .agent-chat-send {
   flex-shrink: 0;
   margin-left: auto;
+}
+
+.agent-chat-pending-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.agent-chat-attachment-boxes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.agent-chat-attachment-boxes--user {
+  justify-content: flex-end;
+  max-width: min(85%, 520px);
+  margin-left: auto;
+}
+
+.agent-chat-file-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 220px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  background: #f9fafb;
+  box-sizing: border-box;
+}
+
+html.dark .agent-chat-file-box {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.agent-chat-file-box--pending {
+  padding-right: 6px;
+}
+
+.agent-chat-file-box--readonly {
+  cursor: default;
+}
+
+.agent-chat-file-box-icon {
+  flex-shrink: 0;
+  color: #64748b;
+}
+
+html.dark .agent-chat-file-box-icon {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.agent-chat-file-box-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.35;
+  color: #334155;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+html.dark .agent-chat-file-box-name {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.agent-chat-file-box-remove {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 2px;
+  padding: 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  line-height: 0;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+
+.agent-chat-file-box-remove:hover:not(:disabled) {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.agent-chat-file-box-remove:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* Markdown + KaTeX（浅色：近黑字；暗黑：浅灰字） */

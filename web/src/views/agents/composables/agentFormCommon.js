@@ -18,6 +18,7 @@ export function emptyForm() {
     enable_code: false,
     opening_message: '',
     temperature: 0.1,
+    supports_vision: false,
   }
 }
 
