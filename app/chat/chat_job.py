@@ -69,6 +69,7 @@ async def create_chat_job(
     session_id: str,
     message: str,
     use_knowledge_retrieval: bool,
+    attachment_ids: list[str] | None = None,
 ) -> tuple[str, bool]:
     """
     创建 Job：若同会话已有 running 任务则返回 (existing_job_id, True)。
@@ -102,6 +103,7 @@ async def create_chat_job(
     await asyncio.to_thread(cache.set_json, ak, {"job_id": job_id}, _ttl())
 
     # 创建异步任务执行对话
+    aids = attachment_ids or []
     asyncio.create_task(
         _run_chat_job(
             job_id=job_id,
@@ -110,6 +112,7 @@ async def create_chat_job(
             session_id=session_id,
             message=message,
             use_knowledge_retrieval=use_knowledge_retrieval,
+            attachment_ids=aids,
         )
     )
     return job_id, False
@@ -123,6 +126,7 @@ async def _run_chat_job(
     session_id: str,
     message: str,
     use_knowledge_retrieval: bool,
+    attachment_ids: list[str] | None = None,
 ) -> None:
     from app.controllers.user_agent_recent import touch_recent_agent
 
@@ -146,6 +150,7 @@ async def _run_chat_job(
             agent_id,
             session_id,
             use_knowledge_retrieval=use_knowledge_retrieval,
+            attachment_ids=attachment_ids or [],
         ):
             # 追加事件
             await _append_event(job_id, seq, ev)
