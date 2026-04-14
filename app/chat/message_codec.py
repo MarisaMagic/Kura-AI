@@ -1,5 +1,5 @@
 """
-LangChain 消息与数据库存储之间的 JSON 编解码（含多模态 image_ref）。
+在 LangChain 消息 和 可持久化的 JSON 之间做编解码，并处理 多模态里的 image_ref（不存 base64，只存引用）。
 """
 
 from __future__ import annotations
