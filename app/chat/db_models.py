@@ -108,6 +108,7 @@ class ChatMessage(Base):
     session_ref_id: 会话ID (外键, 关联到 mg_chat_sessions.id, 级联删除)
     message_type: 消息类型
     content: 消息内容 (文本)
+    content_json: LangChain 消息整块 JSON（含多模态 image_ref 等），优先于 content 回放
     timestamp: 消息时间 (默认值为当前时间)
     rag_trace: 检索增强生成跟踪 (可选)
     rag_steps: 流式检索步骤列表 (可选，用于历史回放)
@@ -121,8 +122,38 @@ class ChatMessage(Base):
     )
     message_type: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    content_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     rag_trace: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     rag_steps: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     session = relationship("ChatSession", back_populates="messages")
+
+
+class ChatAttachment(Base):
+    """
+    会话内用户上传附件（与知识库 mg_kb_documents 分离）。
+    id: 主键
+    user_id: 用户ID (必填, 有索引)
+    agent_id: 智能体ID (必填, 有索引)
+    session_id: 会话ID (必填, 有索引)
+    original_filename: 原始文件名
+    stored_relpath: 存储路径
+    mime: 文件类型
+    size_bytes: 文件大小
+    kind: 文件类型
+    created_at: 创建时间
+    """
+
+    __tablename__ = "mg_chat_attachments"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    agent_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    session_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    original_filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    stored_relpath: Mapped[str] = mapped_column(String(1024), nullable=False)
+    mime: Mapped[str] = mapped_column(String(128), nullable=False, default="application/octet-stream")
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="other")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
