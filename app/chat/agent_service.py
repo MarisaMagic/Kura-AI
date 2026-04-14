@@ -20,6 +20,9 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from app.chat.attachment_service import build_storable_human_content, format_attachment_hint
+from app.chat.attachment_tools import make_session_attachment_tools
+from app.chat.message_codec import expand_messages_for_model, msg_content_to_str
 from app.chat.storage import storage
 from app.chat.tools import (
     get_current_weather,
@@ -33,29 +36,6 @@ from app.models.user_agent import UserAgent
 from app.utils.api_key_crypto import decrypt_api_key_safe
 
 
-def _msg_content_to_str(content: Any) -> str:
-    """
-    将消息内容转换为字符串
-    :param content: 消息内容
-    :return: 字符串
-    """
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and block.get("type") == "text":
-                parts.append(str(block.get("text", "")))
-            else:
-                parts.append(str(block))
-        return "\n".join(parts)
-    return str(content)
-
-
 def _format_one_message_for_debug(msg: BaseMessage) -> str:
     """
     格式化一条消息，用于调试
@@ -63,45 +43,26 @@ def _format_one_message_for_debug(msg: BaseMessage) -> str:
     :return: 字符串
     """
     if isinstance(msg, SystemMessage):
-        return f"[System]\n{_msg_content_to_str(msg.content)}"
+        return f"[System]\n{msg_content_to_str(msg.content)}"
     if isinstance(msg, HumanMessage):
-        return f"[Human]\n{_msg_content_to_str(msg.content)}"
+        return f"[Human]\n{msg_content_to_str(msg.content)}"
     if isinstance(msg, AIMessage):
         blocks = ["[AI]"]
         tool_calls = getattr(msg, "tool_calls", None)
         if tool_calls:
             blocks.append(f"tool_calls: {json.dumps(tool_calls, ensure_ascii=False)}")
-        body = _msg_content_to_str(getattr(msg, "content", ""))
+        body = msg_content_to_str(getattr(msg, "content", ""))
         if body:
             blocks.append(body)
         return "\n".join(blocks)
     if isinstance(msg, ToolMessage):
         name = getattr(msg, "name", "") or ""
-        return f"[Tool:{name}]\n{_msg_content_to_str(msg.content)}"
-    return f"[{type(msg).__name__}]\n{_msg_content_to_str(getattr(msg, 'content', ''))}"
-
-
-def _kb_tool_message_in_batch(msg: BaseMessage) -> bool:
-    """
-    判断一条消息是否是知识库工具消息
-    :param msg: 消息
-    :return: 是否是知识库工具消息
-    """
-    if not isinstance(msg, ToolMessage):
-        return False
-    if getattr(msg, "name", None) == "search_knowledge_base":
-        return True
-    c = _msg_content_to_str(getattr(msg, "content", ""))
-    return (
-        "Retrieved Chunks:" in c
-        or "No relevant documents found in the knowledge base" in c
-        or "TOOL_CALL_LIMIT_REACHED" in c
-        or "知识库检索出错" in c
-    )
+        return f"[Tool:{name}]\n{msg_content_to_str(msg.content)}"
+    return f"[{type(msg).__name__}]\n{msg_content_to_str(getattr(msg, 'content', ''))}"
 
 
 class _KbPromptDebugCallback(BaseCallbackHandler):
-    """在「含知识库工具结果」的那次 LLM 调用前打印完整输入消息列表。"""
+    """在每次 LLM 调用前打印完整输入消息列表（受 DEBUG_AGENT_KB_PROMPT 控制）。"""
 
     def on_chat_model_start(
         self,
@@ -116,8 +77,6 @@ class _KbPromptDebugCallback(BaseCallbackHandler):
         for batch in messages:
             if not batch:
                 continue
-            if not any(_kb_tool_message_in_batch(m) for m in batch):
-                continue
             sep = "=" * 72
             lines: list[str] = []
             for i, m in enumerate(batch):
@@ -125,22 +84,29 @@ class _KbPromptDebugCallback(BaseCallbackHandler):
                 lines.append(_format_one_message_for_debug(m))
             out = "\n".join(lines)
             print(
-                f"\n{sep}\n[智能体 LLM] 包含知识库工具结果后的完整输入消息（本轮发给模型的消息列表）:\n{sep}\n{out}\n{sep}\n",
+                f"\n{sep}\n[智能体 LLM] 本轮发给模型的完整消息列表:\n{sep}\n{out}\n{sep}\n",
                 flush=True,
             )
 
 
 def _agent_invoke_config() -> dict[str, Any]:
-    return {"recursion_limit": 8, "callbacks": [_KbPromptDebugCallback()]}
+    return {"recursion_limit": 25, "callbacks": [_KbPromptDebugCallback()]}
 
 
-def _compose_system_prompt(ua: UserAgent, use_knowledge_retrieval: bool = True) -> str:
+def _compose_system_prompt(
+    ua: UserAgent,
+    use_knowledge_retrieval: bool = True,
+    *,
+    session_attachment_hint: str = "",
+) -> str:
     """
-    组合智能体的系统提示词
+    组合智能体的系统提示词（工具如何调用由各工具的 description 说明，此处不重复指令）。
     :param ua: 智能体
-    :param use_knowledge_retrieval: 是否启用知识库检索相关说明
+    :param use_knowledge_retrieval: 保留参数以兼容调用方；不在此写入知识库工具说明
+    :param session_attachment_hint: 本会话已上传附件的纯事实列表（无工具调用指引）
     :return: 系统提示词
     """
+    _ = use_knowledge_retrieval
     parts: list[str] = []
     # 基础提示词, 用户在创建智能体时配置的前置提示词
     base = (ua.system_prompt or "").strip()
@@ -154,30 +120,28 @@ def _compose_system_prompt(ua: UserAgent, use_knowledge_retrieval: bool = True) 
     # 写代码能力说明
     if ua.enable_code:
         parts.append("用户希望你在适当时给出可运行的代码示例；注意标注语言与前提假设。")
-    # 工具使用说明（与前端「知识库检索」开关一致）
-    if use_knowledge_retrieval:
-        parts.append(
-            "你可以使用工具辅助回答。当用户问题涉及已上传文档或领域知识时，应使用 search_knowledge_base 检索本智能体知识库。"
-            "同一轮对话中对 search_knowledge_base 最多调用一次；得到工具结果后应直接基于检索内容给出最终回答。"
-            "若检索无结果，请如实说明。"
-        )
-    else:
-        parts.append("当前对话未启用知识库检索：请勿调用 search_knowledge_base，仅依据通用知识回答。")
-    # 返回组合后的系统提示词
+    if (session_attachment_hint or "").strip():
+        parts.append(session_attachment_hint.strip())
     return "\n\n".join(parts)
 
 
 def build_model_and_agent(
     ua: UserAgent,
     user_id: int,
+    agent_id: int,
+    session_id: str,
     *,
     use_knowledge_retrieval: bool = True,
+    session_attachment_hint: str = "",
 ) -> tuple[Any, Any]:
     """
     构建模型和智能体（知识库检索按 user_id + agent_id 隔离）。
     :param ua: 智能体
     :param user_id: 所属用户 ID
+    :param agent_id: 智能体 ID
+    :param session_id: 会话 ID（会话附件工具作用域）
     :param use_knowledge_retrieval: 是否注册知识库检索工具
+    :param session_attachment_hint: 本会话附件列表说明
     :return: 模型和智能体
     """
     # 解密 API Key
@@ -203,13 +167,18 @@ def build_model_and_agent(
         "model_name": ua.model_name,
     }
     tools: list[Any] = [get_current_weather]
+    tools.extend(make_session_attachment_tools(user_id, agent_id, session_id))
     if use_knowledge_retrieval:
         tools.append(make_search_knowledge_tool(kb_scope, llm_config))
     # create_agent 创建智能体, 使用模型和系统提示词
     agent = create_agent(
         model=model,
         tools=tools,
-        system_prompt=_compose_system_prompt(ua, use_knowledge_retrieval=use_knowledge_retrieval),
+        system_prompt=_compose_system_prompt(
+            ua,
+            use_knowledge_retrieval=use_knowledge_retrieval,
+            session_attachment_hint=session_attachment_hint,
+        ),
     )
     # 返回智能体和大模型
     return agent, model
@@ -224,7 +193,10 @@ def summarize_old_messages(model: Any, messages: list) -> str:
     """
     # 将对话消息转换为字符串, 用户和 AI 分别用不同的标识
     old_conversation = "\n".join(
-        [f"{'用户' if msg.type == 'human' else 'AI'}: {msg.content}" for msg in messages]
+        [
+            f"{'用户' if msg.type == 'human' else 'AI'}: {msg_content_to_str(msg.content)}"
+            for msg in messages
+        ]
     )
     # 构建总结提示词
     summary_prompt = f"""请总结以下对话的关键信息：
@@ -265,6 +237,7 @@ def chat_with_agent_sync(
     session_id: str,
     *,
     use_knowledge_retrieval: bool = True,
+    attachment_ids: list[str] | None = None,
 ) -> dict:
     """
     同步对话
@@ -273,16 +246,27 @@ def chat_with_agent_sync(
     :param user_id: 用户 ID
     :param agent_id: 智能体 ID
     :param session_id: 会话 ID
+    :param attachment_ids: 本会话已上传附件 ID（顺序与引用一致）
     :return: 响应结果
     """
-    # 构建智能体和大模型
-    agent, model = build_model_and_agent(ua, user_id, use_knowledge_retrieval=use_knowledge_retrieval)
+    attachment_ids = attachment_ids or []
     # 加载会话消息
     messages = storage.load(user_id, agent_id, session_id)
 
     # 清空 RAG 上下文, 重置工具调用守卫
     get_last_rag_context(clear=True)
     reset_tool_call_guards()
+
+    session_attachment_hint = format_attachment_hint(user_id, agent_id, session_id)
+    # 构建智能体和大模型（含会话附件工具）
+    agent, model = build_model_and_agent(
+        ua,
+        user_id,
+        agent_id,
+        session_id,
+        use_knowledge_retrieval=use_knowledge_retrieval,
+        session_attachment_hint=session_attachment_hint,
+    )
 
     # 如果会话消息超过 50 条, 则总结前面的历史对话
     if len(messages) > 50:
@@ -291,9 +275,21 @@ def chat_with_agent_sync(
         # 将总结添加到会话消息中
         messages = [SystemMessage(content=f"之前的对话摘要：\n{summary}")] + messages[40:]
 
-    # 将用户文本添加到会话消息中
-    messages.append(HumanMessage(content=user_text))
+    human_content = build_storable_human_content(
+        user_text,
+        attachment_ids,
+        user_id=user_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        supports_vision=bool(getattr(ua, "supports_vision", False)),
+    )
+    # 将用户消息添加到会话消息中（存库为 image_ref + 文本块 JSON）
+    messages.append(HumanMessage(content=human_content))
     storage.save(user_id, agent_id, session_id, messages, None)
+
+    to_invoke = expand_messages_for_model(
+        messages, user_id=user_id, agent_id=agent_id, session_id=session_id
+    )
 
     class _SyncRagStepCollector:
         def __init__(self) -> None:
@@ -305,8 +301,8 @@ def chat_with_agent_sync(
     rag_collector = _SyncRagStepCollector()
     set_rag_step_queue(rag_collector, sync=True)
     try:
-        # invoke 调用智能体
-        result = agent.invoke({"messages": messages}, config=_agent_invoke_config())
+        # invoke 调用智能体（展开 image_ref 为 data URL）
+        result = agent.invoke({"messages": to_invoke}, config=_agent_invoke_config())
     finally:
         set_rag_step_queue(None)
     # 提取响应内容
@@ -336,6 +332,7 @@ async def iter_chat_stream_events(
     session_id: str,
     *,
     use_knowledge_retrieval: bool = True,
+    attachment_ids: list[str] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """
     异步对话：产出与 SSE 中 `data: {...}` 相同结构的 dict 事件（供直连 SSE 与后台 Job 复用）。
@@ -348,13 +345,22 @@ async def iter_chat_stream_events(
     :param use_knowledge_retrieval: 是否启用知识库检索
     :return: 异步迭代器
     """
-    # 构建智能体和大模型, 并加载会话消息
-    agent, model = build_model_and_agent(ua, user_id, use_knowledge_retrieval=use_knowledge_retrieval)
+    attachment_ids = attachment_ids or []
     messages = storage.load(user_id, agent_id, session_id)
 
     # 清空 RAG 上下文, 重置工具调用守卫
     get_last_rag_context(clear=True)
     reset_tool_call_guards()
+
+    session_attachment_hint = format_attachment_hint(user_id, agent_id, session_id)
+    agent, model = build_model_and_agent(
+        ua,
+        user_id,
+        agent_id,
+        session_id,
+        use_knowledge_retrieval=use_knowledge_retrieval,
+        session_attachment_hint=session_attachment_hint,
+    )
 
     # 创建输出队列, 收集 RAG 步骤
     output_queue: asyncio.Queue = asyncio.Queue()
@@ -374,11 +380,22 @@ async def iter_chat_stream_events(
         summary = await asyncio.to_thread(summarize_old_messages, model, messages[:40])
         messages = [SystemMessage(content=f"之前的对话摘要：\n{summary}")] + messages[40:]
 
-    # 将用户文本添加到会话消息中
-    messages.append(HumanMessage(content=user_text))
+    human_content = build_storable_human_content(
+        user_text,
+        attachment_ids,
+        user_id=user_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        supports_vision=bool(getattr(ua, "supports_vision", False)),
+    )
+    messages.append(HumanMessage(content=human_content))
 
     # 生成完成前即落库用户消息，刷新后仍可从历史会话看到提问（助手在结束时再写入）
     await asyncio.to_thread(storage.save, user_id, agent_id, session_id, messages, None)
+
+    to_invoke = expand_messages_for_model(
+        messages, user_id=user_id, agent_id=agent_id, session_id=session_id
+    )
 
     # 初始化响应内容
     full_response = ""
@@ -388,7 +405,7 @@ async def iter_chat_stream_events(
         try:
             # 异步流式调用智能体
             async for msg, _metadata in agent.astream(
-                {"messages": messages},
+                {"messages": to_invoke},
                 stream_mode="messages",
                 config=_agent_invoke_config(),
             ):
@@ -465,6 +482,7 @@ async def chat_with_agent_stream(
     session_id: str,
     *,
     use_knowledge_retrieval: bool = True,
+    attachment_ids: list[str] | None = None,
 ) -> AsyncIterator[str]:
     """
     异步对话（SSE 字符串片段）
@@ -483,6 +501,7 @@ async def chat_with_agent_stream(
         agent_id,
         session_id,
         use_knowledge_retrieval=use_knowledge_retrieval,
+        attachment_ids=attachment_ids,
     ):
         yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"
