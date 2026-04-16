@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import math
 import re
-from bisect import bisect_right
+from bisect import bisect_right # 二分查找
 from collections import Counter
 
 from app.chat.attachment_service import extract_attachment_plaintext
 
-_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]") # 中日韩字符正则表达式
 
 
 def _tokenize(s: str) -> list[str]:
+    """
+    分词
+    :param s: 文本
+    :return: 分词列表
+    """
     s = (s or "").strip().lower()
     if not s:
         return []
@@ -20,7 +25,7 @@ def _tokenize(s: str) -> list[str]:
         try:
             import jieba
 
-            return [t for t in jieba.lcut(s) if t and str(t).strip()]
+            return [t for t in jieba.lcut(s) if t and str(t).strip()] # 使用 jieba 分词
         except ImportError:
             return [ch for ch in s if not ch.isspace()]
     return [t for t in re.split(r"\s+", s) if t]
@@ -33,7 +38,14 @@ def _bm25_scores(
     k1: float = 1.5,
     b: float = 0.75,
 ) -> list[float]:
-    """Okapi BM25，与常见实现一致；仅依赖标准库。"""
+    """
+    Okapi BM25，与常见实现一致；仅依赖标准库。
+    :param corpus_tokens: 语料库分词列表
+    :param query_tokens: 查询分词列表
+    :param k1: 调节因子
+    :param b: 调节因子
+    :return: 得分列表
+    """
     n_docs = len(corpus_tokens)
     if n_docs == 0:
         return []
@@ -62,6 +74,13 @@ def _bm25_scores(
 
 
 def _chunk_spans(text: str, chunk_size: int, overlap: int) -> list[tuple[int, int]]:
+    """
+    分块
+    :param text: 文本
+    :param chunk_size: 分块大小
+    :param overlap: 分块重叠大小
+    :return: 分块列表
+    """
     n = len(text)
     if n == 0:
         return []
@@ -79,9 +98,16 @@ def _chunk_spans(text: str, chunk_size: int, overlap: int) -> list[tuple[int, in
 
 
 def _page_for_offset(page_starts: tuple[int, ...], pos: int) -> int | None:
+    """
+    根据偏移量获取页码
+    :param page_starts: 页码列表
+    :param pos: 偏移量
+    :return: 页码
+    """
     if not page_starts:
         return None
-    i = bisect_right(page_starts, pos) - 1
+    # 二分查找，查找第一个大于 pos 的页码起始位置 - 1，返回插入位置的索引
+    i = bisect_right(page_starts, pos) - 1 
     if i < 0:
         i = 0
     return i + 1
@@ -94,6 +120,15 @@ def _expand_snippet(
     margin: int,
     max_snippet_chars: int,
 ) -> tuple[str, int, int]:
+    """
+    扩窗片段
+    :param text: 文本
+    :param core_start: 核心起始位置
+    :param core_end: 核心结束位置
+    :param margin: 扩窗大小
+    :param max_snippet_chars: 最大片段长度
+    :return: 扩窗片段
+    """
     n = len(text)
     s = max(0, core_start - margin)
     e = min(n, core_end + margin)
@@ -124,8 +159,20 @@ def search_attachment_text_bm25(
 ) -> str:
     """
     对单份会话附件全文做分块 BM25 检索，返回带字符范围与 PDF 页码（若有）的扩窗片段。
+    :param attachment_id: 附件ID
+    :param query: 查询关键词
+    :param user_id: 用户ID
+    :param agent_id: 智能体ID
+    :param session_id: 会话ID
+    :param top_k: 返回的命中数量
+    :param chunk_size: 分块大小
+    :param chunk_overlap: 分块重叠大小
+    :param expand_margin: 扩窗大小
+    :param max_snippet_chars: 最大片段长度
+    :param max_index_chars: 最大索引长度
+    :return: 检索结果
     """
-    q = (query or "").strip()
+    q = (query or "").strip() # 查询关键词
     if not q:
         return "错误：检索 query 为空。"
 
@@ -145,36 +192,36 @@ def search_attachment_text_bm25(
         text = text[:max_index_chars]
         truncated_note = f"\n（正文仅索引前 {max_index_chars} 字符，其后未参与检索。）"
 
-    spans = _chunk_spans(text, chunk_size, chunk_overlap)
+    spans = _chunk_spans(text, chunk_size, chunk_overlap) # 分块
     if not spans:
         return "附件正文为空，无法检索。"
 
-    corpus_tokens: list[list[str]] = []
+    corpus_tokens: list[list[str]] = [] # 语料库分词列表
     for s, e in spans:
-        t = _tokenize(text[s:e])
+        t = _tokenize(text[s:e]) # 分词
         corpus_tokens.append(t if t else ["_"])
 
-    q_tok = _tokenize(q)
+    q_tok = _tokenize(q) # 查询分词列表
     if not q_tok:
         return "错误：检索 query 分词后为空，请换一种关键词表述。"
 
-    scores = _bm25_scores(corpus_tokens, q_tok)
+    scores = _bm25_scores(corpus_tokens, q_tok) # 全文 BM25 打分列表
 
-    k = max(1, min(int(top_k), 20))
-    idx_sorted = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
+    k = max(1, min(int(top_k), 20)) # 返回的命中数量
+    idx_sorted = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k] # 按得分排序的索引列表
 
-    lines: list[str] = [
+    lines: list[str] = [ # 检索结果列表
         f"BM25 检索命中（共取 top {k} 条），query={q!r}{truncated_note}",
         "",
     ]
     for rank, i in enumerate(idx_sorted, start=1):
-        s, e = spans[i]
-        score = float(scores[i])
+        s, e = spans[i] # 分块起始位置和结束位置
+        score = float(scores[i]) # 得分
         mid = (s + e) // 2
-        snippet, sn_s, sn_e = _expand_snippet(text, s, e, expand_margin, max_snippet_chars)
-        page = _page_for_offset(ext.page_starts, mid)
+        snippet, sn_s, sn_e = _expand_snippet(text, s, e, expand_margin, max_snippet_chars) # 扩窗片段
+        page = _page_for_offset(ext.page_starts, mid) # 页码
         if page is not None:
-            loc = f"页码≈{page} char=[{sn_s},{sn_e}) chunk=[{s},{e}) score={score:.4f}"
+            loc = f"页码≈{page} char=[{sn_s},{sn_e}) chunk=[{s},{e}) score={score:.4f}" # 位置
         else:
             loc = f"char=[{sn_s},{sn_e}) chunk=[{s},{e}) score={score:.4f}"
         lines.append(f"--- 命中 #{rank} ({loc}) ---")

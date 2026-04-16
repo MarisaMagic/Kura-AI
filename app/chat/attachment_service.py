@@ -421,17 +421,19 @@ def extract_attachment_plaintext(
 
             loader = PyPDFLoader(path)
             docs = loader.load()
+            # 抽取 pdf 中每一页的文本内容
             parts = [(d.page_content or "").strip() for d in docs]
+            # 计算每一页的文本内容在 text 中的起始字符下标
             page_starts: list[int] = []
-            acc = 0
+            acc = 0  # 累加每一页的文本内容的长度，用于计算每一页的文本内容在 text 中的起始字符下标
             for i, p in enumerate(parts):
-                page_starts.append(acc)
-                acc += len(p)
-                if i + 1 < len(parts):
+                page_starts.append(acc) # 添加每一页的文本内容在 text 中的起始字符下标
+                acc += len(p) # 累加每一页的文本内容的长度
+                if i + 1 < len(parts): # 如果还有下一页，则添加换行符
                     acc += 2
-            text = "\n\n".join(parts)
+            text = "\n\n".join(parts) # 将每一页的文本内容拼接起来
             text = (text or "").strip()
-            return AttachmentPlaintextExtract(text=text, page_starts=tuple(page_starts)), None
+            return AttachmentPlaintextExtract(text=text, page_starts=tuple(page_starts)), None # 返回附件全文抽取结果
 
         if suf == ".docx":
             from langchain_community.document_loaders import Docx2txtLoader

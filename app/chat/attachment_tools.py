@@ -34,9 +34,9 @@ def make_session_attachment_tools(user_id: int, agent_id: int, session_id: str) 
             msc = max(200, min(int(max_snippet_chars), 4000))
         except (TypeError, ValueError):
             msc = 800
-        return search_attachment_text_bm25(
+        return search_attachment_text_bm25( # 调用附件全文检索工具（BM25 打分），返回最相关的若干正文片段（含大致页码/字符范围）
             aid,
-            (query or "").strip(),
+            (query or "").strip(), # 查询关键词
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
