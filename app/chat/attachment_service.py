@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -375,6 +376,91 @@ def build_storable_human_content(
     return blocks
 
 
+@dataclass(frozen=True)
+class AttachmentPlaintextExtract:
+    """附件全文抽取结果（供 read_attachment_text 与 BM25 检索共用）。"""
+
+    text: str
+    page_starts: tuple[int, ...]
+    """PDF 时每页在 text 中的起始字符下标（第 i 页对应 page_starts[i]）；非 PDF 为空元组。"""
+
+
+def extract_attachment_plaintext(
+    attachment_id: str,
+    *,
+    user_id: int,
+    agent_id: int,
+    session_id: str,
+) -> tuple[AttachmentPlaintextExtract | None, str | None]:
+    """
+    抽取附件完整纯文本（不截断）。成功返回 (extract, None)，失败返回 (None, 错误说明)。
+    """
+    row = get_attachment_row(attachment_id, user_id=user_id, agent_id=agent_id, session_id=session_id)
+    if not row:
+        return None, "错误：附件不存在或无权访问。"
+    path = _abs_path(row.stored_relpath)
+    if not os.path.isfile(path):
+        return None, "错误：附件文件已丢失。"
+
+    kind = row.kind
+    suf = Path(row.original_filename).suffix.lower()
+
+    try:
+        if kind == "image":
+            return None, (
+                "该附件为图片；若已启用多模态视觉，模型可直接理解。否则无法以文本工具读取图片内容。"
+            )
+
+        if suf in (".txt", ".md"):
+            raw = Path(path).read_bytes()
+            text = raw.decode("utf-8", errors="replace")
+            return AttachmentPlaintextExtract(text=text, page_starts=()), None
+
+        if suf == ".pdf":
+            from langchain_community.document_loaders import PyPDFLoader
+
+            loader = PyPDFLoader(path)
+            docs = loader.load()
+            parts = [(d.page_content or "").strip() for d in docs]
+            page_starts: list[int] = []
+            acc = 0
+            for i, p in enumerate(parts):
+                page_starts.append(acc)
+                acc += len(p)
+                if i + 1 < len(parts):
+                    acc += 2
+            text = "\n\n".join(parts)
+            text = (text or "").strip()
+            return AttachmentPlaintextExtract(text=text, page_starts=tuple(page_starts)), None
+
+        if suf == ".docx":
+            from langchain_community.document_loaders import Docx2txtLoader
+
+            loader = Docx2txtLoader(path)
+            docs = loader.load()
+            text = "\n\n".join((d.page_content or "") for d in docs)
+            text = (text or "").strip()
+            return AttachmentPlaintextExtract(text=text, page_starts=()), None
+
+        if suf == ".csv":
+            import pandas as pd
+
+            df = pd.read_csv(path, nrows=2000)
+            text = df.to_string()
+            return AttachmentPlaintextExtract(text=text, page_starts=()), None
+
+        if suf in (".xlsx", ".xls"):
+            import pandas as pd
+
+            df = pd.read_excel(path, nrows=2000, header=None)
+            text = df.to_string()
+            return AttachmentPlaintextExtract(text=text, page_starts=()), None
+    except Exception as e:
+        return None, f"读取附件失败：{e}"
+
+    return None, "不支持的附件类型。"
+
+
 def read_attachment_text(
     attachment_id: str,
     *,
@@ -392,59 +478,11 @@ def read_attachment_text(
     :param max_chars: 最大字符数
     :return: 附件文本
     """
-    row = get_attachment_row(attachment_id, user_id=user_id, agent_id=agent_id, session_id=session_id)
-    if not row:
-        return "错误：附件不存在或无权访问。"
-    path = _abs_path(row.stored_relpath)
-    if not os.path.isfile(path):
-        return "错误：附件文件已丢失。"
-
-    kind = row.kind
-    suf = Path(row.original_filename).suffix.lower()
-
-    try:
-        if kind == "image":  # 如果附件类型为图片
-            return "该附件为图片；若已启用多模态视觉，模型可直接理解。否则无法以文本工具读取图片内容。"
-
-        if suf in (".txt", ".md"):  # 如果附件类型为文本
-            raw = Path(path).read_bytes()
-            text = raw.decode("utf-8", errors="replace")
-            return text[:max_chars] + ("…\n（已截断）" if len(text) > max_chars else "")
-
-        if suf == ".pdf":  # 如果附件类型为PDF
-            from langchain_community.document_loaders import PyPDFLoader
-
-            # 使用LangChain的PDFLoader加载PDF文件
-            loader = PyPDFLoader(path)
-            docs = loader.load()
-            text = "\n\n".join((d.page_content or "") for d in docs)
-            text = (text or "").strip()
-            return text[:max_chars] + ("…\n（已截断）" if len(text) > max_chars else "")
-
-        if suf == ".docx":  # 如果附件类型为Word文档
-            from langchain_community.document_loaders import Docx2txtLoader
-
-            # 使用LangChain的Docx2txtLoader加载Word文档
-            loader = Docx2txtLoader(path)
-            docs = loader.load()
-            text = "\n\n".join((d.page_content or "") for d in docs)
-            text = (text or "").strip()
-            return text[:max_chars] + ("…\n（已截断）" if len(text) > max_chars else "")
-
-        if suf == ".csv":  # 如果附件类型为CSV
-            import pandas as pd
-
-            df = pd.read_csv(path, nrows=2000)  # 读取CSV文件
-            text = df.to_string()
-            return text[:max_chars] + ("…\n（已截断）" if len(text) > max_chars else "")
-
-        if suf in (".xlsx", ".xls"):  # 如果附件类型为Excel
-            import pandas as pd
-
-            df = pd.read_excel(path, nrows=2000, header=None)  # 读取Excel文件
-            text = df.to_string()
-            return text[:max_chars] + ("…\n（已截断）" if len(text) > max_chars else "")
-    except Exception as e:
-        return f"读取附件失败：{e}"
-
-    return "不支持的附件类型。"
+    ext, err = extract_attachment_plaintext(
+        attachment_id, user_id=user_id, agent_id=agent_id, session_id=session_id
+    )
+    if err:
+        return err
+    assert ext is not None
+    text = ext.text
+    return text[:max_chars] + ("…\n（已截断）" if len(text) > max_chars else "")

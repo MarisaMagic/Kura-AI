@@ -4,15 +4,52 @@ from __future__ import annotations
 
 from langchain_core.tools import tool
 
+from app.chat.attachment_bm25_search import search_attachment_text_bm25
 from app.chat.attachment_service import format_attachment_hint, read_attachment_text
 
 
 def make_session_attachment_tools(user_id: int, agent_id: int, session_id: str) -> list:
     @tool
+    def search_session_attachment(
+        attachment_id: str,
+        query: str,
+        top_k: int = 5,
+        max_snippet_chars: int = 800,
+    ) -> str:
+        """在单份会话附件全文内做 BM25 关键词检索，返回最相关的若干正文片段（含大致页码/字符范围）。
+
+        何时使用：文档较长或不确定答案在文首/文尾时，根据用户意图构造简短检索句或关键词后再调用，用于定位段落。
+        何时不要使用：图片附件；用户已明确只要文首少量内容且可直接 read_session_attachment。
+        query：可由用户问题压缩为关键词或短语（中英文均可；中文将分词）。
+        attachment_id 来自系统消息中的会话附件列表或 list_session_attachments_brief。
+        """
+        aid = (attachment_id or "").strip()
+        if not aid:
+            return "错误：attachment_id 为空。"
+        try:
+            tk = max(1, min(int(top_k), 20))
+        except (TypeError, ValueError):
+            tk = 5
+        try:
+            msc = max(200, min(int(max_snippet_chars), 4000))
+        except (TypeError, ValueError):
+            msc = 800
+        return search_attachment_text_bm25(
+            aid,
+            (query or "").strip(),
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            top_k=tk,
+            max_snippet_chars=msc,
+        )
+
+    @tool
     def read_session_attachment(attachment_id: str, max_chars: int = 12000) -> str:
         """读取本会话中「文本类/表格类」附件的正文片段（pdf、docx、txt、md、csv、xlsx）。
 
         何时使用：用户问题需要引用某份文档/表格的具体文字或数据，且 attachment_id 已知时调用。
+        长文档优先用 search_session_attachment 定位后再读本工具，避免只看到文首截断。
         何时不要使用：kind为 image 的附件；用户消息里已包含的图片（多模态）请直接根据图像回答，不要调用本工具试图「读图」。
         参数 attachment_id 来自系统消息中的会话附件列表或 list_session_attachments_brief 的返回。
         """
@@ -37,4 +74,4 @@ def make_session_attachment_tools(user_id: int, agent_id: int, session_id: str) 
         """
         return format_attachment_hint(user_id, agent_id, session_id) or "本会话暂无附件。"
 
-    return [read_session_attachment, list_session_attachments_brief]
+    return [search_session_attachment, read_session_attachment, list_session_attachments_brief]

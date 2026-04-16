@@ -90,7 +90,7 @@ class _KbPromptDebugCallback(BaseCallbackHandler):
 
 
 def _agent_invoke_config() -> dict[str, Any]:
-    return {"recursion_limit": 25, "callbacks": [_KbPromptDebugCallback()]}
+    return {"recursion_limit": 30, "callbacks": [_KbPromptDebugCallback()]}
 
 
 def _compose_system_prompt(
