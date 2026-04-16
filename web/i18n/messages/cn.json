@@ -93,6 +93,7 @@
       "chat_msg_demo_reply": "（演示）对话接口尚未接入后端，已收到您的消息。接入模型后将在此显示回复。",
       "chat_msg_need_login": "请先登录",
       "chat_msg_stream_error": "回复失败",
+      "chat_feed_error_title": "错误",
       "chat_msg_aborted": "已终止回答",
       "chat_msg_restart_ok": "已开启新对话",
       "chat_msg_like_ok": "感谢反馈",

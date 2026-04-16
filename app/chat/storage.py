@@ -153,11 +153,15 @@ class ConversationStorage:
             for idx, msg in enumerate(messages):
                 rag_trace = None
                 rag_steps = None
+                error_text = None
                 # 检查额外消息数据, 如果有 RAG 追踪信息, 则添加到消息中
                 if extra_message_data and idx < len(extra_message_data):
                     extra = extra_message_data[idx] or {}
                     rag_trace = extra.get("rag_trace")
                     rag_steps = extra.get("rag_steps")
+                    raw_err = extra.get("error_text")
+                    if raw_err is not None:
+                        error_text = str(raw_err).strip() or None
 
                 envelope = serialize_message_envelope(msg)
                 preview = msg_content_to_str(getattr(msg, "content", ""))
@@ -174,6 +178,7 @@ class ConversationStorage:
                         timestamp=now,
                         rag_trace=rag_trace,
                         rag_steps=rag_steps,
+                        error_text=error_text,
                     )
                 )
                 # 将新消息添加到序列化列表
@@ -185,6 +190,7 @@ class ConversationStorage:
                         "timestamp": now.isoformat(),
                         "rag_trace": rag_trace,
                         "rag_steps": rag_steps,
+                        "error_text": error_text,
                     }
                 )
 
@@ -364,6 +370,7 @@ class ConversationStorage:
                     "timestamp": row.timestamp.isoformat(),
                     "rag_trace": row.rag_trace,
                     "rag_steps": row.rag_steps,
+                    "error_text": row.error_text,
                 }
                 if env:
                     item["content_json"] = env

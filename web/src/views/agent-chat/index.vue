@@ -147,13 +147,26 @@
 
                       <div class="agent-chat-feed-body">
                         <div
-                          v-if="!m.pending"
+                          v-if="!m.pending && (m.errorText || '').trim()"
+                          class="agent-chat-msg-error"
+                          role="alert"
+                        >
+                          <div class="agent-chat-msg-error-label">
+                            {{ $t('views.agents.chat_feed_error_title') }}
+                          </div>
+                          <div class="agent-chat-msg-error-text">{{ m.errorText }}</div>
+                        </div>
+                        <div
+                          v-if="!m.pending && (m.content || '').trim()"
                           class="agent-chat-md"
                           v-html="renderAgentChatMarkdown(m.content)"
                         />
                       </div>
                       <div
-                        v-if="!m.pending && (m.content || '').trim()"
+                        v-if="
+                          !m.pending &&
+                          ((m.content || '').trim() || (m.errorText || '').trim())
+                        "
                         class="agent-chat-assistant-actions"
                       >
                         <n-tooltip :show-arrow="false" placement="top">
@@ -583,7 +596,7 @@ function applyChatSsePayload(data, idx) {
     const cur = messages.value[idx]
     messages.value[idx] = {
       ...cur,
-      content: `${cur.content || ''}\n[Error: ${data.content}]`,
+      errorText: data.content || '',
       pending: false,
       thinkingOpen: cur.thinkingOpen ?? false,
       ragSteps: cur.ragSteps || [],
@@ -674,6 +687,7 @@ async function maybeResumePendingChatJob() {
       id: assistantId,
       role: 'assistant',
       content: '',
+      errorText: undefined,
       pending: true,
       thinkingOpen: true,
       ragSteps: [],
@@ -723,6 +737,7 @@ async function loadMessagesForSession(agentId, sid) {
       thinkingOpen: row.type === 'human' ? undefined : false,
       ragSteps: Array.isArray(row.rag_steps) ? row.rag_steps : [],
       ragTrace: row.rag_trace || null,
+      errorText: row.error_text || undefined,
     }
     if (role === 'user') {
       const att = attachmentsFromHistoryRow(row)
@@ -869,9 +884,27 @@ function assistantPlainTextFromMarkdown(md) {
   return s.trim()
 }
 
+function assistantMarkdownForCopy(m) {
+  const parts = []
+  if ((m.content || '').trim()) parts.push(m.content)
+  if ((m.errorText || '').trim()) {
+    parts.push(`[${t('views.agents.chat_feed_error_title')}] ${m.errorText}`)
+  }
+  return parts.join('\n\n')
+}
+
+function assistantPlainForCopy(m) {
+  const parts = []
+  if ((m.content || '').trim()) parts.push(assistantPlainTextFromMarkdown(m.content))
+  if ((m.errorText || '').trim()) {
+    parts.push(`[${t('views.agents.chat_feed_error_title')}] ${m.errorText}`)
+  }
+  return parts.join('\n\n')
+}
+
 async function copyAssistantPlain(m) {
   try {
-    await navigator.clipboard.writeText(assistantPlainTextFromMarkdown(m.content || ''))
+    await navigator.clipboard.writeText(assistantPlainForCopy(m))
     window.$message?.success(t('views.agents.chat_copy_success'))
   } catch {
     window.$message?.error(t('views.agents.chat_copy_fail'))
@@ -880,7 +913,7 @@ async function copyAssistantPlain(m) {
 
 async function copyAssistantMarkdown(m) {
   try {
-    await navigator.clipboard.writeText(m.content || '')
+    await navigator.clipboard.writeText(assistantMarkdownForCopy(m))
     window.$message?.success(t('views.agents.chat_copy_success'))
   } catch {
     window.$message?.error(t('views.agents.chat_copy_fail'))
@@ -1075,6 +1108,7 @@ async function submitMessage() {
     id: assistantId,
     role: 'assistant',
     content: '',
+    errorText: undefined,
     pending: true,
     thinkingOpen: false,
     ragSteps: [],
@@ -1161,7 +1195,7 @@ async function submitMessage() {
       const row = messages.value[idx]
       messages.value[idx] = {
         ...row,
-        content: t('views.agents.chat_msg_stream_error') + `：${error?.message || error}`,
+        errorText: t('views.agents.chat_msg_stream_error') + `：${error?.message || error}`,
         pending: false,
         thinkingOpen: row.thinkingOpen ?? false,
         ragSteps: row.ragSteps || [],
@@ -1936,6 +1970,40 @@ html.dark .agent-chat-file-box-name {
 .agent-chat-file-box-remove:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* 助手消息错误块（流式/历史） */
+.agent-chat-msg-error {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.08);
+  box-sizing: border-box;
+}
+
+html.dark .agent-chat-msg-error {
+  border-color: rgba(248, 113, 113, 0.4);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.agent-chat-msg-error-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--n-error-color);
+  margin-bottom: 6px;
+}
+
+.agent-chat-msg-error-text {
+  font-size: 14px;
+  line-height: 1.45;
+  color: #7f1d1d;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+html.dark .agent-chat-msg-error-text {
+  color: rgba(254, 202, 202, 0.95);
 }
 
 /* Markdown + KaTeX（浅色：近黑字；暗黑：浅灰字） */

@@ -66,6 +66,7 @@ class MessageInfo(BaseModel):
     :param timestamp: 消息时间戳
     :param rag_trace: RAG 追踪信息
     :param rag_steps: 检索步骤（与 SSE rag_step 一致，用于历史回放）
+    :param error_text: 助手消息生成失败时的错误说明（可选，用于历史展示）
     """
     type: str
     content: Any = ""
@@ -73,6 +74,7 @@ class MessageInfo(BaseModel):
     timestamp: str
     rag_trace: Optional[dict[str, Any]] = None
     rag_steps: Optional[list[dict[str, Any]]] = None
+    error_text: Optional[str] = None
 
 
 class SessionMessagesResponse(BaseModel):

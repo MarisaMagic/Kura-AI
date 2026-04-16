@@ -112,6 +112,7 @@ class ChatMessage(Base):
     timestamp: 消息时间 (默认值为当前时间)
     rag_trace: 检索增强生成跟踪 (可选)
     rag_steps: 流式检索步骤列表 (可选，用于历史回放)
+    error_text: 本条助手消息生成失败时的错误文案 (可选)
     通过 session 属性回关到 ChatSession
     """
     __tablename__ = "mg_chat_messages"
@@ -126,6 +127,7 @@ class ChatMessage(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     rag_trace: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     rag_steps: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     session = relationship("ChatSession", back_populates="messages")
 

@@ -300,26 +300,33 @@ def chat_with_agent_sync(
 
     rag_collector = _SyncRagStepCollector()
     set_rag_step_queue(rag_collector, sync=True)
+    caught_exc: Exception | None = None
+    response_content = ""
     try:
         # invoke 调用智能体（展开 image_ref 为 data URL）
         result = agent.invoke({"messages": to_invoke}, config=_agent_invoke_config())
+        response_content = _extract_response_content(result)
+    except Exception as e:
+        caught_exc = e
     finally:
         set_rag_step_queue(None)
-    # 提取响应内容
-    response_content = _extract_response_content(result)
-    messages.append(AIMessage(content=response_content))
 
     # 获取 RAG 上下文
     rag_context = get_last_rag_context(clear=True)
     # 获取 RAG 追踪
     rag_trace = rag_context.get("rag_trace") if rag_context else None
 
-    # 构建额外消息数据
+    error_text = str(caught_exc) if caught_exc else None
+    messages.append(AIMessage(content=response_content))
+    # 构建额外消息数据（含失败时的 error_text 供历史展示）
     extra_message_data = [None] * (len(messages) - 1) + [
-        {"rag_trace": rag_trace, "rag_steps": rag_collector.steps or None}
+        {"rag_trace": rag_trace, "rag_steps": rag_collector.steps or None, "error_text": error_text}
     ]
     # 保存会话消息，保存最新一轮对话消息到数据库对应会话并更新 Redis 缓存
     storage.save(user_id, agent_id, session_id, messages, extra_message_data=extra_message_data)
+
+    if caught_exc:
+        raise caught_exc
 
     return {"response": response_content, "rag_trace": rag_trace}
 
@@ -399,9 +406,10 @@ async def iter_chat_stream_events(
 
     # 初始化响应内容
     full_response = ""
+    stream_error: str | None = None
     # 创建异步任务, 调用智能体
     async def _agent_worker() -> None:
-        nonlocal full_response
+        nonlocal full_response, stream_error
         try:
             # 异步流式调用智能体
             async for msg, _metadata in agent.astream(
@@ -428,7 +436,8 @@ async def iter_chat_stream_events(
                     full_response += content
                     await output_queue.put({"type": "content", "content": content})
         except Exception as e:
-            await output_queue.put({"type": "error", "content": str(e)})
+            stream_error = str(e)
+            await output_queue.put({"type": "error", "content": stream_error})
         finally:
             await output_queue.put(None)
 
@@ -464,9 +473,13 @@ async def iter_chat_stream_events(
 
     # 将响应内容添加到会话消息中
     messages.append(AIMessage(content=full_response))
-    # 构建额外消息数据
+    # 构建额外消息数据（含流式失败时的 error_text 供历史展示）
     extra_message_data = [None] * (len(messages) - 1) + [
-        {"rag_trace": rag_trace, "rag_steps": rag_steps_collected or None}
+        {
+            "rag_trace": rag_trace,
+            "rag_steps": rag_steps_collected or None,
+            "error_text": stream_error,
+        }
     ]
     # 保存会话消息，保存最新一轮对话消息到数据库对应会话并更新 Redis 缓存
     storage.save(user_id, agent_id, session_id, messages, extra_message_data=extra_message_data)
