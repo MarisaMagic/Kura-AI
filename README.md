@@ -8,17 +8,29 @@
 
 ### 智能体中心
 
-![](./deploy/sample-picture/agent-hub.png)
+
 
 ### 智能体对话
 
-![](./deploy/sample-picture/agent-chat-1.png)
 
-![](./deploy/sample-picture/agent-chat-2.png)
 
-### 会话列表
+支持 latex、代码块渲染：
 
-![](./deploy/sample-picture/session-list.png)
+
+
+### 附件内容对话
+
+
+
+### 知识库检索
+
+
+
+### 多模态大模型
+
+
+
+
 
 ### 本地启动
 #### 后端
@@ -77,6 +89,12 @@ pnpm dev
 ```sh
 # 读取当前目录下的 docker-compose.yml 文件，并启动其中定义的所有服务。
 docker compose up -d
+```
+
+停止所有数据库服务:
+
+```sh
+docker compose stop
 ```
 
 ### 目录说明
