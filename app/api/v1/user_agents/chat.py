@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from app.chat.agent_service import chat_with_agent_stream, chat_with_agent_sync
 from app.chat.attachment_service import save_uploaded_file
-from app.chat.chat_job import create_chat_job, get_job_meta, iter_job_sse_events, verify_job_owner
+from app.chat.chat_job import create_chat_job, get_job_meta, iter_job_sse_events, request_chat_job_cancel, verify_job_owner
 from app.chat.storage import storage
 from app.controllers.user_agent import user_agent_controller
 from app.controllers.user_agent_recent import list_recent_agents_public, touch_recent_agent
@@ -166,6 +166,7 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
                 session_id,
                 use_knowledge_retrieval=request.use_knowledge_retrieval,
                 attachment_ids=request.attachment_ids or None,
+                regenerate=request.regenerate,
             ):
                 yield chunk
             # 更新最近使用智能体
@@ -211,7 +212,8 @@ async def create_chat_job_endpoint(request: ChatRequest, current_user: User = De
         session_id=session_id,
         message=request.message.strip(),
         use_knowledge_retrieval=request.use_knowledge_retrieval,
-        attachment_ids=request.attachment_ids or None, # 接收附件ID列表
+        attachment_ids=request.attachment_ids or None,
+        regenerate=request.regenerate,
     )
     if is_dup:
         # 如果已有进行中的生成任务，则返回409错误
@@ -239,6 +241,25 @@ async def get_chat_job_endpoint(job_id: str, current_user: User = Depends(AuthCo
     if not meta or int(meta.get("user_id", -1)) != int(current_user.id):
         raise HTTPException(status_code=404, detail="任务不存在或无权限")
     return Success(data=meta)
+
+
+@router.post("/chat/jobs/{job_id}/cancel", summary="停止正在进行的对话生成", tags=["智能体模块"])
+async def cancel_chat_job_endpoint(job_id: str, current_user: User = Depends(AuthControl.is_authed)):
+    """
+    用户主动停止生成：协作中断模型输出，不写入本轮助手消息（或仅保留已流式展示由前端决定）。
+    :param job_id: Job ID
+    :param current_user: 当前用户
+    :return: Success
+    """
+    if not verify_job_owner(job_id, current_user.id):
+        raise HTTPException(status_code=404, detail="任务不存在或无权限")
+    meta = get_job_meta(job_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail="任务不存在或无权限")
+    if meta.get("status") != "running":
+        return Success(data={"ok": True, "already_finished": True})
+    await request_chat_job_cancel(job_id)
+    return Success(data={"ok": True})
 
 
 @router.get(

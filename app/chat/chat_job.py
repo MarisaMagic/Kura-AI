@@ -37,6 +37,22 @@ def _active_key(user_id: int, agent_id: int, session_id: str) -> str:
     return f"chat_job_active:{user_id}:{agent_id}:{session_id}"
 
 
+def _cancel_key(job_id: str) -> str:
+    """用户请求停止生成时写入的标记 key。"""
+    return f"chat_job:{job_id}:cancel"
+
+
+def is_job_cancel_requested(job_id: str) -> bool:
+    """是否已请求取消该 Job（同步读缓存，供 iter 内 to_thread 调用）。"""
+    raw = cache.get_json(_cancel_key(job_id))
+    return bool(raw)
+
+
+async def request_chat_job_cancel(job_id: str) -> None:
+    """标记 Job 为「用户请求停止」，协作式中断生成。"""
+    await asyncio.to_thread(cache.set_json, _cancel_key(job_id), {"v": 1}, _ttl())
+
+
 def _ttl() -> int:
     """
     获取 Job 过期时间
@@ -70,6 +86,7 @@ async def create_chat_job(
     message: str,
     use_knowledge_retrieval: bool,
     attachment_ids: list[str] | None = None,
+    regenerate: bool = False,
 ) -> tuple[str, bool]:
     """
     创建 Job：若同会话已有 running 任务则返回 (existing_job_id, True)。
@@ -113,6 +130,7 @@ async def create_chat_job(
             message=message,
             use_knowledge_retrieval=use_knowledge_retrieval,
             attachment_ids=aids,
+            regenerate=regenerate,
         )
     )
     return job_id, False
@@ -127,6 +145,7 @@ async def _run_chat_job(
     message: str,
     use_knowledge_retrieval: bool,
     attachment_ids: list[str] | None = None,
+    regenerate: bool = False,
 ) -> None:
     from app.controllers.user_agent_recent import touch_recent_agent
 
@@ -142,6 +161,7 @@ async def _run_chat_job(
             await _finish_meta(job_id, status="failed", error="智能体不存在")
             return
 
+        user_cancelled = False
         # 异步迭代流式事件
         async for ev in iter_chat_stream_events(
             ua,
@@ -151,18 +171,24 @@ async def _run_chat_job(
             session_id,
             use_knowledge_retrieval=use_knowledge_retrieval,
             attachment_ids=attachment_ids or [],
+            regenerate=regenerate,
+            cancel_check=lambda jid=job_id: is_job_cancel_requested(jid),
         ):
             # 追加事件
             await _append_event(job_id, seq, ev)
             seq += 1
+            if ev.get("type") == "done" and ev.get("cancelled"):
+                user_cancelled = True
 
-        # 完成任务
-        await _finish_meta(job_id, status="completed", error=None)
-        # 更新最近使用智能体
-        try:
-            await touch_recent_agent(user_id, agent_id)
-        except Exception:
-            pass
+        if user_cancelled:
+            await _finish_meta(job_id, status="cancelled", error=None)
+        else:
+            await _finish_meta(job_id, status="completed", error=None)
+            # 更新最近使用智能体
+            try:
+                await touch_recent_agent(user_id, agent_id)
+            except Exception:
+                pass
     except Exception as e:
         await _append_event(job_id, seq, {"type": "error", "content": str(e)})
         await _finish_meta(job_id, status="failed", error=str(e))
@@ -180,6 +206,7 @@ async def _finish_meta(job_id: str, *, status: str, error: str | None) -> None:
     meta["status"] = status
     meta["error"] = error
     await asyncio.to_thread(cache.set_json, _meta_key(job_id), meta, _ttl())
+    await asyncio.to_thread(cache.delete, _cancel_key(job_id))
 
 
 def get_job_meta(job_id: str) -> dict[str, Any] | None:

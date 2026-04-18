@@ -85,6 +85,8 @@
       "title_agent_chat": "Agent chat",
       "chat_placeholder_input": "Enter your question or request",
       "chat_button_send": "Send",
+      "chat_button_stop": "Stop",
+      "chat_regenerate_tooltip": "Regenerate this reply",
       "chat_button_restart": "Restart chat",
       "chat_kb_retrieval": "Knowledge retrieval",
       "chat_button_like": "Like",

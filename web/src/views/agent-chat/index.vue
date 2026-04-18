@@ -157,6 +157,13 @@
                           <div class="agent-chat-msg-error-text">{{ m.errorText }}</div>
                         </div>
                         <div
+                          v-if="!m.pending && m.stoppedByUser && !(m.errorText || '').trim()"
+                          class="agent-chat-msg-stopped"
+                          role="status"
+                        >
+                          {{ $t('views.agents.chat_msg_aborted') }}
+                        </div>
+                        <div
                           v-if="!m.pending && (m.content || '').trim()"
                           class="agent-chat-md"
                           v-html="renderAgentChatMarkdown(m.content)"
@@ -165,10 +172,28 @@
                       <div
                         v-if="
                           !m.pending &&
-                          ((m.content || '').trim() || (m.errorText || '').trim())
+                          ((m.content || '').trim() ||
+                            (m.errorText || '').trim() ||
+                            m.stoppedByUser)
                         "
                         class="agent-chat-assistant-actions"
                       >
+                        <n-tooltip :show-arrow="false" placement="top">
+                          <template #trigger>
+                            <n-button
+                              quaternary
+                              circle
+                              size="small"
+                              class="agent-chat-copy-btn"
+                              :disabled="sending"
+                              :aria-label="$t('views.agents.chat_regenerate_tooltip')"
+                              @click="regenerateAssistant(m)"
+                            >
+                              <TheIcon icon="mdi:refresh" :size="18" />
+                            </n-button>
+                          </template>
+                          {{ $t('views.agents.chat_regenerate_tooltip') }}
+                        </n-tooltip>
                         <n-tooltip :show-arrow="false" placement="top">
                           <template #trigger>
                             <n-button
@@ -305,14 +330,14 @@
                     </n-button>
                   </n-upload>
                   <n-button
-                    type="primary"
+                    :type="sending ? 'warning' : 'primary'"
                     circle
                     class="agent-chat-send"
-                    :disabled="sendDisabled"
-                    :title="$t('views.agents.chat_button_send')"
-                    @click="submitMessage"
+                    :disabled="!sending && sendDisabled"
+                    :title="sending ? $t('views.agents.chat_button_stop') : $t('views.agents.chat_button_send')"
+                    @click="sending ? stopActiveChatGeneration() : submitMessage()"
                   >
-                    <TheIcon icon="mdi:send" :size="20" />
+                    <TheIcon :icon="sending ? 'mdi:stop' : 'mdi:send'" :size="20" />
                   </n-button>
                 </div>
               </div>
@@ -353,6 +378,12 @@ const sessionPhase = ref('intro')
 const messages = ref([])
 const inputText = ref('')
 const sending = ref(false)
+/** 流式请求 AbortController，用于停止生成 */
+const streamAbortController = ref(null)
+const activeJobId = ref(null)
+const activeAssistantIdx = ref(-1)
+/** 用户主动停止时置 true，避免 catch 里按网络错误处理 */
+const streamStoppedByUser = ref(false)
 /** 开启时允许后端注册知识库检索工具；关闭则仅通用知识（按会话持久化，新会话默认关） */
 const useKnowledgeRetrieval = ref(false)
 /** 新建对话 intro 内本地流式展示的开场白（不入库） */
@@ -602,9 +633,24 @@ function applyChatSsePayload(data, idx) {
       ragSteps: cur.ragSteps || [],
       ragTrace: cur.ragTrace ?? null,
     }
+  } else if (data.type === 'cancelled') {
+    const cur = messages.value[idx]
+    messages.value[idx] = {
+      ...cur,
+      stoppedByUser: true,
+      pending: false,
+      thinkingOpen: cur.thinkingOpen ?? false,
+      ragSteps: cur.ragSteps || [],
+      ragTrace: cur.ragTrace ?? null,
+      errorText: undefined,
+    }
   } else if (data.type === 'done') {
     const row = messages.value[idx]
-    messages.value[idx] = { ...row, pending: false }
+    messages.value[idx] = {
+      ...row,
+      pending: false,
+      stoppedByUser: data.cancelled ? true : row.stoppedByUser,
+    }
   }
 }
 
@@ -613,7 +659,13 @@ async function readChatJobSseStream(reader, decoder, idx, jobId, agentId, initia
   let seq = initialSeq
 
   while (true) {
-    const { done, value } = await reader.read()
+    let chunk
+    try {
+      chunk = await reader.read()
+    } catch {
+      break
+    }
+    const { done, value } = chunk
     if (done) break
 
     buffer += decoder.decode(value, { stream: true })
@@ -646,6 +698,135 @@ async function readChatJobSseStream(reader, decoder, idx, jobId, agentId, initia
   if (idx !== -1 && messages.value[idx]?.pending) {
     const row = messages.value[idx]
     messages.value[idx] = { ...row, pending: false }
+  }
+}
+
+async function stopActiveChatGeneration() {
+  if (!sending.value) return
+  streamStoppedByUser.value = true
+  const jid = activeJobId.value
+  const ix = activeAssistantIdx.value
+  const token = getToken()
+  const aid = agent.value?.id
+  if (jid && token) {
+    try {
+      await fetch(`${baseApi}/user-agent/chat/jobs/${jid}/cancel`, {
+        method: 'POST',
+        headers: { token, 'Content-Type': 'application/json' },
+      })
+    } catch {
+      /* ignore */
+    }
+  }
+  streamAbortController.value?.abort()
+  streamAbortController.value = null
+  activeJobId.value = null
+  activeAssistantIdx.value = -1
+  if (aid && sessionId.value) clearPendingChatJob(aid, sessionId.value)
+  if (ix >= 0 && messages.value[ix]?.role === 'assistant') {
+    const row = messages.value[ix]
+    messages.value[ix] = {
+      ...row,
+      pending: false,
+      stoppedByUser: true,
+      errorText: undefined,
+    }
+  }
+  sending.value = false
+}
+
+async function postChatJobAndConsumeStream({
+  agentId,
+  token,
+  regenerate,
+  message,
+  attachmentIds,
+  assistantIdx,
+}) {
+  let jobId
+  let startSeq = 0
+  streamStoppedByUser.value = false
+  const ac = new AbortController()
+  streamAbortController.value = ac
+  activeAssistantIdx.value = assistantIdx
+  const idx = assistantIdx
+  try {
+    const postRes = await fetch(`${baseApi}/user-agent/chat/jobs`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        token,
+      },
+      body: JSON.stringify({
+        agent_id: agentId,
+        message,
+        session_id: sessionId.value,
+        use_knowledge_retrieval: useKnowledgeRetrieval.value,
+        attachment_ids: attachmentIds,
+        regenerate,
+      }),
+      signal: ac.signal,
+    })
+
+    if (postRes.status === 409) {
+      const errBody = await postRes.json()
+      jobId = errBody.detail?.existing_job_id
+      if (!jobId) {
+        throw new Error(
+          typeof errBody.detail === 'string' ? errBody.detail : errBody.detail?.message || '任务冲突'
+        )
+      }
+      const pj = readPendingChatJob(agentId, sessionId.value)
+      startSeq = pj?.seq ?? 0
+    } else if (!postRes.ok) {
+      let detail = `HTTP ${postRes.status}`
+      try {
+        const errBody = await postRes.json()
+        detail = errBody.detail || errBody.msg || detail
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail)
+    } else {
+      const body = await postRes.json()
+      jobId = body.data?.job_id
+      if (!jobId) throw new Error('未返回 job_id')
+      savePendingChatJob(agentId, sessionId.value, { job_id: jobId, seq: 0 })
+    }
+
+    activeJobId.value = jobId
+
+    const streamRes = await fetch(
+      `${baseApi}/user-agent/chat/jobs/${jobId}/stream?since_seq=${startSeq}`,
+      {
+        headers: { token },
+        signal: ac.signal,
+      }
+    )
+
+    if (!streamRes.ok) {
+      let detail = `HTTP ${streamRes.status}`
+      try {
+        const errBody = await streamRes.json()
+        detail = errBody.detail || errBody.msg || detail
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail)
+    }
+
+    const reader = streamRes.body?.getReader()
+    const decoder = new TextDecoder()
+    if (!reader) {
+      throw new Error('No response body')
+    }
+
+    await readChatJobSseStream(reader, decoder, idx, jobId, agentId, startSeq)
+    await recentAgentsStore.touch(agentId)
+  } finally {
+    streamAbortController.value = null
+    activeJobId.value = null
+    activeAssistantIdx.value = -1
   }
 }
 
@@ -699,11 +880,17 @@ async function maybeResumePendingChatJob() {
 
   sending.value = true
   const sinceSeq = reuseAssistantRow ? (pj.seq ?? 0) : 0
+  streamStoppedByUser.value = false
+  const ac = new AbortController()
+  streamAbortController.value = ac
+  activeJobId.value = pj.job_id
+  activeAssistantIdx.value = idx
   try {
     const streamRes = await fetch(
       `${baseApi}/user-agent/chat/jobs/${pj.job_id}/stream?since_seq=${sinceSeq}`,
       {
         headers: { token },
+        signal: ac.signal,
       }
     )
     if (!streamRes.ok) {
@@ -718,6 +905,9 @@ async function maybeResumePendingChatJob() {
   } catch (e) {
     console.warn('resume job stream:', e)
   } finally {
+    streamAbortController.value = null
+    activeJobId.value = null
+    activeAssistantIdx.value = -1
     sending.value = false
     scrollBodyToBottom()
     agentSidebarStore.bumpRefresh()
@@ -890,6 +1080,9 @@ function assistantMarkdownForCopy(m) {
   if ((m.errorText || '').trim()) {
     parts.push(`[${t('views.agents.chat_feed_error_title')}] ${m.errorText}`)
   }
+  if (m.stoppedByUser && !(m.errorText || '').trim()) {
+    parts.push(t('views.agents.chat_msg_aborted'))
+  }
   return parts.join('\n\n')
 }
 
@@ -898,6 +1091,9 @@ function assistantPlainForCopy(m) {
   if ((m.content || '').trim()) parts.push(assistantPlainTextFromMarkdown(m.content))
   if ((m.errorText || '').trim()) {
     parts.push(`[${t('views.agents.chat_feed_error_title')}] ${m.errorText}`)
+  }
+  if (m.stoppedByUser && !(m.errorText || '').trim()) {
+    parts.push(t('views.agents.chat_msg_aborted'))
   }
   return parts.join('\n\n')
 }
@@ -936,6 +1132,7 @@ const sendDisabled = computed(() => {
 function onInputKeydown(e) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
+    if (sending.value) return
     submitMessage()
   }
 }
@@ -1119,81 +1316,106 @@ async function submitMessage() {
   const idx = messages.value.findIndex((m) => m.id === assistantId)
 
   try {
-    const postRes = await fetch(`${baseApi}/user-agent/chat/jobs`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        token,
-      },
-      body: JSON.stringify({
-        agent_id: agentId,
-        message: rawInput,
-        session_id: sessionId.value,
-        use_knowledge_retrieval: useKnowledgeRetrieval.value,
-        attachment_ids: attachmentIds,
-      }),
+    await postChatJobAndConsumeStream({
+      agentId,
+      token,
+      regenerate: false,
+      message: rawInput,
+      attachmentIds,
+      assistantIdx: idx,
     })
-
-    let jobId
-    let startSeq = 0
-    if (postRes.status === 409) {
-      const errBody = await postRes.json()
-      jobId = errBody.detail?.existing_job_id
-      if (!jobId) {
-        throw new Error(
-          typeof errBody.detail === 'string' ? errBody.detail : errBody.detail?.message || '任务冲突'
-        )
-      }
-      const pj = readPendingChatJob(agentId, sessionId.value)
-      startSeq = pj?.seq ?? 0
-    } else if (!postRes.ok) {
-      let detail = `HTTP ${postRes.status}`
-      try {
-        const errBody = await postRes.json()
-        detail = errBody.detail || errBody.msg || detail
-      } catch {
-        /* ignore */
-      }
-      throw new Error(detail)
-    } else {
-      const body = await postRes.json()
-      jobId = body.data?.job_id
-      if (!jobId) throw new Error('未返回 job_id')
-      savePendingChatJob(agentId, sessionId.value, { job_id: jobId, seq: 0 })
-    }
-
-    await recentAgentsStore.touch(agentId)
-
-    const streamRes = await fetch(
-      `${baseApi}/user-agent/chat/jobs/${jobId}/stream?since_seq=${startSeq}`,
-      {
-        headers: { token },
-      }
-    )
-
-    if (!streamRes.ok) {
-      let detail = `HTTP ${streamRes.status}`
-      try {
-        const errBody = await streamRes.json()
-        detail = errBody.detail || errBody.msg || detail
-      } catch {
-        /* ignore */
-      }
-      throw new Error(detail)
-    }
-
-    const reader = streamRes.body?.getReader()
-    const decoder = new TextDecoder()
-    if (!reader) {
-      throw new Error('No response body')
-    }
-
-    await readChatJobSseStream(reader, decoder, idx, jobId, agentId, startSeq)
   } catch (error) {
     clearPendingChatJob(agentId, sessionId.value)
-    if (idx !== -1) {
+    if (streamStoppedByUser.value) {
+      if (idx !== -1 && messages.value[idx]?.pending) {
+        const row = messages.value[idx]
+        messages.value[idx] = {
+          ...row,
+          pending: false,
+          stoppedByUser: true,
+          errorText: undefined,
+          thinkingOpen: row.thinkingOpen ?? false,
+          ragSteps: row.ragSteps || [],
+          ragTrace: row.ragTrace ?? null,
+        }
+      }
+    } else if (idx !== -1) {
       const row = messages.value[idx]
       messages.value[idx] = {
+        ...row,
+        errorText: t('views.agents.chat_msg_stream_error') + `：${error?.message || error}`,
+        pending: false,
+        thinkingOpen: row.thinkingOpen ?? false,
+        ragSteps: row.ragSteps || [],
+        ragTrace: row.ragTrace ?? null,
+      }
+    }
+  } finally {
+    sending.value = false
+    if (agentId && sessionId.value) persistSessionId(agentId, sessionId.value)
+    scrollBodyToBottom()
+    agentSidebarStore.bumpRefresh()
+  }
+}
+
+async function regenerateAssistant(assistantMsg) {
+  if (sending.value) return
+  const token = getToken()
+  if (!token) {
+    window.$message?.warning(t('views.agents.chat_msg_need_login'))
+    return
+  }
+  const assistantIdx = messages.value.findIndex((x) => x.id === assistantMsg.id)
+  if (assistantIdx <= 0) return
+  const prev = messages.value[assistantIdx - 1]
+  if (prev.role !== 'user') return
+
+  const agentId = Number(route.params.agentId)
+  if (!Number.isFinite(agentId)) {
+    window.$message?.error(t('views.agents.chat_error_load_agent'))
+    return
+  }
+
+  messages.value[assistantIdx] = {
+    ...assistantMsg,
+    content: '',
+    errorText: undefined,
+    stoppedByUser: false,
+    pending: true,
+    thinkingOpen: false,
+    ragSteps: [],
+    ragTrace: null,
+  }
+  scrollBodyToBottom()
+
+  sending.value = true
+  try {
+    await postChatJobAndConsumeStream({
+      agentId,
+      token,
+      regenerate: true,
+      message: '',
+      attachmentIds: [],
+      assistantIdx,
+    })
+  } catch (error) {
+    clearPendingChatJob(agentId, sessionId.value)
+    if (streamStoppedByUser.value) {
+      if (messages.value[assistantIdx]?.pending) {
+        const row = messages.value[assistantIdx]
+        messages.value[assistantIdx] = {
+          ...row,
+          pending: false,
+          stoppedByUser: true,
+          errorText: undefined,
+          thinkingOpen: row.thinkingOpen ?? false,
+          ragSteps: row.ragSteps || [],
+          ragTrace: row.ragTrace ?? null,
+        }
+      }
+    } else {
+      const row = messages.value[assistantIdx]
+      messages.value[assistantIdx] = {
         ...row,
         errorText: t('views.agents.chat_msg_stream_error') + `：${error?.message || error}`,
         pending: false,
@@ -2004,6 +2226,22 @@ html.dark .agent-chat-msg-error {
 
 html.dark .agent-chat-msg-error-text {
   color: rgba(254, 202, 202, 0.95);
+}
+
+.agent-chat-msg-stopped {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--n-text-color-3);
+  background: rgba(100, 116, 139, 0.12);
+  border: 1px solid rgba(100, 116, 139, 0.25);
+  box-sizing: border-box;
+}
+
+html.dark .agent-chat-msg-stopped {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.28);
 }
 
 /* Markdown + KaTeX（浅色：近黑字；暗黑：浅灰字） */

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any, AsyncIterator
 
 from langchain.agents import create_agent
@@ -340,16 +341,20 @@ async def iter_chat_stream_events(
     *,
     use_knowledge_retrieval: bool = True,
     attachment_ids: list[str] | None = None,
+    regenerate: bool = False,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """
     异步对话：产出与 SSE 中 `data: {...}` 相同结构的 dict 事件（供直连 SSE 与后台 Job 复用）。
     最后依次产出 trace（若有）、写入存储后产出 done。
     :param ua: 智能体
-    :param user_text: 用户文本
+    :param user_text: 用户文本（regenerate 时仅作校验用，模型输入以存储中最后一条用户消息为准）
     :param user_id: 用户 ID
     :param agent_id: 智能体 ID
     :param session_id: 会话 ID
     :param use_knowledge_retrieval: 是否启用知识库检索
+    :param regenerate: 为 True 时不追加用户消息，移除末尾助手消息后基于当前历史重答
+    :param cancel_check: 若返回 True 则协作停止生成（如同步读 Redis 取消标记）
     :return: 异步迭代器
     """
     attachment_ids = attachment_ids or []
@@ -358,6 +363,27 @@ async def iter_chat_stream_events(
     # 清空 RAG 上下文, 重置工具调用守卫
     get_last_rag_context(clear=True)
     reset_tool_call_guards()
+
+    if regenerate:
+        if not messages:
+            yield {"type": "error", "content": "没有可重新生成的对话"}
+            yield {"type": "done", "cancelled": False}
+            return
+        while messages and isinstance(messages[-1], AIMessage):
+            messages.pop()
+        if not messages or not isinstance(messages[-1], HumanMessage):
+            yield {"type": "error", "content": "无法重新生成：没有可配对的用户消息"}
+            yield {"type": "done", "cancelled": False}
+            return
+        last_human_text = msg_content_to_str(messages[-1].content).strip()
+        req_text = (user_text or "").strip()
+        if req_text and req_text != last_human_text:
+            yield {
+                "type": "error",
+                "content": "重新生成失败：请求文案与当前最后一条用户消息不一致，请刷新后重试",
+            }
+            yield {"type": "done", "cancelled": False}
+            return
 
     session_attachment_hint = format_attachment_hint(user_id, agent_id, session_id)
     agent, model = build_model_and_agent(
@@ -387,18 +413,19 @@ async def iter_chat_stream_events(
         summary = await asyncio.to_thread(summarize_old_messages, model, messages[:40])
         messages = [SystemMessage(content=f"之前的对话摘要：\n{summary}")] + messages[40:]
 
-    human_content = build_storable_human_content(
-        user_text,
-        attachment_ids,
-        user_id=user_id,
-        agent_id=agent_id,
-        session_id=session_id,
-        supports_vision=bool(getattr(ua, "supports_vision", False)),
-    )
-    messages.append(HumanMessage(content=human_content))
+    if not regenerate:
+        human_content = build_storable_human_content(
+            user_text,
+            attachment_ids,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            supports_vision=bool(getattr(ua, "supports_vision", False)),
+        )
+        messages.append(HumanMessage(content=human_content))
 
-    # 生成完成前即落库用户消息，刷新后仍可从历史会话看到提问（助手在结束时再写入）
-    await asyncio.to_thread(storage.save, user_id, agent_id, session_id, messages, None)
+        # 生成完成前即落库用户消息，刷新后仍可从历史会话看到提问（助手在结束时再写入）
+        await asyncio.to_thread(storage.save, user_id, agent_id, session_id, messages, None)
 
     to_invoke = expand_messages_for_model(
         messages, user_id=user_id, agent_id=agent_id, session_id=session_id
@@ -407,9 +434,11 @@ async def iter_chat_stream_events(
     # 初始化响应内容
     full_response = ""
     stream_error: str | None = None
+    cancelled_externally = False
+
     # 创建异步任务, 调用智能体
     async def _agent_worker() -> None:
-        nonlocal full_response, stream_error
+        nonlocal full_response, stream_error, cancelled_externally
         try:
             # 异步流式调用智能体
             async for msg, _metadata in agent.astream(
@@ -417,6 +446,9 @@ async def iter_chat_stream_events(
                 stream_mode="messages",
                 config=_agent_invoke_config(),
             ):
+                if cancel_check and await asyncio.to_thread(cancel_check):
+                    cancelled_externally = True
+                    break
                 if not isinstance(msg, AIMessageChunk):
                     continue
                 if getattr(msg, "tool_call_chunks", None):
@@ -435,6 +467,9 @@ async def iter_chat_stream_events(
                 if content:
                     full_response += content
                     await output_queue.put({"type": "content", "content": content})
+        except asyncio.CancelledError:
+            cancelled_externally = True
+            raise
         except Exception as e:
             stream_error = str(e)
             await output_queue.put({"type": "error", "content": stream_error})
@@ -462,6 +497,12 @@ async def iter_chat_stream_events(
         if not agent_task.done():
             agent_task.cancel()
 
+    if cancelled_externally:
+        get_last_rag_context(clear=True)
+        yield {"type": "cancelled"}
+        yield {"type": "done", "cancelled": True}
+        return
+
     # 获取 RAG 上下文
     rag_context = get_last_rag_context(clear=True)
     # 获取 RAG 追踪
@@ -484,7 +525,7 @@ async def iter_chat_stream_events(
     # 保存会话消息，保存最新一轮对话消息到数据库对应会话并更新 Redis 缓存
     storage.save(user_id, agent_id, session_id, messages, extra_message_data=extra_message_data)
 
-    yield {"type": "done"}
+    yield {"type": "done", "cancelled": False}
 
 
 async def chat_with_agent_stream(
@@ -496,6 +537,7 @@ async def chat_with_agent_stream(
     *,
     use_knowledge_retrieval: bool = True,
     attachment_ids: list[str] | None = None,
+    regenerate: bool = False,
 ) -> AsyncIterator[str]:
     """
     异步对话（SSE 字符串片段）
@@ -505,6 +547,7 @@ async def chat_with_agent_stream(
     :param agent_id: 智能体 ID
     :param session_id: 会话 ID
     :param use_knowledge_retrieval: 是否启用知识库检索
+    :param regenerate: 是否重新生成最后一轮助手回复
     :return: 异步迭代器
     """
     async for ev in iter_chat_stream_events(
@@ -515,6 +558,7 @@ async def chat_with_agent_stream(
         session_id,
         use_knowledge_retrieval=use_knowledge_retrieval,
         attachment_ids=attachment_ids,
+        regenerate=regenerate,
     ):
         yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"

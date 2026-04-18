@@ -9,7 +9,9 @@ class ChatRequest(BaseModel):
     :param agent_id: 智能体 ID
     :param message: 用户消息
     :param session_id: 会话 ID，前端生成
-    :param attachment_ids: 本会话内已上传附件 ID（见上传接口）
+    :param use_knowledge_retrieval: 为 True 时允许知识库检索工具；为 False 时仅通用知识回答
+    :param attachment_ids: 本会话已上传附件 ID 列表
+    :param regenerate: 为 True 时重新生成最后一轮助手回复（不新增用户消息；附件以存储中的最后一条用户消息为准）
     """
     agent_id: int = Field(..., description="智能体 ID")
     message: str = Field("", description="用户消息；可与 attachment_ids 二选一或同时使用")
@@ -19,6 +21,10 @@ class ChatRequest(BaseModel):
         description="为 True 时允许知识库检索工具；为 False 时仅通用知识回答",
     )
     attachment_ids: list[str] = Field(default_factory=list, description="本会话已上传附件 ID 列表")
+    regenerate: bool = Field(
+        False,
+        description="为 True 时重新生成最后一轮助手回复（不新增用户消息；附件以存储中的最后一条用户消息为准）",
+    )
 
     @field_validator("attachment_ids")
     @classmethod
@@ -32,13 +38,22 @@ class ChatRequest(BaseModel):
 
     @model_validator(mode="after")
     def _message_or_attachments(self) -> "ChatRequest":
+        if self.regenerate:
+            return self  # 如果 regenerate 为 True，则返回当前对象
         if not (self.message or "").strip() and not self.attachment_ids:
             raise ValueError("message 与 attachment_ids 至少填写一项")
         return self
 
 
 class ChatAttachmentUploadResponse(BaseModel):
-    """会话附件上传结果"""
+    """
+    会话附件上传结果
+    :param id: 附件 ID
+    :param filename: 附件文件名
+    :param kind: 附件类型
+    :param mime: 附件 MIME 类型
+    :param size_bytes: 附件大小（字节）
+    """
 
     id: str
     filename: str

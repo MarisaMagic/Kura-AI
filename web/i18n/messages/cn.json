@@ -85,6 +85,8 @@
       "title_agent_chat": "智能体对话",
       "chat_placeholder_input": "输入你的问题或需求",
       "chat_button_send": "发送",
+      "chat_button_stop": "停止生成",
+      "chat_regenerate_tooltip": "重新生成此回答",
       "chat_button_restart": "重启对话",
       "chat_kb_retrieval": "知识库检索",
       "chat_button_like": "点赞",
