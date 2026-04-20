@@ -408,7 +408,15 @@ class ConversationStorage:
             if not session:
                 return False
 
-            # 删除会话
+            # 删除 Milvus 中本会话的记忆向量（PG 会话行删除后无法再查 session_id）
+            try:
+                from app.chat.memory_archive import purge_session_memory_vectors
+
+                purge_session_memory_vectors(user_id, agent_id, session_id)
+            except Exception:
+                pass
+
+            # 删除会话（级联删除消息与 mg_chat_memory_cursor）
             db.delete(session)
             # 提交事务到数据库
             db.commit()
