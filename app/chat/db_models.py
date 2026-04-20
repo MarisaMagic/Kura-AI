@@ -99,6 +99,31 @@ class ChatSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
+    memory_cursor = relationship(
+        "ChatMemoryCursor",
+        back_populates="session",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class ChatMemoryCursor(Base):
+    """
+    会话记忆归档水位线：已成功写入 Milvus 的最后一轮 turn 索引（从 0 起）。
+    与 mg_chat_sessions 一对一，随会话删除级联删除。
+    """
+
+    __tablename__ = "mg_chat_memory_cursor"
+
+    session_ref_id: Mapped[int] = mapped_column(
+        ForeignKey("mg_chat_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    last_archived_turn_index: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    session: Mapped[ChatSession] = relationship("ChatSession", back_populates="memory_cursor")
 
 
 class ChatMessage(Base):
