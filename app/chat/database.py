@@ -55,6 +55,14 @@ def init_chat_db() -> None:
     from sqlalchemy import text
 
     Base.metadata.create_all(bind=engine)
+    try:
+        from app.chat.milvus_memory import init_chat_memory_collection
+
+        init_chat_memory_collection()
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning("init_chat_memory_collection skipped", exc_info=True)
     # create_all 不会为已有表添加新列，需显式迁移
     with engine.begin() as conn:
         conn.execute(
