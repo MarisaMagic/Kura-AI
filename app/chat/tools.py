@@ -9,6 +9,7 @@ from langchain_core.tools import tool
 
 _LAST_RAG_CONTEXT: dict | None = None
 _KNOWLEDGE_TOOL_CALLS_THIS_TURN = 0
+_MEMORY_TOOL_CALLS_THIS_TURN = 0
 _RAG_STEP_QUEUE: Any = None
 _RAG_STEP_LOOP: asyncio.AbstractEventLoop | None = None
 
@@ -27,8 +28,9 @@ def get_last_rag_context(clear: bool = True) -> Optional[dict]:
 
 
 def reset_tool_call_guards() -> None:
-    global _KNOWLEDGE_TOOL_CALLS_THIS_TURN
+    global _KNOWLEDGE_TOOL_CALLS_THIS_TURN, _MEMORY_TOOL_CALLS_THIS_TURN
     _KNOWLEDGE_TOOL_CALLS_THIS_TURN = 0
+    _MEMORY_TOOL_CALLS_THIS_TURN = 0
 
 
 def try_acquire_knowledge_tool_slot() -> bool:
@@ -37,6 +39,15 @@ def try_acquire_knowledge_tool_slot() -> bool:
     if _KNOWLEDGE_TOOL_CALLS_THIS_TURN >= 1:
         return False
     _KNOWLEDGE_TOOL_CALLS_THIS_TURN += 1
+    return True
+
+
+def try_acquire_memory_tool_slot() -> bool:
+    """同一轮对话仅允许一次会话记忆检索；成功占用返回 True。"""
+    global _MEMORY_TOOL_CALLS_THIS_TURN
+    if _MEMORY_TOOL_CALLS_THIS_TURN >= 1:
+        return False
+    _MEMORY_TOOL_CALLS_THIS_TURN += 1
     return True
 
 
