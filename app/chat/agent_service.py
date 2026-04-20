@@ -23,6 +23,9 @@ from langchain_core.messages import (
 
 from app.chat.attachment_service import build_storable_human_content, format_attachment_hint
 from app.chat.attachment_tools import make_session_attachment_tools
+from app.chat.memory_archive import schedule_archive_session_memory
+from app.chat.memory_tool import make_search_session_memory_tool
+from app.chat.memory_turns import apply_sliding_window_turns
 from app.chat.message_codec import expand_messages_for_model, msg_content_to_str
 from app.chat.storage import storage
 from app.chat.tools import (
@@ -34,6 +37,7 @@ from app.chat.tools import (
 from app.kb.kb_scope import kb_scope_for
 from app.kb.search_tool import make_search_knowledge_tool
 from app.models.user_agent import UserAgent
+from app.settings import settings
 from app.utils.api_key_crypto import decrypt_api_key_safe
 
 
@@ -92,6 +96,82 @@ class _KbPromptDebugCallback(BaseCallbackHandler):
 
 def _agent_invoke_config() -> dict[str, Any]:
     return {"recursion_limit": 30, "callbacks": [_KbPromptDebugCallback()]}
+
+
+def _llm_config_from_ua(ua: UserAgent) -> dict[str, Any]:
+    """
+    从智能体配置中获取 LLM 配置
+    :param ua: 智能体
+    :return: LLM 配置
+    """
+    plain = decrypt_api_key_safe(ua.api_key_ciphertext)
+    base_url = (ua.base_url or "").strip() or None
+    return {
+        "api_key": (plain or "").strip(),
+        "base_url": base_url,
+        "model_name": ua.model_name,
+    }
+
+
+def _merge_proactive_memory_system(windowed: list[BaseMessage], inject_body: str) -> list[BaseMessage]:
+    """
+    合并预检索的会话记忆到系统提示词
+    :param windowed: 消息列表
+    :param inject_body: 预检索的会话记忆
+    :return: 消息列表
+    """
+    i = 0
+    while i < len(windowed) and isinstance(windowed[i], SystemMessage):
+        i += 1
+    block = SystemMessage(
+        content=(
+            "【本回合根据用户最新输入自动检索的较早会话摘录（仅供参考；"
+            "若仍不足可再调用 search_session_memory 工具）】\n\n"
+            + inject_body
+        )
+    )
+    return [*windowed[:i], block, *windowed[i:]]
+
+
+def _prepare_to_invoke_messages(
+    messages: list[BaseMessage],
+    ua: UserAgent,
+    user_id: int,
+    agent_id: int,
+    session_id: str,
+    user_query_for_memory: str,
+) -> list:
+    """
+    滑动窗口 → 可选会话记忆预注入 → 展开多模态。
+    :param messages: 消息列表
+    :param ua: 智能体
+    :param user_id: 用户ID
+    :param agent_id: 智能体ID
+    :param session_id: 会话ID
+    :param user_query_for_memory: 用户查询
+    :return: 展开后的消息列表
+    """
+    from app.chat.memory_search import proactive_session_memory_inject_text
+    from app.chat.tools import emit_rag_step
+
+    windowed = apply_sliding_window_turns(messages)
+    llm_cfg = _llm_config_from_ua(ua)
+    inj = proactive_session_memory_inject_text( # 预检索会话记忆
+        (user_query_for_memory or "").strip(),
+        user_id=user_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        llm_config=llm_cfg,
+    )
+    if inj:
+        emit_rag_step("📌", "会话记忆预注入", "已附加较早轮次摘录")
+        windowed = _merge_proactive_memory_system(windowed, inj)
+    return expand_messages_for_model(
+        windowed,
+        user_id=user_id,
+        agent_id=agent_id,
+        session_id=session_id,
+    )
 
 
 def _compose_system_prompt(
@@ -170,7 +250,9 @@ def build_model_and_agent(
     tools: list[Any] = [get_current_weather]
     tools.extend(make_session_attachment_tools(user_id, agent_id, session_id))
     if use_knowledge_retrieval:
-        tools.append(make_search_knowledge_tool(kb_scope, llm_config))
+        tools.append(make_search_knowledge_tool(kb_scope, llm_config)) # 添加知识库检索工具
+    if getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
+        tools.append(make_search_session_memory_tool(user_id, agent_id, session_id, llm_config)) # 添加会话记忆检索工具
     # create_agent 创建智能体, 使用模型和系统提示词
     agent = create_agent(
         model=model,
@@ -183,30 +265,6 @@ def build_model_and_agent(
     )
     # 返回智能体和大模型
     return agent, model
-
-
-def summarize_old_messages(model: Any, messages: list) -> str:
-    """
-    总结旧的对话
-    :param model: 模型
-    :param messages: 对话消息
-    :return: 总结
-    """
-    # 将对话消息转换为字符串, 用户和 AI 分别用不同的标识
-    old_conversation = "\n".join(
-        [
-            f"{'用户' if msg.type == 'human' else 'AI'}: {msg_content_to_str(msg.content)}"
-            for msg in messages
-        ]
-    )
-    # 构建总结提示词
-    summary_prompt = f"""请总结以下对话的关键信息：
-
-{old_conversation}
-总结（包含用户信息、重要事实、待办事项）："""
-    # 调用大模型总结前面的历史对话
-    summary = model.invoke(summary_prompt).content
-    return summary
 
 
 def _extract_response_content(result: Any) -> str:
@@ -269,13 +327,6 @@ def chat_with_agent_sync(
         session_attachment_hint=session_attachment_hint,
     )
 
-    # 如果会话消息超过 50 条, 则总结前面的历史对话
-    if len(messages) > 50:
-        # 总结前面的历史对话
-        summary = summarize_old_messages(model, messages[:40])
-        # 将总结添加到会话消息中
-        messages = [SystemMessage(content=f"之前的对话摘要：\n{summary}")] + messages[40:]
-
     human_content = build_storable_human_content(
         user_text,
         attachment_ids,
@@ -288,10 +339,6 @@ def chat_with_agent_sync(
     messages.append(HumanMessage(content=human_content))
     storage.save(user_id, agent_id, session_id, messages, None)
 
-    to_invoke = expand_messages_for_model(
-        messages, user_id=user_id, agent_id=agent_id, session_id=session_id
-    )
-
     class _SyncRagStepCollector:
         def __init__(self) -> None:
             self.steps: list[dict] = []
@@ -301,6 +348,15 @@ def chat_with_agent_sync(
 
     rag_collector = _SyncRagStepCollector()
     set_rag_step_queue(rag_collector, sync=True)
+
+    to_invoke = _prepare_to_invoke_messages(
+        messages,
+        ua,
+        user_id,
+        agent_id,
+        session_id,
+        (user_text or "").strip(),
+    )
     caught_exc: Exception | None = None
     response_content = ""
     try:
@@ -325,6 +381,9 @@ def chat_with_agent_sync(
     ]
     # 保存会话消息，保存最新一轮对话消息到数据库对应会话并更新 Redis 缓存
     storage.save(user_id, agent_id, session_id, messages, extra_message_data=extra_message_data)
+
+    # 归档会话记忆，按配置同步或后台线程归档。
+    schedule_archive_session_memory(user_id, agent_id, session_id) 
 
     if caught_exc:
         raise caught_exc
@@ -405,13 +464,8 @@ async def iter_chat_stream_events(
             rag_steps_collected.append(step)
             output_queue.put_nowait({"type": "rag_step", "step": step})
 
-    # 设置 RAG 步骤队列, 将 RAG 步骤收集到输出队列
+    # 设置 RAG 步骤队列（须在构造 to_invoke 之前，便于预注入步骤写入 rag_step）
     set_rag_step_queue(_RagStepProxy())
-
-    # 如果会话消息超过 50 条, 则总结前面的历史对话
-    if len(messages) > 50:
-        summary = await asyncio.to_thread(summarize_old_messages, model, messages[:40])
-        messages = [SystemMessage(content=f"之前的对话摘要：\n{summary}")] + messages[40:]
 
     if not regenerate:
         human_content = build_storable_human_content(
@@ -427,8 +481,18 @@ async def iter_chat_stream_events(
         # 生成完成前即落库用户消息，刷新后仍可从历史会话看到提问（助手在结束时再写入）
         await asyncio.to_thread(storage.save, user_id, agent_id, session_id, messages, None)
 
-    to_invoke = expand_messages_for_model(
-        messages, user_id=user_id, agent_id=agent_id, session_id=session_id
+    memory_query = (user_text or "").strip()
+    if regenerate:
+        memory_query = msg_content_to_str(messages[-1].content).strip()
+
+    to_invoke = await asyncio.to_thread(
+        _prepare_to_invoke_messages,
+        messages,
+        ua,
+        user_id,
+        agent_id,
+        session_id,
+        memory_query,
     )
 
     # 初始化响应内容
@@ -524,6 +588,9 @@ async def iter_chat_stream_events(
     ]
     # 保存会话消息，保存最新一轮对话消息到数据库对应会话并更新 Redis 缓存
     storage.save(user_id, agent_id, session_id, messages, extra_message_data=extra_message_data)
+
+    # 归档会话记忆，按配置同步或后台线程归档。
+    schedule_archive_session_memory(user_id, agent_id, session_id) 
 
     yield {"type": "done", "cancelled": False}
 

@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 def msg_content_to_str(content: Any) -> str:
     """
     将消息内容转为可展示/可摘要的纯文本（含 image_ref 占位说明）。
-    用于调试打印 和 长对话 summarize_old_messages 时把多模态内容变成可喂给模型的纯文本。
+    用于调试打印与会话记忆归档时把多模态内容变成可喂给模型的纯文本。
     :param content: 消息内容
     :return: 可展示/可摘要的纯文本
     """
