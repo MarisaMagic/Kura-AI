@@ -28,11 +28,24 @@ logger = logging.getLogger(__name__)
 
 
 def _short_session_digest(user_id: int, agent_id: int, session_id: str) -> str:
+    """
+    生成会话记忆的隔离键, 只能检索当前会话的记忆
+    将用户ID、智能体ID和会话ID拼接成字符串, 并使用 SHA-256 哈希函数生成一个 24 字符的哈希值。
+    :param user_id: 用户ID
+    :param agent_id: 智能体ID
+    :param session_id: 会话ID
+    :return: 隔离键
+    """
     raw = f"{user_id}:{agent_id}:{session_id}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:24]
 
 
 def _format_tool_message(msg: ToolMessage) -> str:
+    """
+    格式化工具消息
+    :param msg: 消息
+    :return: 格式化后的消息
+    """
     name = (getattr(msg, "name", None) or "") or ""
     body = msg_content_to_str(msg.content)
     if len(body) > 2000:
@@ -41,6 +54,11 @@ def _format_tool_message(msg: ToolMessage) -> str:
 
 
 def _format_ai_message(msg: AIMessage) -> str:
+    """
+    格式化助手消息
+    :param msg: 消息
+    :return: 格式化后的消息
+    """
     parts: list[str] = []
     tool_calls = getattr(msg, "tool_calls", None)
     if tool_calls:
@@ -55,6 +73,11 @@ def _format_ai_message(msg: AIMessage) -> str:
 
 
 def _turn_to_text(turn: list[BaseMessage]) -> str:
+    """
+    将轮次转换为文本
+    :param turn: 轮次
+    :return: 文本
+    """
     lines: list[str] = []
     for msg in turn:
         if isinstance(msg, HumanMessage):
@@ -73,6 +96,12 @@ def _turn_to_text(turn: list[BaseMessage]) -> str:
 
 
 def _chunk_text(text: str, max_chars: int) -> list[str]:
+    """
+    将文本分块
+    :param text: 文本
+    :param max_chars: 最大字符数
+    :return: 分块后的文本列表
+    """
     text = (text or "").strip()
     if not text:
         return []
@@ -87,10 +116,17 @@ def _chunk_text(text: str, max_chars: int) -> list[str]:
 
 
 def _get_or_create_cursor(db: Any, session_ref_id: int) -> ChatMemoryCursor:
+    """
+    获取或创建会话记忆归档水位线
+    :param db: 数据库
+    :param session_ref_id: 会话ID
+    :return: 会话记忆归档水位线
+    """
     row = db.query(ChatMemoryCursor).filter(ChatMemoryCursor.session_ref_id == session_ref_id).first()
     if row:
-        return row
-    row = ChatMemoryCursor(session_ref_id=session_ref_id, last_archived_turn_index=-1)
+        return row  # 如果已经存在则返回已有的水位线
+    # 如果不存在则创建新的水位线，初始化水位线为 -1, 表示没有归档过任何轮次
+    row = ChatMemoryCursor(session_ref_id=session_ref_id, last_archived_turn_index=-1)  
     db.add(row)
     db.flush()
     return row
@@ -99,6 +135,10 @@ def _get_or_create_cursor(db: Any, session_ref_id: int) -> ChatMemoryCursor:
 def archive_session_memory(user_id: int, agent_id: int, session_id: str) -> None:
     """
     将超出窗口的轮次增量写入 Milvus，并更新 mg_chat_memory_cursor。
+    :param user_id: 用户ID
+    :param agent_id: 智能体ID
+    :param session_id: 会话ID
+    :return: None
     """
     if not getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
         return
@@ -106,33 +146,33 @@ def archive_session_memory(user_id: int, agent_id: int, session_id: str) -> None
         logger.debug("archive_session_memory: skip (no EMBEDDING_API_KEY)")
         return
 
-    messages = storage.load(user_id, agent_id, session_id)
+    messages = storage.load(user_id, agent_id, session_id)  # 加载会话消息
     if not messages:
         return
 
-    _, body = split_system_prefix(messages)
-    turns = group_turns(body)
-    window = max(1, int(getattr(settings, "CHAT_MEMORY_WINDOW_TURNS", 10) or 10))
+    _, body = split_system_prefix(messages)  # 将消息体按系统消息分组, 返回系统消息列表和非系统消息列表。
+    turns = group_turns(body)  # 将消息体按用户轮次分组（不含前缀 System）。
+    window = max(1, int(getattr(settings, "CHAT_MEMORY_WINDOW_TURNS", 10) or 10))  # 获取会话记忆窗口大小
     if len(turns) <= window:
         return
 
-    max_archivable = len(turns) - window - 1
+    max_archivable = len(turns) - window - 1  # 计算可归档的最大轮次索引
     if max_archivable < 0:
         return
 
-    mem_scope = memory_scope_for(user_id, agent_id, session_id)
-    digest = _short_session_digest(user_id, agent_id, session_id)
-    cap = _milvus_text_cap()
+    mem_scope = memory_scope_for(user_id, agent_id, session_id)  # 获取会话记忆隔离键
+    digest = _short_session_digest(user_id, agent_id, session_id)  # 生成会话记忆的隔离键哈希值
+    cap = _milvus_text_cap()  # 获取会话记忆的文本最大长度
     max_chunk = max(256, min(int(getattr(settings, "CHAT_MEMORY_CHUNK_MAX_CHARS", 1400) or 1400), cap))
 
-    milvus = get_chat_memory_milvus()
+    milvus = get_chat_memory_milvus()  # 获取会话记忆集合
     milvus.init_collection()
-    embedder = EmbeddingService()
+    embedder = EmbeddingService()  # 获取嵌入服务
 
     db = SessionLocal()
     try:
         sess = (
-            db.query(ChatSessionRow)
+            db.query(ChatSessionRow)  # 查询会话
             .filter(
                 ChatSessionRow.user_id == user_id,
                 ChatSessionRow.agent_id == agent_id,
@@ -143,21 +183,22 @@ def archive_session_memory(user_id: int, agent_id: int, session_id: str) -> None
         if not sess:
             return
 
-        cursor = _get_or_create_cursor(db, sess.id)
-        start = cursor.last_archived_turn_index + 1
+        cursor = _get_or_create_cursor(db, sess.id)  # 获取或创建会话记忆归档水位线
+        start = cursor.last_archived_turn_index + 1  # 获取下一个可归档的轮次索引
         if start > max_archivable:
             db.commit()
             return
 
-        insert_rows: list[dict[str, Any]] = []
+        insert_rows: list[dict[str, Any]] = []  # 构建插入数据
+        # 遍历可归档的轮次, 将轮次转换为文本, 并分块插入到 Milvus 中
         for turn_idx in range(start, max_archivable + 1):
             turn = turns[turn_idx]
-            full_text = _turn_to_text(turn)
-            sub_chunks = _chunk_text(full_text, max_chunk)
+            full_text = _turn_to_text(turn) # 将轮次转换为文本
+            sub_chunks = _chunk_text(full_text, max_chunk) # 将文本分块
             if not sub_chunks:
                 continue
             for ci, chunk_text in enumerate(sub_chunks):
-                chunk_id = f"mem_{digest}_t{turn_idx}_c{ci}"
+                chunk_id = f"mem_{digest}_t{turn_idx}_c{ci}" # 构建分块ID
                 insert_rows.append(
                     {
                         "memory_scope": mem_scope,
@@ -173,14 +214,14 @@ def archive_session_memory(user_id: int, agent_id: int, session_id: str) -> None
             return
 
         texts = [r["text"] for r in insert_rows]
-        dense_list, sparse_list = embedder.get_all_embeddings(texts)
+        dense_list, sparse_list = embedder.get_all_embeddings(texts) # 获取密集向量和稀疏向量
         for r, d_emb, s_emb in zip(insert_rows, dense_list, sparse_list):
             r["dense_embedding"] = d_emb
             r["sparse_embedding"] = s_emb
 
-        milvus.insert(insert_rows)
-        cursor.last_archived_turn_index = max_archivable
-        db.commit()
+        milvus.insert(insert_rows) # 插入数据到 Milvus
+        cursor.last_archived_turn_index = max_archivable # 更新会话记忆归档水位线
+        db.commit() # 提交事务
     except Exception:
         logger.exception("archive_session_memory failed")
         db.rollback()
@@ -189,26 +230,39 @@ def archive_session_memory(user_id: int, agent_id: int, session_id: str) -> None
 
 
 def schedule_archive_session_memory(user_id: int, agent_id: int, session_id: str) -> None:
-    """对话落库后调用：按配置同步或后台线程归档。"""
+    """
+    对话落库后调用：按配置同步或后台线程归档。
+    :param user_id: 用户ID
+    :param agent_id: 智能体ID
+    :param session_id: 会话ID
+    :return: None
+    """
     if not getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
         return
 
+    # 定义归档会话记忆的线程函数
     def _run() -> None:
         try:
-            archive_session_memory(user_id, agent_id, session_id)
+            archive_session_memory(user_id, agent_id, session_id) # 归档会话记忆
         except Exception:
             logger.exception("schedule_archive_session_memory")
 
-    if getattr(settings, "CHAT_MEMORY_ARCHIVE_ASYNC", True):
-        import threading
+    if getattr(settings, "CHAT_MEMORY_ARCHIVE_ASYNC", True): # 如果配置为异步归档
+        import threading # 导入线程模块
 
-        threading.Thread(target=_run, name="chat-memory-archive", daemon=True).start()
+        threading.Thread(target=_run, name="chat-memory-archive", daemon=True).start() # 创建线程并启动
     else:
-        _run()
+        _run() # 同步归档
 
 
 def purge_session_memory_vectors(user_id: int, agent_id: int, session_id: str) -> None:
-    """删除会话在 Milvus 中的全部记忆向量（删会话前调用）。"""
+    """
+    删除会话在 Milvus 中的全部记忆向量（删会话前调用）。
+    :param user_id: 用户ID
+    :param agent_id: 智能体ID
+    :param session_id: 会话ID
+    :return: None
+    """
     try:
         mem_scope = memory_scope_for(user_id, agent_id, session_id)
         mgr = get_chat_memory_milvus()
