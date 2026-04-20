@@ -128,6 +128,23 @@ class Settings(BaseSettings):
     MILVUS_HOST: str = "127.0.0.1"
     MILVUS_PORT: str = "19530"
     MILVUS_COLLECTION: str = "kura_ai_kb"
+    # 会话记忆向量（与知识库隔离的独立 Milvus collection）
+    MILVUS_COLLECTION_CHAT_MEMORY: str = "kura_ai_chat_memory"
+    # Milvus VARCHAR(text) 的 max_length；修改后需重建集合（见 CHAT_MEMORY_MILVUS_RECREATE_ON_INIT）
+    CHAT_MEMORY_MILVUS_TEXT_MAX_LENGTH: int = 8192
+    # 为 True 时启动 init 会先 drop 再建会话记忆 collection（会清空该集合内向量；改 schema 时设一次后改回 False）
+    CHAT_MEMORY_MILVUS_RECREATE_ON_INIT: bool = False
+    # 启用：最近 N 轮进上下文 + 远期归档检索工具
+    CHAT_USE_SESSION_MEMORY: bool = True
+    CHAT_MEMORY_WINDOW_TURNS: int = 10
+    # 单块归档字符上限（略小于原默认，减轻单条向量上下文过长）
+    CHAT_MEMORY_CHUNK_MAX_CHARS: int = 1400
+    CHAT_MEMORY_SEARCH_TOP_K: int = 5
+    # 每轮用当前用户输入预检索会话记忆并注入 System 补充块（与工具检索互补）
+    CHAT_MEMORY_PROACTIVE_INJECT: bool = True
+    CHAT_MEMORY_PROACTIVE_TOP_K: int = 3
+    # 归档在对话落库后后台执行，不阻塞响应
+    CHAT_MEMORY_ARCHIVE_ASYNC: bool = True
 
     # 智能体知识库文档根目录：data/user_agent_docs/user_{id}/{agent_id}/
     USER_AGENT_KB_DOCS_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_docs")
