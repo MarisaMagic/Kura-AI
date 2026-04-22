@@ -23,6 +23,23 @@ def milvus_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def _normalize_content_type(raw: object, chunk_level: object) -> str:
+    """
+    Milvus 中 content_type 可能为缺失或空串，此时 .get('content_type', 'text') 仍会得到 ''，
+    下游若用 == 'text' / == 'image' 分类，会导致两类皆空、检索结果全部被丢弃。
+    """
+    s = (raw or "").strip().lower() if isinstance(raw, str) else ""
+    if s in ("text", "image"):
+        return s
+    try:
+        lv = int(chunk_level or 0)
+    except (TypeError, ValueError):
+        lv = 0
+    if lv == 4:
+        return "image"
+    return "text"
+
+
 def kb_filter_expr(kb_scope: str, extra: str = "") -> str:
     """
     构建知识库过滤表达式
@@ -76,6 +93,14 @@ class MilvusManager:
         - parent_chunk_id: 父级分块ID
         - root_chunk_id: 根级分块ID
         - chunk_level: 分块层级
+        - content_type: 内容类型（text/image）
+        - image_path: 图片路径（图片块才有）
+        - position_start: 文本在页内的起始位置（文本块才有）
+        - position_end: 文本在页内的结束位置（文本块才有）
+        - image_position_x: 图片位置X坐标（图片块才有）
+        - image_position_y: 图片位置Y坐标（图片块才有）
+        - image_width: 图片宽度（图片块才有）
+        - image_height: 图片高度（图片块才有）
         
         创建索引：
         - dense_embedding: 使用 HNSW 索引
@@ -104,6 +129,16 @@ class MilvusManager:
         schema.add_field("parent_chunk_id", DataType.VARCHAR, max_length=512)
         schema.add_field("root_chunk_id", DataType.VARCHAR, max_length=512)
         schema.add_field("chunk_level", DataType.INT64)
+        schema.add_field("content_type", DataType.VARCHAR, max_length=20)
+        schema.add_field("image_path", DataType.VARCHAR, max_length=1024)
+        # 文本块位置字段
+        schema.add_field("position_start", DataType.INT64)
+        schema.add_field("position_end", DataType.INT64)
+        # 图片位置字段
+        schema.add_field("image_position_x", DataType.INT64)
+        schema.add_field("image_position_y", DataType.INT64)
+        schema.add_field("image_width", DataType.INT64)
+        schema.add_field("image_height", DataType.INT64)
 
         index_params = client.prepare_index_params()
 
@@ -240,6 +275,10 @@ class MilvusManager:
             "chunk_level",
             "chunk_idx",
             "kb_scope",
+            "content_type",  # 文本或图片
+            "image_path",    # 图片路径
+            "position_start", "position_end",  # 文本位置
+            "image_position_x", "image_position_y", "image_width", "image_height",  # 图片位置
         ]
         dense_search = AnnSearchRequest(
             data=[dense_embedding],
@@ -271,6 +310,7 @@ class MilvusManager:
         formatted: list[dict] = []
         for hits in results:
             for hit in hits:
+                cl = hit.get("chunk_level", 0)
                 formatted.append(
                     {
                         "id": hit.get("id"),
@@ -284,6 +324,14 @@ class MilvusManager:
                         "chunk_level": hit.get("chunk_level", 0),
                         "chunk_idx": hit.get("chunk_idx", 0),
                         "kb_scope": hit.get("kb_scope", ""),
+                        "content_type": _normalize_content_type(hit.get("content_type"), cl),
+                        "image_path": hit.get("image_path", ""),
+                        "position_start": hit.get("position_start", 0),
+                        "position_end": hit.get("position_end", 0),
+                        "image_position_x": hit.get("image_position_x", 0),
+                        "image_position_y": hit.get("image_position_y", 0),
+                        "image_width": hit.get("image_width", 0),
+                        "image_height": hit.get("image_height", 0),
                         "score": hit.get("distance", 0.0),
                     }
                 )
@@ -319,6 +367,10 @@ class MilvusManager:
                 "chunk_level",
                 "chunk_idx",
                 "kb_scope",
+                "content_type",  # 文本或图片
+                "image_path",    # 图片路径
+                "position_start", "position_end",  # 文本位置
+                "image_position_x", "image_position_y", "image_width", "image_height",  # 图片位置
             ],
             filter=filter_expr,
         )
@@ -326,6 +378,7 @@ class MilvusManager:
         for hits in results:
             for hit in hits:
                 ent = hit.get("entity", {}) or {}
+                cl = ent.get("chunk_level", 0)
                 formatted.append(
                     {
                         "id": hit.get("id"),
@@ -339,6 +392,14 @@ class MilvusManager:
                         "chunk_level": ent.get("chunk_level", 0),
                         "chunk_idx": ent.get("chunk_idx", 0),
                         "kb_scope": ent.get("kb_scope", ""),
+                        "content_type": _normalize_content_type(ent.get("content_type"), cl),
+                        "image_path": ent.get("image_path", ""),
+                        "position_start": ent.get("position_start", 0),
+                        "position_end": ent.get("position_end", 0),
+                        "image_position_x": ent.get("image_position_x", 0),
+                        "image_position_y": ent.get("image_position_y", 0),
+                        "image_width": ent.get("image_width", 0),
+                        "image_height": ent.get("image_height", 0),
                         "score": hit.get("distance", 0.0),
                     }
                 )
