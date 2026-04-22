@@ -11,17 +11,19 @@ from fastapi import UploadFile
 
 from app.chat.database import SessionLocal
 from app.chat.db_models import KbDocument
-from app.kb.document_loader import DocumentLoader
+from app.kb.image_store import get_image_store
 from app.kb.kb_scope import kb_scope_for
 from app.kb.milvus_client import MilvusManager, milvus_escape
-from app.kb.milvus_writer import MilvusWriter
+from app.kb.multimodal_document_loader import MultimodalDocumentLoader
+from app.kb.multimodal_milvus_writer import MultimodalMilvusWriter
 from app.kb.parent_chunk_store import ParentChunkStore
 from app.settings import settings
 
-_loader = DocumentLoader()
+_multimodal_loader = MultimodalDocumentLoader()
 _milvus = MilvusManager()
-_writer = MilvusWriter(milvus_manager=_milvus)
+_multimodal_writer = MultimodalMilvusWriter(milvus_manager=_milvus)
 _parent = ParentChunkStore()
+_image_store = get_image_store()
 
 
 def agent_kb_directory(user_id: int, agent_id: int) -> Path:
@@ -49,7 +51,7 @@ def normalize_display_filename(raw: str) -> str:
 
 def allowed_upload_extension(filename: str) -> bool:
     """
-    允许上传的文件扩展名, 暂时支持 PDF、Word、Excel 文档
+    允许上传的文件扩展名, 支持 PDF、Word、Excel 文档
     :param filename: 文件名
     :return: 是否允许上传
     """
@@ -81,7 +83,9 @@ def purge_kb_for_scope(kb_scope: str, user_id: int, agent_id: int) -> None:
         db.commit()
     finally:
         db.close()
-    # 4. 删除磁盘文件
+    # 4. 删除图片
+    _image_store.delete_images_by_kb_scope(kb_scope)
+    # 5. 删除磁盘文件
     d = agent_kb_directory(user_id, agent_id)
     if d.is_dir():
         try:
@@ -128,7 +132,9 @@ def delete_kb_document(kb_scope: str, user_id: int, agent_id: int, display_filen
         db.commit()
     finally:
         db.close()
-    # 4. 删除对应的磁盘文件
+    # 4. 删除图片
+    _image_store.delete_images_by_document(kb_scope, display_filename)
+    # 5. 删除对应的磁盘文件
     if stored:
         p = agent_kb_directory(user_id, agent_id) / stored
         try:
@@ -204,7 +210,8 @@ async def ingest_upload(
     path.write_bytes(content) # 写入文件内容
 
     try:
-        chunks = _loader.load_document(str(path), display_filename, kb_scope) # 加载文档并进行三级分块
+        # 使用多模态文档加载器（支持图片提取）
+        chunks = _multimodal_loader.load_document(str(path), display_filename, kb_scope, user_id, agent_id)
     except Exception as e:
         try:
             path.unlink(missing_ok=True)
@@ -219,9 +226,10 @@ async def ingest_upload(
             pass
         raise ValueError("文档处理失败，未能提取内容")
 
-    # 3. 获取父块和叶子块（L1/L2/L3）
+    # 3. 获取父块和叶子块（L1/L2/L3/L4）
     parent_docs = [c for c in chunks if int(c.get("chunk_level", 0) or 0) in (1, 2)]
-    leaf_docs = [c for c in chunks if int(c.get("chunk_level", 0) or 0) == 3]
+    leaf_docs = [c for c in chunks if int(c.get("chunk_level", 0) or 0) in (3, 4)]  # L3文本块 + L4图片块
+    
     if not leaf_docs:
         try:
             path.unlink(missing_ok=True)
@@ -229,10 +237,14 @@ async def ingest_upload(
             pass
         raise ValueError("未生成可检索叶子分块")
 
+    # 统计图片和文本块数量
+    text_count = len([c for c in leaf_docs if c.get("content_type") == "text"])
+    image_count = len([c for c in leaf_docs if c.get("content_type") == "image"])
+
     # 4. 初始化 Milvus 集合、批量插入或更新父块、批量写入叶子块到 Milvus 集合
     _milvus.init_collection()
     _parent.upsert_documents(parent_docs) # 批量插入或更新父块  
-    _writer.write_documents(leaf_docs) # 批量写入叶子块到 Milvus 集合
+    _multimodal_writer.write_documents(leaf_docs) # 批量写入叶子块（包括图片）到 Milvus 集合
 
     # 5. 插入或更新 PostgreSQL 中（用户ID + 智能体ID）对应知识库的单个文档的元数据
     ft = (leaf_docs[0].get("file_type") or "") if leaf_docs else ""
@@ -254,4 +266,6 @@ async def ingest_upload(
         "display_filename": display_filename,
         "chunk_count": len(leaf_docs),
         "parent_chunks": len(parent_docs),
+        "text_chunks": text_count,
+        "image_chunks": image_count,
     }
