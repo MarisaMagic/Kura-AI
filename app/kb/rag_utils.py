@@ -1,4 +1,4 @@
-"""检索：混合向量 + 可选 rerank（未配置则跳过）+ Auto-merge。"""
+"""检索：使用多模态嵌入向量 + 可选 rerank（未配置则跳过）+ Auto-merge。"""
 
 from __future__ import annotations
 
@@ -8,13 +8,19 @@ from typing import Any, Dict, List, Tuple
 
 import requests
 from langchain.chat_models import init_chat_model
+from loguru import logger
 
-from app.kb.embedding import EmbeddingService
-from app.kb.milvus_client import MilvusManager, kb_filter_expr, milvus_escape
+from app.kb.multimodal_embedding import get_multimodal_embedding_service
+from app.kb.milvus_client import (
+    MilvusManager,
+    _normalize_content_type,
+    kb_filter_expr,
+    milvus_escape,
+)
 from app.kb.parent_chunk_store import ParentChunkStore
 from app.settings import settings
 
-_embedding_service = EmbeddingService()
+_multimodal_embedding_service = get_multimodal_embedding_service()
 _milvus_manager = MilvusManager()
 _parent_chunk_store = ParentChunkStore()
 
@@ -51,7 +57,7 @@ def _merge_to_parent_level(docs: List[dict], threshold: int = 2) -> Tuple[List[d
             groups[parent_id].append(doc)
 
     # 获取需要合并的父级块ID列表（文档数量大于等于阈值的父级块ID）
-    merge_parent_ids = [pid for pid, children in groups.items() if len(children) >= threshold] 
+    merge_parent_ids = [pid for pid, children in groups.items() if len(children) >= threshold]
     # 如果不需要合并，则返回原始文档列表和合并次数
     if not merge_parent_ids:
         return docs, 0
@@ -99,6 +105,141 @@ def _merge_to_parent_level(docs: List[dict], threshold: int = 2) -> Tuple[List[d
     return deduped, merged_count
 
 
+def _image_row_to_retrieval_doc(img: Any, base_score: float, source_text_chunk_id: str) -> dict:
+    """由 KbImage 行构造与 hybrid_retrieve 一致结构的图片块，供检索合并。"""
+    return {
+        "id": None,
+        "text": "",
+        "filename": img.source_document or img.filename,
+        "file_type": "image",
+        "page_number": img.page_number,
+        "chunk_id": (img.chunk_id or "").strip(),
+        "parent_chunk_id": (img.parent_chunk_id or "") or "",
+        "root_chunk_id": (img.root_chunk_id or "") or "",
+        "chunk_level": 4,
+        "chunk_idx": 0,
+        "kb_scope": img.kb_scope,
+        "content_type": "image",
+        "image_path": "",
+        "position_start": 0,
+        "position_end": 0,
+        "image_position_x": int(img.position_x or 0),
+        "image_position_y": int(img.position_y or 0),
+        "image_width": int(img.position_width or 0),
+        "image_height": int(img.position_height or 0),
+        "score": float(base_score),
+        "related_text_expansion": True,
+        "source_text_chunk_id": source_text_chunk_id,
+        "image_metadata": {
+            "id": img.id,
+            "stored_relpath": img.stored_relpath,
+            "display_filename": img.display_filename,
+            "file_size": img.file_size,
+            "width": img.width,
+            "height": img.height,
+            "format": img.format,
+            "position_x": img.position_x,
+            "position_y": img.position_y,
+            "position_width": img.position_width,
+            "position_height": img.position_height,
+            "related_text_ids": list(img.related_text_ids or []),
+        },
+    }
+
+
+def _expand_related_image_docs(
+    retrieved: List[dict],
+    kb_scope: str,
+    image_store: Any,
+    include_images: bool,
+) -> tuple[List[dict], int]:
+    """
+    对候选中的每个文本块，查询 related_text_ids 命中的图片并追加为候选（去重 chunk_id）。
+    """
+    if not include_images or not bool(getattr(settings, "KB_RELATED_IMAGE_EXPANSION", True)):
+        return retrieved, 0
+    max_total = int(getattr(settings, "KB_RELATED_IMAGE_MAX_TOTAL", 24) or 24)
+    max_per_text = int(getattr(settings, "KB_RELATED_IMAGE_MAX_PER_TEXT", 5) or 5)
+    seen: set[str] = set()
+    for d in retrieved:
+        cid = (d.get("chunk_id") or "").strip()
+        if cid:
+            seen.add(cid)
+    out = list(retrieved)
+    added = 0
+    for doc in retrieved:
+        if added >= max_total:
+            break
+        if doc.get("content_type") != "text":
+            continue
+        tid = (doc.get("chunk_id") or "").strip()
+        if not tid:
+            continue
+        base = float(doc.get("score") or 0.0)
+        rel_score = base * 0.97 if base > 0 else 0.0
+        try:
+            related = image_store.get_related_images_for_text(tid)
+        except Exception as e:
+            logger.warning("get_related_images_for_text 失败，跳过该文本块关联图: tid={!r} err={}", tid, e)
+            continue
+        n = 0
+        for img in related:
+            if added >= max_total or n >= max_per_text:
+                break
+            if (img.kb_scope or "") != kb_scope:
+                continue
+            ic = (img.chunk_id or "").strip()
+            if not ic or ic in seen:
+                continue
+            seen.add(ic)
+            out.append(_image_row_to_retrieval_doc(img, rel_score, tid))
+            added += 1
+            n += 1
+    return out, added
+
+
+def _final_slice_with_image_floor(docs: List[dict], top_k: int, min_image_slots: int) -> List[dict]:
+    """
+    在总数不超过 top_k 的前提下，尽量保留若干图片块，再与文本按 score 填满。
+    """
+    if not docs or top_k <= 0:
+        return []
+    for d in docs:
+        d["content_type"] = _normalize_content_type(d.get("content_type"), d.get("chunk_level", 0))
+    if min_image_slots <= 0:
+        return sorted(docs, key=lambda x: float(x.get("score") or 0.0), reverse=True)[:top_k]
+    by_score = sorted(docs, key=lambda x: float(x.get("score") or 0.0), reverse=True)
+    texts = [d for d in by_score if d.get("content_type") == "text"]
+    images = [d for d in by_score if d.get("content_type") == "image"]
+    want_img = min(len(images), min_image_slots, top_k)
+    picked: List[dict] = images[:want_img]
+    seen_c: set[str] = set()
+    for d in picked:
+        c = (d.get("chunk_id") or "").strip()
+        if c:
+            seen_c.add(c)
+    for d in texts:
+        if len(picked) >= top_k:
+            break
+        c = (d.get("chunk_id") or "").strip()
+        if c and c in seen_c:
+            continue
+        if c:
+            seen_c.add(c)
+        picked.append(d)
+    if len(picked) < top_k:
+        for d in by_score:
+            if len(picked) >= top_k:
+                break
+            c = (d.get("chunk_id") or "").strip()
+            if c and c in seen_c:
+                continue
+            if c:
+                seen_c.add(c)
+            picked.append(d)
+    return picked[:top_k]
+
+
 def _auto_merge_documents(docs: List[dict], top_k: int) -> Tuple[List[dict], Dict[str, Any]]:
     """
     自动合并文档
@@ -129,15 +270,31 @@ def _auto_merge_documents(docs: List[dict], top_k: int) -> Tuple[List[dict], Dic
     }
 
 
-def _rerank_documents(query: str, docs: List[dict], top_k: int) -> Tuple[List[dict], Dict[str, Any]]:
+def _rerank_documents(
+    query: str,
+    docs: List[dict],
+    return_cap: int,
+    include_images: bool = True,
+) -> Tuple[List[dict], Dict[str, Any]]:
     """
     重新排序文档, 使用 Rerank 模型对文档进行重新排序。
-    :param query: 查询
-    :param docs: 文档列表
-    :param top_k: 返回的文档数量
+    注意：图片块的 text 字段为空，需要特殊处理。
+    :param return_cap: 本阶段返回条数上限（可大于最终 top_k，便于后续 merge 与图片槽位截断）
+    :param include_images: 无图片语义时可 False（当前仅写入 meta）
     :return: 重新排序后的文档列表和重新排序的元数据
     """
-    docs_with_rank = [{**doc, "rrf_rank": i} for i, doc in enumerate(docs, 1)] # 添加 rrf_rank 字段
+    for d in docs:
+        d["content_type"] = _normalize_content_type(d.get("content_type"), d.get("chunk_level", 0))
+    # 分离文本块和图片块
+    text_docs = [doc for doc in docs if doc.get("content_type") == "text"]
+    image_docs = [doc for doc in docs if doc.get("content_type") == "image"]
+    
+    # 只对文本块进行 rerank（图片块没有文本内容）
+    if text_docs:
+        docs_with_rank = [{**doc, "rrf_rank": i} for i, doc in enumerate(text_docs, 1)] # 添加 rrf_rank 字段
+    else:
+        docs_with_rank = []
+    
     rm = getattr(settings, "RERANK_MODEL", None)
     rk = getattr(settings, "RERANK_API_KEY", None)
     rh = getattr(settings, "RERANK_BINDING_HOST", None)
@@ -147,16 +304,26 @@ def _rerank_documents(query: str, docs: List[dict], top_k: int) -> Tuple[List[di
         "rerank_model": rm,
         "rerank_endpoint": _rerank_endpoint(),
         "rerank_error": None,
-        "candidate_count": len(docs_with_rank),
+        "candidate_count": len(docs),
+        "text_count": len(text_docs),
+        "image_count": len(image_docs),
+        "include_images": include_images,
+        "return_cap": return_cap,
     }
+    
+    # 如果没有文本块或有文本块但 rerank 未配置，直接返回
     if not docs_with_rank or not meta["rerank_enabled"]:
-        return docs_with_rank[:top_k], meta
+        # 合并回图片块（保持原始顺序）
+        final_docs = docs_with_rank + image_docs
+        # 按原始分数排序
+        final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+        return final_docs[:return_cap], meta
 
     payload = {
         "model": rm,
         "query": query,
         "documents": [doc.get("text", "") for doc in docs_with_rank],
-        "top_n": min(top_k, len(docs_with_rank)),
+        "top_n": min(return_cap, len(docs_with_rank)),
         "return_documents": False,
     }
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {rk}"}
@@ -165,7 +332,10 @@ def _rerank_documents(query: str, docs: List[dict], top_k: int) -> Tuple[List[di
         response = requests.post(meta["rerank_endpoint"], headers=headers, json=payload, timeout=15)
         if response.status_code >= 400:
             meta["rerank_error"] = f"HTTP {response.status_code}: {response.text}"
-            return docs_with_rank[:top_k], meta
+            # 合并回图片块
+            final_docs = docs_with_rank + image_docs
+            final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+            return final_docs[:return_cap], meta
         items = response.json().get("results", [])
         reranked = []
         for item in items:
@@ -177,12 +347,21 @@ def _rerank_documents(query: str, docs: List[dict], top_k: int) -> Tuple[List[di
                     doc["rerank_score"] = sc
                 reranked.append(doc)
         if reranked:
-            return reranked[:top_k], meta
+            # 合并回图片块
+            final_docs = reranked + image_docs
+            final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+            return final_docs[:return_cap], meta
         meta["rerank_error"] = "empty_rerank_results"
-        return docs_with_rank[:top_k], meta
+        # 合并回图片块
+        final_docs = docs_with_rank + image_docs
+        final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+        return final_docs[:return_cap], meta
     except (requests.RequestException, json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         meta["rerank_error"] = str(e)
-        return docs_with_rank[:top_k], meta
+        # 合并回图片块
+        final_docs = docs_with_rank + image_docs
+        final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+        return final_docs[:return_cap], meta
 
 
 def _chat_from_config(llm_config: dict | None, temperature: float = 0.2):
@@ -215,7 +394,7 @@ def _generate_step_back_question(query: str, llm_config: dict | None) -> str:
     if not model:
         return ""
     prompt = (
-        "请将用户的具体问题抽象成更高层次、更概括的‘退步问题’，"
+        "请将用户的具体问题抽象成更高层次、更概括的'退步问题'，"
         "用于探寻背后的通用原理或核心概念。只输出退步问题一句话，不要解释。\n"
         f"用户问题：{query}"
     )
@@ -257,7 +436,7 @@ def generate_hypothetical_document(query: str, llm_config: dict | None) -> str:
     if not model:
         return ""
     prompt = (
-        "请基于用户问题生成一段‘假设性文档’，内容应像真实资料片段，"
+        "请基于用户问题生成一段'假设性文档'，内容应像真实资料片段，"
         "用于帮助检索相关信息。文档可以包含合理推测，但需与问题语义相关。"
         "只输出文档正文，不要标题或解释。\n"
         f"用户问题：{query}"
@@ -266,6 +445,84 @@ def generate_hypothetical_document(query: str, llm_config: dict | None) -> str:
         return (model.invoke(prompt).content or "").strip()
     except Exception:
         return ""
+
+
+def _finalize_retrieved_docs(
+    retrieved: List[dict],
+    *,
+    query: str,
+    kb_scope: str,
+    top_k: int,
+    candidate_k: int,
+    include_images: bool,
+    image_store: Any,
+    retrieval_mode: str,
+) -> tuple[List[dict], Dict[str, Any]]:
+    """
+    为 Milvus 命中的图片补全 image_metadata、按文本块展开关联图、重排、父级 merge、再按图片槽位截断为最终 top_k。
+    """
+    for d in retrieved:
+        d["content_type"] = _normalize_content_type(d.get("content_type"), d.get("chunk_level", 0))
+    image_chunks = [doc for doc in retrieved if doc.get("content_type") == "image"]
+    if image_chunks:
+        chunk_ids = [c.get("chunk_id") for c in image_chunks if c.get("chunk_id")]
+        images = image_store.get_images_by_chunk_ids(chunk_ids)
+        image_map = {img.chunk_id: img for img in images}
+        for chunk in retrieved:
+            if chunk.get("content_type") != "image":
+                continue
+            chunk_id = chunk.get("chunk_id")
+            if not chunk_id or chunk_id not in image_map:
+                continue
+            img = image_map[chunk_id]
+            chunk["image_metadata"] = {
+                "id": img.id,
+                "stored_relpath": img.stored_relpath,
+                "display_filename": img.display_filename,
+                "file_size": img.file_size,
+                "width": img.width,
+                "height": img.height,
+                "format": img.format,
+                "position_x": img.position_x,
+                "position_y": img.position_y,
+                "position_width": img.position_width,
+                "position_height": img.position_height,
+                "related_text_ids": img.related_text_ids,
+            }
+
+    retrieved, rel_added = _expand_related_image_docs(retrieved, kb_scope, image_store, include_images)
+    min_slots = int(getattr(settings, "KB_MIN_IMAGE_SLOTS", 0) or 0) if include_images else 0
+    work_cap = min(
+        len(retrieved),
+        max(
+            candidate_k,
+            top_k + (min_slots * 2 + 4 if min_slots else 0),
+        ),
+    )
+
+    reranked, rerank_meta = _rerank_documents(
+        query=query,
+        docs=retrieved,
+        return_cap=work_cap,
+        include_images=include_images,
+    )
+    rerank_meta["related_image_expansion_count"] = rel_added
+    rerank_meta["retrieval_mode"] = retrieval_mode
+    rerank_meta["candidate_k"] = candidate_k
+    rerank_meta["leaf_retrieve_level"] = LEAF_RETRIEVE_LEVEL
+    rerank_meta["include_images"] = include_images
+    rerank_meta["work_cap"] = work_cap
+    rerank_meta["final_top_k"] = top_k
+
+    merged_docs, merge_meta = _auto_merge_documents(docs=reranked, top_k=work_cap)
+    rerank_meta.update(merge_meta)
+
+    if include_images and min_slots > 0:
+        merged_docs = _final_slice_with_image_floor(merged_docs, top_k, min_slots)
+    else:
+        merged_docs = sorted(merged_docs, key=lambda x: float(x.get("score") or 0.0), reverse=True)[:top_k]
+    rerank_meta["image_slot_floor"] = min_slots if include_images else 0
+    return merged_docs, rerank_meta
 
 
 def step_back_expand(query: str, llm_config: dict | None) -> dict:
@@ -288,22 +545,40 @@ def step_back_expand(query: str, llm_config: dict | None) -> dict:
     }
 
 
-def retrieve_documents(query: str, kb_scope: str, top_k: int = 5) -> Dict[str, Any]:
+def retrieve_documents(query: str, kb_scope: str, top_k: int = 5, include_images: bool = True) -> Dict[str, Any]:
     """
-    检索文档
+    检索文档（使用多模态嵌入服务）
+    根据查询同时检索文本块和图片块，然后根据文本块和图片块的相似度进行排序，最后返回排序后的文档列表。
     :param query: 查询
     :param kb_scope: 知识库范围
     :param top_k: 返回的文档数量
+    :param include_images: 是否包含图片块
     :return: 检索后的文档列表和检索的元数据
     """
+    from app.kb.image_store import get_image_store
+    image_store = get_image_store()
+    
     candidate_k = max(top_k * 3, top_k) # 候选文档数量
     esc = milvus_escape(kb_scope) # 转义知识库范围
-    filter_expr = f'kb_scope == "{esc}" && chunk_level == {LEAF_RETRIEVE_LEVEL}' # 过滤表达式
+    
+    # 支持检索文本块（L3）和图片块（L4）
+    if include_images:
+        # 检索所有叶子块：L3文本 + L4图片
+        filter_expr = f'kb_scope == "{esc}" && (chunk_level == {LEAF_RETRIEVE_LEVEL} || chunk_level == 4)'
+    else:
+        # 只检索文本块
+        filter_expr = f'kb_scope == "{esc}" && chunk_level == {LEAF_RETRIEVE_LEVEL}'
+    
     try:
-        # 将查询转换为密集向量和稀疏向量
-        dense_embeddings = _embedding_service.get_embeddings([query])
+        # 使用多模态嵌入服务生成向量
+        # 首先训练语料库（用于稀疏向量）
+        _multimodal_embedding_service.fit_corpus([query])
+        
+        # 获取查询的密集向量和稀疏向量
+        dense_embeddings = _multimodal_embedding_service.get_text_embeddings([query])
         dense_embedding = dense_embeddings[0]
-        sparse_embedding = _embedding_service.get_sparse_embedding(query)
+        sparse_embedding = _multimodal_embedding_service.get_sparse_embedding(query)
+        
         # 混合检索，检索 candidate_k 个相似文档
         retrieved = _milvus_manager.hybrid_retrieve(
             dense_embedding=dense_embedding,
@@ -311,30 +586,39 @@ def retrieve_documents(query: str, kb_scope: str, top_k: int = 5) -> Dict[str, A
             top_k=candidate_k,
             filter_expr=filter_expr,
         )
-        # 对检索到的文档进行重排序和合并
-        reranked, rerank_meta = _rerank_documents(query=query, docs=retrieved, top_k=top_k)
-        merged_docs, merge_meta = _auto_merge_documents(docs=reranked, top_k=top_k)
-        rerank_meta["retrieval_mode"] = "hybrid"
-        rerank_meta["candidate_k"] = candidate_k
-        rerank_meta["leaf_retrieve_level"] = LEAF_RETRIEVE_LEVEL
-        rerank_meta.update(merge_meta)
+        
+        merged_docs, rerank_meta = _finalize_retrieved_docs(
+            retrieved,
+            query=query,
+            kb_scope=kb_scope,
+            top_k=top_k,
+            candidate_k=candidate_k,
+            include_images=include_images,
+            image_store=image_store,
+            retrieval_mode="hybrid",
+        )
         return {"docs": merged_docs, "meta": rerank_meta}
     except Exception:
         try:
             # 如果混合检索失败，则使用密集检索
-            dense_embeddings = _embedding_service.get_embeddings([query])
+            dense_embeddings = _multimodal_embedding_service.get_text_embeddings([query])
             dense_embedding = dense_embeddings[0]
             retrieved = _milvus_manager.dense_retrieve(
                 dense_embedding=dense_embedding,
                 top_k=candidate_k,
                 filter_expr=filter_expr,
             )
-            reranked, rerank_meta = _rerank_documents(query=query, docs=retrieved, top_k=top_k)
-            merged_docs, merge_meta = _auto_merge_documents(docs=reranked, top_k=top_k)
-            rerank_meta["retrieval_mode"] = "dense_fallback"
-            rerank_meta["candidate_k"] = candidate_k
-            rerank_meta["leaf_retrieve_level"] = LEAF_RETRIEVE_LEVEL
-            rerank_meta.update(merge_meta)
+            
+            merged_docs, rerank_meta = _finalize_retrieved_docs(
+                retrieved,
+                query=query,
+                kb_scope=kb_scope,
+                top_k=top_k,
+                candidate_k=candidate_k,
+                include_images=include_images,
+                image_store=image_store,
+                retrieval_mode="dense_fallback",
+            )
             return {"docs": merged_docs, "meta": rerank_meta}
         except Exception:
             return {
@@ -346,6 +630,7 @@ def retrieve_documents(query: str, kb_scope: str, top_k: int = 5) -> Dict[str, A
                     "retrieval_mode": "failed",
                     "candidate_k": candidate_k,
                     "leaf_retrieve_level": LEAF_RETRIEVE_LEVEL,
+                    "include_images": include_images,
                     "auto_merge_enabled": AUTO_MERGE_ENABLED,
                     "auto_merge_applied": False,
                     "auto_merge_threshold": AUTO_MERGE_THRESHOLD,

@@ -117,8 +117,13 @@ def retrieve_initial(state: RAGState) -> RAGState:
     """
     query = state["question"] # 用户问题
     kb_scope = state["kb_scope"] # 当前智能体检索的知识库范围
+    llm_config = state["llm_config"] # 模型配置
+    
+    # 从状态中获取是否包含图片的配置，默认为 True
+    include_images = state.get("include_images", True)
+    
     emit_rag_step("🔍", "正在检索知识库...", f"查询: {query[:50]}")
-    retrieved = retrieve_documents(query, kb_scope=kb_scope, top_k=5) # 检索与用户问题相关的文档
+    retrieved = retrieve_documents(query, kb_scope=kb_scope, top_k=5, include_images=include_images) # 检索与用户问题相关的文档
     results = retrieved.get("docs", []) # 检索到的文档列表
     retrieve_meta = retrieved.get("meta", {}) # 检索的元数据
     context = _format_docs(results) # 格式化检索到的文档列表
@@ -498,5 +503,6 @@ def run_rag_graph(question: str, kb_scope: str, llm_config: dict[str, Any]) -> d
             "step_back_answer": None,
             "hypothetical_doc": None,
             "rag_trace": None,
+            "include_images": True,  # 默认包含图片检索
         }
     )
