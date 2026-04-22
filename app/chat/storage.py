@@ -154,11 +154,13 @@ class ConversationStorage:
                 rag_trace = None
                 rag_steps = None
                 error_text = None
+                image_references = None
                 # 检查额外消息数据, 如果有 RAG 追踪信息, 则添加到消息中
                 if extra_message_data and idx < len(extra_message_data):
                     extra = extra_message_data[idx] or {}
                     rag_trace = extra.get("rag_trace")
                     rag_steps = extra.get("rag_steps")
+                    image_references = extra.get("image_references")  # 获取图片引用
                     raw_err = extra.get("error_text")
                     if raw_err is not None:
                         error_text = str(raw_err).strip() or None
@@ -179,6 +181,7 @@ class ConversationStorage:
                         rag_trace=rag_trace,
                         rag_steps=rag_steps,
                         error_text=error_text,
+                        image_references=image_references,  # 添加图片引用
                     )
                 )
                 # 将新消息添加到序列化列表
@@ -191,6 +194,7 @@ class ConversationStorage:
                         "rag_trace": rag_trace,
                         "rag_steps": rag_steps,
                         "error_text": error_text,
+                        "image_references": image_references,  # 添加图片引用
                     }
                 )
 
