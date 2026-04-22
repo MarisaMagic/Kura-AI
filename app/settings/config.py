@@ -117,11 +117,11 @@ class Settings(BaseSettings):
     # 智能体对话异步 Job（刷新后可重连 SSE）在 Redis 中的 TTL（秒）
     CHAT_JOB_TTL_SECONDS: int = 86400
 
-    # 全局嵌入（DashScope 兼容 OpenAI /embeddings）
+    # 全局嵌入（DashScope 兼容 OpenAI /embeddings）- 多模态嵌入模型
     EMBEDDING_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    EMBEDDING_MODEL: str = "text-embedding-v3"
+    EMBEDDING_MODEL: str = "qwen3-vl-embedding"
     EMBEDDING_API_KEY: typing.Optional[str] = None
-    EMBEDDING_DIM: int = 1024
+    EMBEDDING_DIM: int = 1536  # qwen3-vl-embedding 的向量维度
     EMBEDDING_BATCH_SIZE: int = 10
 
     # Milvus
@@ -148,6 +148,13 @@ class Settings(BaseSettings):
 
     # 智能体知识库文档根目录：data/user_agent_docs/user_{id}/{agent_id}/
     USER_AGENT_KB_DOCS_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_docs")
+    # 智能体知识库图片根目录：data/user_agent_images/user_{id}/{agent_id}/
+    USER_AGENT_KB_IMAGES_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_images")
+    # 浏览器访问图片路径前缀
+    USER_AGENT_KB_IMAGES_URL_PREFIX: str = "/api/v1/media/user_agent_images"
+    # 对外可访问的 API 根地址（无尾斜杠），用于拼接知识库图片完整 URL；例如 http://127.0.0.1:8000 或 https://api.example.com
+    # 未设置时工具返回相对路径，前端需自行补全；多模态 image_url 建议使用完整 http(s) 地址
+    PUBLIC_API_BASE: str = ""
     # 会话对话附件：data/user_agent_uploads/user_{id}/{agent_id}/{session}/
     USER_AGENT_CHAT_UPLOAD_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_uploads")
     # 单次请求：附件个数、单文件大小（字节）、会话附件总大小上限
@@ -163,6 +170,12 @@ class Settings(BaseSettings):
     AUTO_MERGE_ENABLED: bool = True
     AUTO_MERGE_THRESHOLD: int = 2
     LEAF_RETRIEVE_LEVEL: int = 3
+    # 多模态 RAG：命中「文本块」时按 PostgreSQL 中 related_text_ids 拉取同页/邻近关联图片并并入候选
+    KB_RELATED_IMAGE_EXPANSION: bool = True
+    KB_RELATED_IMAGE_MAX_PER_TEXT: int = 5
+    KB_RELATED_IMAGE_MAX_TOTAL: int = 24
+    # 最终 top_k 中尽量保留至少 N 个图片块（有可用图片时；与纯文本按 score 争位）
+    KB_MIN_IMAGE_SLOTS: int = 2
 
     @property
     def chat_database_url(self) -> str:

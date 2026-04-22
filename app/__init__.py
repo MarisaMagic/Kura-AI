@@ -12,7 +12,6 @@ from app.core.init_app import (
     register_exceptions,
     register_routers,
 )
-
 try:
     from app.settings.config import settings
 except ImportError:
@@ -48,6 +47,7 @@ def create_app() -> FastAPI:
     os.makedirs(settings.USER_AVATAR_ROOT, exist_ok=True)
     os.makedirs(settings.USER_AGENT_AVATAR_ROOT, exist_ok=True)
     os.makedirs(settings.USER_AGENT_CHAT_UPLOAD_ROOT, exist_ok=True)
+    os.makedirs(settings.USER_AGENT_KB_IMAGES_ROOT, exist_ok=True)
     app.mount(
         settings.USER_AVATAR_URL_PREFIX,
         StaticFiles(directory=settings.USER_AVATAR_ROOT),
@@ -57,6 +57,11 @@ def create_app() -> FastAPI:
         settings.USER_AGENT_AVATAR_URL_PREFIX,
         StaticFiles(directory=settings.USER_AGENT_AVATAR_ROOT),
         name="user_agent_avatar_files",
+    )
+    app.mount(
+        settings.USER_AGENT_KB_IMAGES_URL_PREFIX,
+        StaticFiles(directory=settings.USER_AGENT_KB_IMAGES_ROOT),
+        name="user_agent_kb_images_files",
     )
     return app
 
