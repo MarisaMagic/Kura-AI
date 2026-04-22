@@ -187,7 +187,6 @@ def _compose_system_prompt(
     :param session_attachment_hint: 本会话已上传附件的纯事实列表（无工具调用指引）
     :return: 系统提示词
     """
-    _ = use_knowledge_retrieval
     parts: list[str] = []
     # 基础提示词, 用户在创建智能体时配置的前置提示词
     base = (ua.system_prompt or "").strip()
@@ -203,6 +202,13 @@ def _compose_system_prompt(
         parts.append("用户希望你在适当时给出可运行的代码示例；注意标注语言与前提假设。")
     if (session_attachment_hint or "").strip():
         parts.append(session_attachment_hint.strip())
+    if use_knowledge_retrieval:
+        parts.append(
+            "知识库检索结果中若出现「图片公网访问 URL」或「PostgreSQL 存储相对路径 stored_relpath」，"
+            "展示图片时必须在回答中使用工具给出的完整 http(s) 图片 URL（Markdown：![](完整URL)），"
+            "须与工具返回的「图片公网访问 URL」逐字一致。"
+            "禁止使用 image://、file://、kb_image:// 等自定义协议，禁止用 [1][2] 或序号代替 URL。"
+        )
     return "\n\n".join(parts)
 
 
@@ -372,12 +378,30 @@ def chat_with_agent_sync(
     rag_context = get_last_rag_context(clear=True)
     # 获取 RAG 追踪
     rag_trace = rag_context.get("rag_trace") if rag_context else None
+    # 获取图片引用
+    image_references = rag_context.get("image_references") if rag_context else None
 
     error_text = str(caught_exc) if caught_exc else None
-    messages.append(AIMessage(content=response_content))
+    
+    # 构建AI消息内容
+    ai_message_content = response_content
+    if image_references:
+        # 如果有图片引用，将内容构建为多部分内容
+        content_parts = [{"type": "text", "text": response_content}]
+        # 添加图片引用
+        for img_ref in image_references:
+            content_parts.append(img_ref)
+        ai_message_content = content_parts
+    
+    messages.append(AIMessage(content=ai_message_content))
     # 构建额外消息数据（含失败时的 error_text 供历史展示）
     extra_message_data = [None] * (len(messages) - 1) + [
-        {"rag_trace": rag_trace, "rag_steps": rag_collector.steps or None, "error_text": error_text}
+        {
+            "rag_trace": rag_trace,
+            "rag_steps": rag_collector.steps or None,
+            "error_text": error_text,
+            "image_references": image_references,  # 添加图片引用
+        }
     ]
     # 保存会话消息，保存最新一轮对话消息到数据库对应会话并更新 Redis 缓存
     storage.save(user_id, agent_id, session_id, messages, extra_message_data=extra_message_data)
@@ -571,19 +595,32 @@ async def iter_chat_stream_events(
     rag_context = get_last_rag_context(clear=True)
     # 获取 RAG 追踪
     rag_trace = rag_context.get("rag_trace") if rag_context else None
+    # 获取图片引用
+    image_references = rag_context.get("image_references") if rag_context else None
 
     # 如果 RAG 追踪存在, 则输出 RAG 追踪
     if rag_trace:
         yield {"type": "trace", "rag_trace": rag_trace}
 
+    # 构建AI消息内容
+    ai_message_content = full_response
+    if image_references:
+        # 如果有图片引用，将内容构建为多部分内容
+        content_parts = [{"type": "text", "text": full_response}]
+        # 添加图片引用
+        for img_ref in image_references:
+            content_parts.append(img_ref)
+        ai_message_content = content_parts
+    
     # 将响应内容添加到会话消息中
-    messages.append(AIMessage(content=full_response))
+    messages.append(AIMessage(content=ai_message_content))
     # 构建额外消息数据（含流式失败时的 error_text 供历史展示）
     extra_message_data = [None] * (len(messages) - 1) + [
         {
             "rag_trace": rag_trace,
             "rag_steps": rag_steps_collected or None,
             "error_text": stream_error,
+            "image_references": image_references,  # 添加图片引用
         }
     ]
     # 保存会话消息，保存最新一轮对话消息到数据库对应会话并更新 Redis 缓存
