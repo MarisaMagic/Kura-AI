@@ -74,6 +74,74 @@ class KbParentChunk(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
+class KbImage(Base):
+    """
+    知识库图片元数据表，用于存储从文档中提取的图片信息。
+    :param id: 图片唯一ID
+    :param kb_scope: 知识库范围
+    :param filename: 原始文件名
+    :param display_filename: 展示文件名
+    :param stored_relpath: 存储相对路径
+    :param file_size: 文件大小（字节）
+    :param mime_type: MIME类型
+    :param width: 图片宽度
+    :param height: 图片高度
+    :param format: 图片格式
+    :param caption: 预留字段（可选说明文字，当前不入库生成）
+    :param embedding_model: 使用的嵌入模型
+    :param source_document: 来源文档名
+    :param page_number: 所在页码
+    :param position_in_doc: 在文档中的位置信息
+    :param chunk_id: 关联的向量块ID
+    :param parent_chunk_id: 关联的父块ID
+    :param root_chunk_id: 关联的根块ID
+    :param created_at: 创建时间
+    :param updated_at: 更新时间
+    """
+
+    __tablename__ = "mg_kb_images"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kb_scope: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    
+    # 文件信息
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    display_filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    stored_relpath: Mapped[str] = mapped_column(String(1024), nullable=False)
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=True)
+    
+    # 图片属性
+    width: Mapped[int] = mapped_column(Integer, nullable=True)
+    height: Mapped[int] = mapped_column(Integer, nullable=True)
+    format: Mapped[str] = mapped_column(String(20), nullable=True)
+    
+    # 语义信息
+    caption: Mapped[str] = mapped_column(Text, nullable=True, default="")  # 预留，默认空
+    embedding_model: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    
+    # 关联信息
+    source_document: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    page_number: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    
+    # 图片在页面中的位置信息
+    position_x: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
+    position_y: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
+    position_width: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
+    position_height: Mapped[int] = mapped_column(Integer, nullable=True, default=0)
+    
+    # 检索相关
+    chunk_id: Mapped[str] = mapped_column(String(512), nullable=True, index=True)
+    parent_chunk_id: Mapped[str] = mapped_column(String(512), nullable=True, index=True)
+    root_chunk_id: Mapped[str] = mapped_column(String(512), nullable=True, index=True)
+    
+    # 图文关联
+    related_text_ids: Mapped[list] = mapped_column(JSON, nullable=True, default=list)  # 关联的文本块ID列表
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 class ChatSession(Base):
     """
     聊天会话模型
@@ -153,6 +221,7 @@ class ChatMessage(Base):
     rag_trace: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     rag_steps: Mapped[list | None] = mapped_column(JSON, nullable=True)
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    image_references: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 图片引用列表
 
     session = relationship("ChatSession", back_populates="messages")
 
