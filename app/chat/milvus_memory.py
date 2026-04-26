@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
 
 from app.kb.milvus_client import _dense_dim, milvus_escape
@@ -17,6 +19,27 @@ def _text_varchar_max() -> int:
 def memory_filter_expr(memory_scope: str) -> str:
     esc = milvus_escape(memory_scope)
     return f'memory_scope == "{esc}"'
+
+
+def _read_collection_dense_dim(client: MilvusClient, collection_name: str) -> int | None:
+    """从 describe_collection 解析 dense_embedding 的 dim，失败返回 None。"""
+    try:
+        info = client.describe_collection(collection_name=collection_name)
+    except Exception:
+        return None
+    if not isinstance(info, dict):
+        return None
+    for f in info.get("fields") or []:
+        if not isinstance(f, dict) or f.get("name") != "dense_embedding":
+            continue
+        dim = (f.get("params") or {}).get("dim")
+        if dim is None:
+            return None
+        try:
+            return int(dim)
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 class ChatMemoryMilvusManager:
@@ -54,7 +77,23 @@ class ChatMemoryMilvusManager:
             dense_dim = _dense_dim()
         client = self._get_client()
         if client.has_collection(self.collection_name):
-            return
+            current = _read_collection_dense_dim(client, self.collection_name)
+            if current == dense_dim:
+                return
+            if current is not None and current != dense_dim:
+                logging.getLogger(__name__).warning(
+                    "会话记忆 Milvus 集合 %s 的 dense_embedding 维度为 %s，与 EMBEDDING_DIM=%s 不一致，将删除后按新维度重建（历史记忆向量会清空）",
+                    self.collection_name,
+                    current,
+                    dense_dim,
+                )
+                self.drop_collection()
+            else:
+                logging.getLogger(__name__).warning(
+                    "已存在集合 %s 但无法解析 dense_embedding 维度，未自动重建；若 Milvus 报 vector dimension mismatch 请手动 drop 该集合或临时设置 CHAT_MEMORY_MILVUS_RECREATE_ON_INIT=true",
+                    self.collection_name,
+                )
+                return
         schema = client.create_schema(auto_id=True, enable_dynamic_field=True)
         schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
         schema.add_field("dense_embedding", DataType.FLOAT_VECTOR, dim=dense_dim)
