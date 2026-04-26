@@ -304,7 +304,7 @@
                   v-model:value="inputText"
                   type="textarea"
                   :bordered="false"
-                  :autosize="{ minRows: 2, maxRows: 8 }"
+                  :autosize="{ minRows: 1, maxRows: 8 }"
                   :placeholder="$t('views.agents.chat_placeholder_input')"
                   :disabled="pageLoading || !!loadError || sending"
                   class="agent-chat-input"
@@ -1711,10 +1711,61 @@ html.dark .agent-chat-intro-avatar {
 
 .agent-chat-intro-opening-md :deep(p) {
   margin: 0.35em 0;
+  line-height: 1.78;
 }
 
 .agent-chat-intro-opening-md :deep(p:first-child) {
   margin-top: 0;
+}
+
+.agent-chat-intro-opening-md :deep(h1),
+.agent-chat-intro-opening-md :deep(h2),
+.agent-chat-intro-opening-md :deep(h3),
+.agent-chat-intro-opening-md :deep(h4),
+.agent-chat-intro-opening-md :deep(h5),
+.agent-chat-intro-opening-md :deep(h6) {
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 0.75em 0 0.4em;
+  color: inherit;
+}
+
+.agent-chat-intro-opening-md :deep(h1) {
+  font-size: 1.28em;
+}
+
+.agent-chat-intro-opening-md :deep(h2) {
+  font-size: 1.18em;
+}
+
+.agent-chat-intro-opening-md :deep(h3) {
+  font-size: 1.1em;
+}
+
+.agent-chat-intro-opening-md :deep(h4) {
+  font-size: 1.04em;
+}
+
+.agent-chat-intro-opening-md :deep(h5),
+.agent-chat-intro-opening-md :deep(h6) {
+  font-size: 1em;
+}
+
+.agent-chat-intro-opening-md :deep(h1:first-child),
+.agent-chat-intro-opening-md :deep(h2:first-child),
+.agent-chat-intro-opening-md :deep(h3:first-child) {
+  margin-top: 0;
+}
+
+.agent-chat-intro-opening-md :deep(img) {
+  max-width: min(100%, 640px);
+  max-height: min(360px, 45vh);
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  display: block;
+  margin: 0.5em 0;
+  border-radius: 6px;
 }
 
 /* —— 信息流（助手左对齐；用户右对齐气泡）—— */
@@ -2248,7 +2299,7 @@ html.dark .agent-chat-msg-stopped {
 .agent-chat-md {
   color: #0f172a;
   font-size: 16px;
-  line-height: 1.55;
+  line-height: 1.72;
   /* 宽表格横向滚动；与 pre 内滚动互不冲突 */
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
@@ -2260,10 +2311,61 @@ html.dark .agent-chat-md {
 
 .agent-chat-md :deep(p) {
   margin: 0 0 0.5em;
+  line-height: 1.78;
 }
 
 .agent-chat-md :deep(p:last-child) {
   margin-bottom: 0;
+}
+
+.agent-chat-md :deep(h1),
+.agent-chat-md :deep(h2),
+.agent-chat-md :deep(h3),
+.agent-chat-md :deep(h4),
+.agent-chat-md :deep(h5),
+.agent-chat-md :deep(h6) {
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 0.85em 0 0.45em;
+  color: inherit;
+}
+
+.agent-chat-md :deep(h1) {
+  font-size: 1.28em;
+}
+
+.agent-chat-md :deep(h2) {
+  font-size: 1.18em;
+}
+
+.agent-chat-md :deep(h3) {
+  font-size: 1.1em;
+}
+
+.agent-chat-md :deep(h4) {
+  font-size: 1.04em;
+}
+
+.agent-chat-md :deep(h5),
+.agent-chat-md :deep(h6) {
+  font-size: 1em;
+}
+
+.agent-chat-md :deep(h1:first-child),
+.agent-chat-md :deep(h2:first-child),
+.agent-chat-md :deep(h3:first-child) {
+  margin-top: 0;
+}
+
+.agent-chat-md :deep(img) {
+  max-width: min(100%, 640px);
+  max-height: min(360px, 45vh);
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  display: block;
+  margin: 0.5em 0;
+  border-radius: 6px;
 }
 
 .agent-chat-md :deep(a) {
@@ -2301,6 +2403,10 @@ html.dark .agent-chat-md :deep(pre) {
 .agent-chat-md :deep(ol) {
   margin: 0.35em 0;
   padding-left: 1.5em;
+}
+
+.agent-chat-md :deep(li) {
+  line-height: 1.78;
 }
 
 /* 覆盖全局 reset 的 list-style: none，恢复列表圆点/序号 */
