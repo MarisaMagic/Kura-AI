@@ -132,7 +132,7 @@ class Settings(BaseSettings):
     MILVUS_COLLECTION_CHAT_MEMORY: str = "kura_ai_chat_memory"
     # Milvus VARCHAR(text) 的 max_length；修改后需重建集合（见 CHAT_MEMORY_MILVUS_RECREATE_ON_INIT）
     CHAT_MEMORY_MILVUS_TEXT_MAX_LENGTH: int = 8192
-    # 为 True 时启动 init 会先 drop 再建会话记忆 collection（会清空该集合内向量；改 schema 时设一次后改回 False）
+    # 为 True 时启动 init 会先 drop 再建会话记忆 collection。另：init 时若现有集合的 dense 维与 EMBEDDING_DIM 不一致会自动 drop 重建（无需手开此项）
     CHAT_MEMORY_MILVUS_RECREATE_ON_INIT: bool = False
     # 启用：最近 N 轮进上下文 + 远期归档检索工具
     CHAT_USE_SESSION_MEMORY: bool = True
@@ -176,6 +176,16 @@ class Settings(BaseSettings):
     KB_RELATED_IMAGE_MAX_TOTAL: int = 24
     # 最终 top_k 中尽量保留至少 N 个图片块（有可用图片时；与纯文本按 score 争位）
     KB_MIN_IMAGE_SLOTS: int = 2
+    # 为 True 时：在智能体每轮回复前，自动调用一次模型从知识库文档列表中圈选 file_key，再在该子集上检索
+    KB_DOCUMENT_PRESELECT_ENABLED: bool = True
+    # 前置选档提示中最多列出多少份文档名（多文档时截断）
+    KB_PRESELECT_MAX_DOC_LINES: int = 100
+    # 前置选档时附带最近 N 轮对话作为上下文；为 0 则仅传当前用户问题
+    KB_PRESELECT_CONTEXT_TURNS: int = 3
+    KB_PRESELECT_CONTEXT_MAX_MSG_CHARS: int = 1200
+    KB_PRESELECT_CONTEXT_MAX_TOTAL_CHARS: int = 5000
+    # 「当前用户问题」段最大字符数（与「前序对话」分开截断）
+    KB_PRESELECT_MAX_CURRENT_QUESTION_CHARS: int = 8000
 
     @property
     def chat_database_url(self) -> str:
