@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Literal, Tuple
 
 import requests
 from langchain.chat_models import init_chat_model
@@ -14,6 +14,7 @@ from app.kb.multimodal_embedding import get_multimodal_embedding_service
 from app.kb.milvus_client import (
     MilvusManager,
     _normalize_content_type,
+    filename_in_filter_expr,
     kb_filter_expr,
     milvus_escape,
 )
@@ -23,6 +24,46 @@ from app.settings import settings
 _multimodal_embedding_service = get_multimodal_embedding_service()
 _milvus_manager = MilvusManager()
 _parent_chunk_store = ParentChunkStore()
+
+# 以文检索时 document_filenames 白名单条数上限（与智能体选档方案一致）
+KB_MAX_DOCUMENT_FILTER = 10
+
+
+def apply_document_name_filter(
+    kb_scope: str,
+    document_filenames: list[str] | None,
+    *,
+    max_docs: int = KB_MAX_DOCUMENT_FILTER,
+) -> tuple[str | None, list[str] | None, list[str]]:
+    """
+    将调用方提供的 filename 与向量库中存在的 filename 做交集校验，供 Milvus 子句使用。
+    返回: (错误信息或 None, 用于 filter 的 filename 或 None=全库不限制文档, 被剔除的不存在项)。
+    约定：document_filenames 为 None 表示不限制；非 None 的列表必须至少能解析出 1 个合法 file_key，否则返回错误信息。
+    """
+    if document_filenames is None:
+        return (None, None, [])
+    if not document_filenames:
+        return (
+            "错误：若需全库检索请传入 None；若需限定文档则须至少 1 个与知识库一致的 file_key。",
+            None,
+            [],
+        )
+    allow = set(_milvus_manager.list_distinct_filenames(kb_scope))
+    valid: list[str] = []
+    invalid: list[str] = []
+    for r in (x.strip() for x in document_filenames if (x or "").strip()):
+        if r in allow:
+            if r not in valid:
+                valid.append(r)
+        else:
+            if r not in invalid:
+                invalid.append(r)
+    if not valid:
+        tail = f" 无效项示例：{invalid[:15]}" if invalid else ""
+        return (f"错误：提供的 file_key 均不在本知识库中。{tail}", None, invalid)
+    if len(valid) > max_docs:
+        valid = valid[:max_docs]
+    return (None, valid, invalid)
 
 AUTO_MERGE_ENABLED = bool(settings.AUTO_MERGE_ENABLED)
 AUTO_MERGE_THRESHOLD = int(settings.AUTO_MERGE_THRESHOLD or 2)
@@ -275,12 +316,15 @@ def _rerank_documents(
     docs: List[dict],
     return_cap: int,
     include_images: bool = True,
+    *,
+    skip_rerank: bool = False,
 ) -> Tuple[List[dict], Dict[str, Any]]:
     """
     重新排序文档, 使用 Rerank 模型对文档进行重新排序。
     注意：图片块的 text 字段为空，需要特殊处理。
     :param return_cap: 本阶段返回条数上限（可大于最终 top_k，便于后续 merge 与图片槽位截断）
     :param include_images: 无图片语义时可 False（当前仅写入 meta）
+    :param skip_rerank: 以图检索等场景无自然语言 query 时跳过 rerank，仅按向量分排序
     :return: 重新排序后的文档列表和重新排序的元数据
     """
     for d in docs:
@@ -311,6 +355,12 @@ def _rerank_documents(
         "return_cap": return_cap,
     }
     
+    if skip_rerank:
+        final_docs = docs_with_rank + image_docs
+        final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+        meta["rerank_skipped"] = "image_query"
+        return final_docs[:return_cap], meta
+
     # 如果没有文本块或有文本块但 rerank 未配置，直接返回
     if not docs_with_rank or not meta["rerank_enabled"]:
         # 合并回图片块（保持原始顺序）
@@ -457,9 +507,12 @@ def _finalize_retrieved_docs(
     include_images: bool,
     image_store: Any,
     retrieval_mode: str,
+    skip_rerank: bool = False,
+    expand_related: bool = True,
 ) -> tuple[List[dict], Dict[str, Any]]:
     """
     为 Milvus 命中的图片补全 image_metadata、按文本块展开关联图、重排、父级 merge、再按图片槽位截断为最终 top_k。
+    :param expand_related: 为 False 时不做「文本块→关联图」扩展
     """
     for d in retrieved:
         d["content_type"] = _normalize_content_type(d.get("content_type"), d.get("chunk_level", 0))
@@ -490,7 +543,8 @@ def _finalize_retrieved_docs(
                 "related_text_ids": img.related_text_ids,
             }
 
-    retrieved, rel_added = _expand_related_image_docs(retrieved, kb_scope, image_store, include_images)
+    do_expand = include_images and expand_related
+    retrieved, rel_added = _expand_related_image_docs(retrieved, kb_scope, image_store, do_expand)
     min_slots = int(getattr(settings, "KB_MIN_IMAGE_SLOTS", 0) or 0) if include_images else 0
     work_cap = min(
         len(retrieved),
@@ -505,6 +559,7 @@ def _finalize_retrieved_docs(
         docs=retrieved,
         return_cap=work_cap,
         include_images=include_images,
+        skip_rerank=skip_rerank,
     )
     rerank_meta["related_image_expansion_count"] = rel_added
     rerank_meta["retrieval_mode"] = retrieval_mode
@@ -545,7 +600,14 @@ def step_back_expand(query: str, llm_config: dict | None) -> dict:
     }
 
 
-def retrieve_documents(query: str, kb_scope: str, top_k: int = 5, include_images: bool = True) -> Dict[str, Any]:
+def retrieve_documents(
+    query: str,
+    kb_scope: str,
+    top_k: int = 5,
+    include_images: bool = True,
+    *,
+    document_filenames: list[str] | None = None,
+) -> Dict[str, Any]:
     """
     检索文档（使用多模态嵌入服务）
     根据查询同时检索文本块和图片块，然后根据文本块和图片块的相似度进行排序，最后返回排序后的文档列表。
@@ -553,6 +615,7 @@ def retrieve_documents(query: str, kb_scope: str, top_k: int = 5, include_images
     :param kb_scope: 知识库范围
     :param top_k: 返回的文档数量
     :param include_images: 是否包含图片块
+    :param document_filenames: 若为非空，仅在这些 filename 对应的块上检索（须已由上层校验）
     :return: 检索后的文档列表和检索的元数据
     """
     from app.kb.image_store import get_image_store
@@ -564,10 +627,14 @@ def retrieve_documents(query: str, kb_scope: str, top_k: int = 5, include_images
     # 支持检索文本块（L3）和图片块（L4）
     if include_images:
         # 检索所有叶子块：L3文本 + L4图片
-        filter_expr = f'kb_scope == "{esc}" && (chunk_level == {LEAF_RETRIEVE_LEVEL} || chunk_level == 4)'
+        base_filter = f'kb_scope == "{esc}" && (chunk_level == {LEAF_RETRIEVE_LEVEL} || chunk_level == 4)'
     else:
         # 只检索文本块
-        filter_expr = f'kb_scope == "{esc}" && chunk_level == {LEAF_RETRIEVE_LEVEL}'
+        base_filter = f'kb_scope == "{esc}" && chunk_level == {LEAF_RETRIEVE_LEVEL}'
+    if document_filenames:
+        filter_expr = f"({base_filter}) && ({filename_in_filter_expr(document_filenames)})"
+    else:
+        filter_expr = base_filter
     
     try:
         # 使用多模态嵌入服务生成向量
@@ -596,7 +663,9 @@ def retrieve_documents(query: str, kb_scope: str, top_k: int = 5, include_images
             include_images=include_images,
             image_store=image_store,
             retrieval_mode="hybrid",
+            skip_rerank=False,
         )
+        rerank_meta["document_filenames_filter"] = document_filenames
         return {"docs": merged_docs, "meta": rerank_meta}
     except Exception:
         try:
@@ -618,7 +687,9 @@ def retrieve_documents(query: str, kb_scope: str, top_k: int = 5, include_images
                 include_images=include_images,
                 image_store=image_store,
                 retrieval_mode="dense_fallback",
+                skip_rerank=False,
             )
+            rerank_meta["document_filenames_filter"] = document_filenames
             return {"docs": merged_docs, "meta": rerank_meta}
         except Exception:
             return {
@@ -639,3 +710,81 @@ def retrieve_documents(query: str, kb_scope: str, top_k: int = 5, include_images
                     "candidate_count": 0,
                 },
             }
+
+
+def retrieve_documents_by_image(
+    image_abs_path: str,
+    kb_scope: str,
+    top_k: int = 5,
+    *,
+    focus: Literal["text", "image", "mixed"] = "mixed",
+    include_related_image_expansion: bool | None = None,
+) -> Dict[str, Any]:
+    """
+    以图片为查询的密集检索（无 BM25）；适用于以图搜文 / 以图搜图。
+    """
+    from app.kb.image_store import get_image_store
+
+    image_store = get_image_store()
+    candidate_k = max(top_k * 3, top_k)
+    esc = milvus_escape(kb_scope)
+
+    if focus == "text":
+        filter_expr = f'kb_scope == "{esc}" && chunk_level == {LEAF_RETRIEVE_LEVEL}'
+    elif focus == "image":
+        filter_expr = f'kb_scope == "{esc}" && chunk_level == 4'
+    else:
+        filter_expr = f'kb_scope == "{esc}" && (chunk_level == {LEAF_RETRIEVE_LEVEL} || chunk_level == 4)'
+
+    if include_related_image_expansion is None:
+        include_related_image_expansion = focus != "text"
+    include_img_finalize = focus in ("image", "mixed")
+    expand_rel = bool(include_related_image_expansion) if include_img_finalize else False
+
+    try:
+        dense_embeddings = _multimodal_embedding_service.get_image_embeddings([image_abs_path])
+        if not dense_embeddings or not dense_embeddings[0]:
+            raise ValueError("empty_image_embedding")
+        dense_embedding = dense_embeddings[0]
+        retrieved = _milvus_manager.dense_retrieve(
+            dense_embedding=dense_embedding,
+            top_k=candidate_k,
+            filter_expr=filter_expr,
+        )
+        query_placeholder = ""  # 以图检索不传入 rerank 文本
+        merged_docs, rerank_meta = _finalize_retrieved_docs(
+            retrieved,
+            query=query_placeholder,
+            kb_scope=kb_scope,
+            top_k=top_k,
+            candidate_k=candidate_k,
+            include_images=include_img_finalize,
+            image_store=image_store,
+            retrieval_mode="dense_image_query",
+            skip_rerank=True,
+            expand_related=expand_rel,
+        )
+        rerank_meta["focus"] = focus
+        rerank_meta["include_related_image_expansion"] = expand_rel
+        return {"docs": merged_docs, "meta": rerank_meta}
+    except Exception as e:
+        logger.warning("retrieve_documents_by_image 失败: {}", e)
+        return {
+            "docs": [],
+            "meta": {
+                "rerank_enabled": False,
+                "rerank_applied": False,
+                "rerank_error": str(e)[:200],
+                "retrieval_mode": "dense_image_query_failed",
+                "candidate_k": candidate_k,
+                "leaf_retrieve_level": LEAF_RETRIEVE_LEVEL,
+                "include_images": include_img_finalize,
+                "auto_merge_enabled": AUTO_MERGE_ENABLED,
+                "auto_merge_applied": False,
+                "auto_merge_threshold": AUTO_MERGE_THRESHOLD,
+                "auto_merge_replaced_chunks": 0,
+                "auto_merge_steps": 0,
+                "candidate_count": 0,
+                "focus": focus,
+            },
+        }
