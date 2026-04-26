@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
 from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, UnstructuredExcelLoader
@@ -211,12 +211,12 @@ class MultimodalDocumentLoader:
                         with open(image_path, "wb") as f:
                             f.write(image_bytes)
                         
-                        # 构建图片信息
+                        # 构建图片信息（page_number 与 PyPDFLoader 的 metadata["page"] 一致：0 起算）
                         image_info = {
                             "kb_scope": kb_scope,
                             "filename": filename,
                             "file_type": "PDF",
-                            "page_number": page_num + 1,
+                            "page_number": page_num,
                             "stored_path": str(image_path),
                             "width": image_width,
                             "height": image_height,
@@ -334,78 +334,178 @@ class MultimodalDocumentLoader:
         
         return images
 
+    @staticmethod
+    def _pdf_text_rect_for_l3(page: fitz.Page, text_chunk: dict) -> Optional[fitz.Rect]:
+        """在单页上定位 L3 文块的包围盒（与图片 rect 同处 PDF 页面坐标系，y 轴向下）。"""
+        raw = (text_chunk.get("text") or "").strip()
+        if len(raw) < 2:
+            return None
+        first_line = raw.splitlines()[0].strip() if raw else ""
+        needles: List[str] = []
+        if len(first_line) >= 4:
+            needles.append(first_line[:240])
+        for max_len in (200, 150, 100, 60, 40):
+            frag = " ".join(raw[:max_len].split())
+            if len(frag) >= 3:
+                needles.append(frag)
+        seen: set[str] = set()
+        for n in needles:
+            if n in seen or not n:
+                continue
+            seen.add(n)
+            try:
+                hits = page.search_for(n)
+            except Exception:
+                continue
+            if not hits and len(n) > 32:
+                try:
+                    hits = page.search_for(n[:32])
+                except Exception:
+                    hits = []
+            if hits:
+                u = hits[0]
+                for h in hits[1:10]:
+                    u |= h
+                return u
+        return None
+
+    @staticmethod
+    def _link_image_to_l3_text(img: dict, text_chunk: dict) -> None:
+        if "related_text_ids" not in img:
+            img["related_text_ids"] = []
+        img["related_text_ids"].append(text_chunk["chunk_id"])
+        img["parent_chunk_id"] = text_chunk["chunk_id"]
+        if "related_image_ids" not in text_chunk:
+            text_chunk["related_image_ids"] = []
+        text_chunk["related_image_ids"].append(img.get("chunk_id", ""))
+
+    def _associate_page_by_order(
+        self,
+        page_l3: List[Dict[str, Any]],
+        page_images: List[Dict[str, Any]],
+    ) -> None:
+        """按 L3 阅读顺序与图片纵向顺序配对，不混用字符下标与页面纵坐标量纲。"""
+        if not page_l3 or not page_images:
+            return
+        texts_sorted = sorted(
+            page_l3,
+            key=lambda c: (int(c.get("position_start", 0) or 0), int(c.get("position_end", 0) or 0)),
+        )
+        imgs_sorted = sorted(
+            page_images,
+            key=lambda m: (float(m.get("position_y", 0) or 0.0),),
+        )
+        for img, ch in zip(imgs_sorted, texts_sorted):
+            self._link_image_to_l3_text(img, ch)
+
+    def _associate_page_pdf_geometry(
+        self,
+        page: fitz.Page,
+        page_l3: List[Dict[str, Any]],
+        page_images: List[Dict[str, Any]],
+    ) -> None:
+        """同一 PDF 页：用 L3 与图片的 PDF 页面坐标，优先将「在图片上方」的最近 L3 关联到该图。"""
+        l3_with_rect: List[Tuple[dict, fitz.Rect]] = []
+        for tc in page_l3:
+            r = self._pdf_text_rect_for_l3(page, tc)
+            if r is not None:
+                l3_with_rect.append((tc, r))
+
+        if not l3_with_rect:
+            self._associate_page_by_order(page_l3, page_images)
+            return
+
+        for img in page_images:
+            img_top = float(img.get("position_y", 0) or 0)
+            img_h = float(img.get("position_height", 0) or 0)
+            img_cy = img_top + 0.5 * img_h
+
+            above: List[Tuple[dict, fitz.Rect]] = [
+                (tc, r) for tc, r in l3_with_rect if r.y1 <= img_top + 0.5
+            ]
+            if above:
+                best_tc = max(above, key=lambda x: x[1].y1)[0]
+                self._link_image_to_l3_text(img, best_tc)
+            else:
+                def _d(item: Tuple[dict, fitz.Rect]) -> float:
+                    _tr, r = item
+                    tcy = 0.5 * (r.y0 + r.y1)
+                    return (tcy - img_cy) ** 2
+
+                best_tc = min(l3_with_rect, key=_d)[0]
+                self._link_image_to_l3_text(img, best_tc)
+
     def _associate_text_with_images(
         self,
         text_chunks: List[Dict[str, Any]],
         images: List[Dict[str, Any]],
+        *,
+        file_path: Optional[str] = None,
+        doc_type: str = "",
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
-        建立文本块和图片的关联关系
-        :param text_chunks: 文本块列表
-        :param images: 图片列表
-        :return: 更新后的文本块列表和图片列表
+        建立 L3 文本块与图片的关联关系（检索侧 related_text_ids 以 L3 为主）。
+        PDF 使用 page.search_for 得到的 bbox 与图片位置同一坐标系；无 bbox 时按阅读/纵向序配对。
+        非 PDF 同页用顺序配对，避免将字符下标与纵坐标比较。
         """
         if not text_chunks or not images:
             return text_chunks, images
-        
-        # 按页码分组
-        text_by_page = {}
+
+        def _l3_only(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            return [c for c in chunks if int(c.get("chunk_level", 0) or 0) == 3]
+
+        text_by_page: Dict[int, List[dict]] = {}
         for chunk in text_chunks:
-            page = chunk.get("page_number", 0)
-            if page not in text_by_page:
-                text_by_page[page] = []
-            text_by_page[page].append(chunk)
-        
-        images_by_page = {}
-        for img in images:
-            page = img.get("page_number", 0)
-            if page not in images_by_page:
-                images_by_page[page] = []
-            images_by_page[page].append(img)
-        
-        # 对每一页建立关联
-        for page_num in text_by_page:
-            if page_num not in images_by_page:
-                continue
-            
-            page_texts = text_by_page[page_num]
-            page_images = images_by_page[page_num]
-            
-            # 对每个图片找到最近的文本块
-            for img in page_images:
-                img_y = img.get("position_y", 0)
-                
-                # 找到图片上方的文本块
-                closest_text = None
-                min_distance = float('inf')
-                
-                for text_chunk in page_texts:
-                    # 文本块的垂直位置（估算）
-                    text_start = text_chunk.get("position_start", 0)
-                    text_end = text_chunk.get("position_end", 0)
-                    text_y = text_end  # 使用文本块的结束位置
-                    
-                    # 计算距离
-                    distance = abs(img_y - text_y)
-                    
-                    # 只考虑图片上方的文本块
-                    if text_y <= img_y and distance < min_distance:
-                        min_distance = distance
-                        closest_text = text_chunk
-                
-                # 建立双向关联
-                if closest_text:
-                    # 图片关联文本，添加 related_text_ids 字段
-                    if "related_text_ids" not in img:
-                        img["related_text_ids"] = []
-                    img["related_text_ids"].append(closest_text["chunk_id"])
-                    img["parent_chunk_id"] = closest_text["chunk_id"]
-                    
-                    # 文本关联图片，添加 related_image_ids 字段
-                    if "related_image_ids" not in closest_text:
-                        closest_text["related_image_ids"] = []
-                    closest_text["related_image_ids"].append(img.get("chunk_id", ""))
-        
+            p = int(chunk.get("page_number", 0) or 0)
+            if p not in text_by_page:
+                text_by_page[p] = []
+            text_by_page[p].append(chunk)
+
+        images_by_page: Dict[int, List[dict]] = {}
+        for im in images:
+            p = int(im.get("page_number", 0) or 0)
+            if p not in images_by_page:
+                images_by_page[p] = []
+            images_by_page[p].append(im)
+
+        use_pdf = (
+            (doc_type or "").upper() == "PDF"
+            and file_path
+            and str(file_path).lower().endswith(".pdf")
+            and Path(file_path).is_file()
+        )
+
+        if use_pdf:
+            try:
+                doc = fitz.open(file_path)
+            except Exception as e:
+                logger.warning("无法打开 PDF 作图文关联，同页将按顺序配对: {}", e)
+                doc = None
+            if doc is not None:
+                try:
+                    for pno in sorted(set(text_by_page) & set(images_by_page)):
+                        if pno < 0 or pno >= doc.page_count:
+                            continue
+                        pl3 = _l3_only(text_by_page[pno])
+                        pimgs = images_by_page[pno]
+                        if not pl3 or not pimgs:
+                            continue
+                        self._associate_page_pdf_geometry(doc[pno], pl3, pimgs)
+                finally:
+                    doc.close()
+            if doc is None:
+                for pno in sorted(set(text_by_page) & set(images_by_page)):
+                    pl3 = _l3_only(text_by_page[pno])
+                    pimgs = images_by_page[pno]
+                    if pl3 and pimgs:
+                        self._associate_page_by_order(pl3, pimgs)
+            return text_chunks, images
+
+        for pno in sorted(set(text_by_page) & set(images_by_page)):
+            pl3 = _l3_only(text_by_page[pno])
+            pimgs = images_by_page[pno]
+            if pl3 and pimgs:
+                self._associate_page_by_order(pl3, pimgs)
         return text_chunks, images
 
     def _create_image_chunks(
@@ -674,8 +774,10 @@ class MultimodalDocumentLoader:
             # 将分块后的文档添加到结果列表
             documents.extend(page_chunks)
         
-        # 建立文本块和图片的关联
-        documents, images = self._associate_text_with_images(documents, images)
+        # 建立文本块和图片的关联（PDF 使用与分块相同的 0 起算页码 + 页面坐标系）
+        documents, images = self._associate_text_with_images(
+            documents, images, file_path=file_path, doc_type=doc_type
+        )
         
         # 创建图片块
         if images:
