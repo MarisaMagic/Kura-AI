@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.chat.database import Base
@@ -136,7 +137,7 @@ class KbImage(Base):
     root_chunk_id: Mapped[str] = mapped_column(String(512), nullable=True, index=True)
     
     # 图文关联
-    related_text_ids: Mapped[list] = mapped_column(JSON, nullable=True, default=list)  # 关联的文本块ID列表
+    related_text_ids: Mapped[list] = mapped_column(JSONB, nullable=True, default=list)  # 关联的文本块ID列表
     
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
