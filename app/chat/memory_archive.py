@@ -17,7 +17,7 @@ from app.chat.memory_turns import group_turns, split_system_prefix
 from app.chat.milvus_memory import get_chat_memory_milvus
 from app.chat.message_codec import msg_content_to_str
 from app.chat.storage import storage
-from app.kb.embedding import EmbeddingService
+from app.kb.multimodal_embedding import get_multimodal_embedding_service
 from app.settings import settings
 
 
@@ -167,7 +167,7 @@ def archive_session_memory(user_id: int, agent_id: int, session_id: str) -> None
 
     milvus = get_chat_memory_milvus()  # 获取会话记忆集合
     milvus.init_collection()
-    embedder = EmbeddingService()  # 获取嵌入服务
+    embedder = get_multimodal_embedding_service()  # 与知识库一致：DashScope MultiModalEmbedding
 
     db = SessionLocal()
     try:

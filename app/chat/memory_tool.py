@@ -40,7 +40,7 @@ def make_search_session_memory_tool(
                 "TOOL_CALL_LIMIT_REACHED: search_session_memory has already been called once in this turn. "
                 "Use the existing retrieval result and answer directly."
             )
-            log_kb_tool_return_to_terminal(limit_msg)
+            log_kb_tool_return_to_terminal(limit_msg, tool_label="search_session_memory")
             return limit_msg
 
         emit_rag_step("🔎", "会话记忆检索", (query or "")[:120])
@@ -66,10 +66,10 @@ def make_search_session_memory_tool(
                     }
                 }
             )
-            log_kb_tool_return_to_terminal(err)
+            log_kb_tool_return_to_terminal(err, tool_label="search_session_memory")
             return err
 
-        log_kb_tool_return_to_terminal(text)
+        log_kb_tool_return_to_terminal(text, tool_label="search_session_memory")
         return text
 
     # 返回会话记忆检索工具, 用于检索本会话的记忆

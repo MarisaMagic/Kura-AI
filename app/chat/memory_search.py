@@ -13,7 +13,7 @@ from langchain_core.messages import HumanMessage
 
 from app.chat.milvus_memory import get_chat_memory_milvus, memory_filter_expr
 from app.chat.memory_scope import memory_scope_for
-from app.kb.embedding import EmbeddingService
+from app.kb.multimodal_embedding import get_multimodal_embedding_service
 from app.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ def retrieve_session_memory_hits(
         return empty, rewritten
 
     try:
-        embedder = EmbeddingService()
+        embedder = get_multimodal_embedding_service()
         dense, sparse = embedder.get_all_embeddings([search_q[:8000]])  # 将当前查询转换为密集向量和稀疏向量
         milvus = get_chat_memory_milvus()
         milvus.init_collection()
