@@ -36,7 +36,7 @@ def apply_document_name_filter(
     max_docs: int = KB_MAX_DOCUMENT_FILTER,
 ) -> tuple[str | None, list[str] | None, list[str]]:
     """
-    将调用方提供的 filename 与向量库中存在的 filename 做交集校验，供 Milvus 子句使用。
+    将调用方（智能体）提供的 filename 与向量库中存在的 filename 做交集校验，供 Milvus 子句使用。
     返回: (错误信息或 None, 用于 filter 的 filename 或 None=全库不限制文档, 被剔除的不存在项)。
     约定：document_filenames 为 None 表示不限制；非 None 的列表必须至少能解析出 1 个合法 file_key，否则返回错误信息。
     """
