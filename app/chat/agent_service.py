@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable
+from functools import partial
 from typing import Any, AsyncIterator
 
 from langchain.agents import create_agent
@@ -34,6 +35,7 @@ from app.chat.tools import (
     reset_tool_call_guards,
     set_rag_step_queue,
 )
+from app.kb.image_search_tool import make_search_knowledge_by_image_tool
 from app.kb.kb_scope import kb_scope_for
 from app.kb.search_tool import make_search_knowledge_tool
 from app.models.user_agent import UserAgent
@@ -113,6 +115,34 @@ def _llm_config_from_ua(ua: UserAgent) -> dict[str, Any]:
     }
 
 
+def _run_kb_document_preselect_with_context(
+    messages: list[BaseMessage],
+    current_question: str,
+    *,
+    regenerate: bool,
+    ua: UserAgent,
+    user_id: int,
+    agent_id: int,
+) -> tuple[list[str] | None, dict[str, Any]]:
+    """知识库前置选档：可附带最近多轮对话，meta 含 context_* 与选档结果。"""
+    from app.kb.kb_document_preselect import run_kb_document_preselect
+    from app.kb.kb_preselect_context import build_kb_preselect_conversation_context
+    from app.kb.kb_scope import kb_scope_for
+
+    ctx, ctx_meta = build_kb_preselect_conversation_context(
+        messages,
+        user_text=(current_question or "").strip(),
+        regenerate=regenerate,
+    )
+    filt, pre_meta = run_kb_document_preselect(
+        (current_question or "").strip(),
+        kb_scope_for(user_id, agent_id),
+        _llm_config_from_ua(ua),
+        conversation_context=ctx or None,
+    )
+    return filt, {**ctx_meta, **pre_meta}
+
+
 def _merge_proactive_memory_system(windowed: list[BaseMessage], inject_body: str) -> list[BaseMessage]:
     """
     合并预检索的会话记忆到系统提示词
@@ -174,11 +204,30 @@ def _prepare_to_invoke_messages(
     )
 
 
+def _format_kb_system_extension(document_filter: list[str] | None) -> str:
+    """
+    将前置选档结果写入系统提示，使智能体知悉本回合 search_knowledge_base 的文档范围由系统固定。
+    document_filter 为 None 表示全知识库（或未加 filename 子句）；非空为限定 file_key 列表。
+    """
+    if document_filter is None:
+        return (
+            "【本回合知识库检索范围】未限定在单批 file_key（将按当前智能体整库检索；无文档时无结果）。"
+            "调用 search_knowledge_base 时只需传入 query。"
+        )
+    lines = "\n".join(f"- `{x}`" for x in document_filter)
+    return (
+        "【本回合知识库检索范围】已在回复前由系统根据用户问题将检索**限定在以下文档**（file_key）。\n"
+        f"{lines}\n"
+        "调用 search_knowledge_base 时只传 query，不要尝试指定或更换 file_key / 范围。"
+    )
+
+
 def _compose_system_prompt(
     ua: UserAgent,
     use_knowledge_retrieval: bool = True,
     *,
     session_attachment_hint: str = "",
+    kb_retrieval_system_extension: str | None = None,
 ) -> str:
     """
     组合智能体的系统提示词（工具如何调用由各工具的 description 说明，此处不重复指令）。
@@ -202,6 +251,8 @@ def _compose_system_prompt(
         parts.append("用户希望你在适当时给出可运行的代码示例；注意标注语言与前提假设。")
     if (session_attachment_hint or "").strip():
         parts.append(session_attachment_hint.strip())
+    if use_knowledge_retrieval and (kb_retrieval_system_extension or "").strip():
+        parts.append(kb_retrieval_system_extension.strip())
     if use_knowledge_retrieval:
         parts.append(
             "知识库检索结果中若出现「图片公网访问 URL」或「PostgreSQL 存储相对路径 stored_relpath」，"
@@ -220,6 +271,8 @@ def build_model_and_agent(
     *,
     use_knowledge_retrieval: bool = True,
     session_attachment_hint: str = "",
+    knowledge_base_document_filter: list[str] | None = None,
+    kb_retrieval_system_extension: str | None = None,
 ) -> tuple[Any, Any]:
     """
     构建模型和智能体（知识库检索按 user_id + agent_id 隔离）。
@@ -229,6 +282,8 @@ def build_model_and_agent(
     :param session_id: 会话 ID（会话附件工具作用域）
     :param use_knowledge_retrieval: 是否注册知识库检索工具
     :param session_attachment_hint: 本会话附件列表说明
+    :param knowledge_base_document_filter: 由入口前置选档得到；None=全库，非空=仅这些 filename
+    :param kb_retrieval_system_extension: 与选档结果对应的系统补充说明（file_key 列表等）
     :return: 模型和智能体
     """
     # 解密 API Key
@@ -256,7 +311,16 @@ def build_model_and_agent(
     tools: list[Any] = [get_current_weather]
     tools.extend(make_session_attachment_tools(user_id, agent_id, session_id))
     if use_knowledge_retrieval:
-        tools.append(make_search_knowledge_tool(kb_scope, llm_config)) # 添加知识库检索工具
+        tools.append(
+            make_search_knowledge_tool(
+                kb_scope,
+                llm_config,
+                knowledge_base_document_filter=knowledge_base_document_filter,
+            )
+        )  # 以文检索（范围由闭包固定）
+        tools.append(
+            make_search_knowledge_by_image_tool(kb_scope, user_id, agent_id, session_id)
+        )  # 以图检索
     if getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
         tools.append(make_search_session_memory_tool(user_id, agent_id, session_id, llm_config)) # 添加会话记忆检索工具
     # create_agent 创建智能体, 使用模型和系统提示词
@@ -267,6 +331,7 @@ def build_model_and_agent(
             ua,
             use_knowledge_retrieval=use_knowledge_retrieval,
             session_attachment_hint=session_attachment_hint,
+            kb_retrieval_system_extension=kb_retrieval_system_extension,
         ),
     )
     # 返回智能体和大模型
@@ -323,6 +388,20 @@ def chat_with_agent_sync(
     reset_tool_call_guards()
 
     session_attachment_hint = format_attachment_hint(user_id, agent_id, session_id)
+
+    kb_preselect_meta: dict[str, Any] = {}
+    retrieval_filter: list[str] | None = None
+    if use_knowledge_retrieval:
+        retrieval_filter, kb_preselect_meta = _run_kb_document_preselect_with_context(
+            messages,
+            (user_text or "").strip(),
+            regenerate=False,
+            ua=ua,
+            user_id=user_id,
+            agent_id=agent_id,
+        )
+    kb_ext = _format_kb_system_extension(retrieval_filter) if use_knowledge_retrieval else None
+
     # 构建智能体和大模型（含会话附件工具）
     agent, model = build_model_and_agent(
         ua,
@@ -331,6 +410,8 @@ def chat_with_agent_sync(
         session_id,
         use_knowledge_retrieval=use_knowledge_retrieval,
         session_attachment_hint=session_attachment_hint,
+        knowledge_base_document_filter=retrieval_filter if use_knowledge_retrieval else None,
+        kb_retrieval_system_extension=kb_ext if use_knowledge_retrieval else None,
     )
 
     human_content = build_storable_human_content(
@@ -382,18 +463,9 @@ def chat_with_agent_sync(
     image_references = rag_context.get("image_references") if rag_context else None
 
     error_text = str(caught_exc) if caught_exc else None
-    
-    # 构建AI消息内容
-    ai_message_content = response_content
-    if image_references:
-        # 如果有图片引用，将内容构建为多部分内容
-        content_parts = [{"type": "text", "text": response_content}]
-        # 添加图片引用
-        for img_ref in image_references:
-            content_parts.append(img_ref)
-        ai_message_content = content_parts
-    
-    messages.append(AIMessage(content=ai_message_content))
+
+    # 助手落库仅用纯文本；image_references 放 extra，避免多模态块写入历史导致下游 API（如智谱 1210）再次请求失败
+    messages.append(AIMessage(content=response_content))
     # 构建额外消息数据（含失败时的 error_text 供历史展示）
     extra_message_data = [None] * (len(messages) - 1) + [
         {
@@ -401,6 +473,7 @@ def chat_with_agent_sync(
             "rag_steps": rag_collector.steps or None,
             "error_text": error_text,
             "image_references": image_references,  # 添加图片引用
+            "kb_preselect": kb_preselect_meta or None,
         }
     ]
     # 保存会话消息，保存最新一轮对话消息到数据库对应会话并更新 Redis 缓存
@@ -412,7 +485,11 @@ def chat_with_agent_sync(
     if caught_exc:
         raise caught_exc
 
-    return {"response": response_content, "rag_trace": rag_trace}
+    return {
+        "response": response_content,
+        "rag_trace": rag_trace,
+        "kb_preselect": kb_preselect_meta or None,
+    }
 
 
 async def iter_chat_stream_events(
@@ -468,7 +545,29 @@ async def iter_chat_stream_events(
             yield {"type": "done", "cancelled": False}
             return
 
+    if regenerate:
+        preselect_query = msg_content_to_str(messages[-1].content).strip()
+    else:
+        preselect_query = (user_text or "").strip()
+
     session_attachment_hint = format_attachment_hint(user_id, agent_id, session_id)
+
+    kb_preselect_meta: dict[str, Any] = {}
+    retrieval_filter: list[str] | None = None
+    if use_knowledge_retrieval:
+        retrieval_filter, kb_preselect_meta = await asyncio.to_thread(
+            partial(
+                _run_kb_document_preselect_with_context,
+                messages,
+                preselect_query,
+                regenerate=regenerate,
+                ua=ua,
+                user_id=user_id,
+                agent_id=agent_id,
+            )
+        )
+    kb_ext = _format_kb_system_extension(retrieval_filter) if use_knowledge_retrieval else None
+
     agent, model = build_model_and_agent(
         ua,
         user_id,
@@ -476,6 +575,8 @@ async def iter_chat_stream_events(
         session_id,
         use_knowledge_retrieval=use_knowledge_retrieval,
         session_attachment_hint=session_attachment_hint,
+        knowledge_base_document_filter=retrieval_filter if use_knowledge_retrieval else None,
+        kb_retrieval_system_extension=kb_ext if use_knowledge_retrieval else None,
     )
 
     # 创建输出队列, 收集 RAG 步骤
@@ -602,18 +703,8 @@ async def iter_chat_stream_events(
     if rag_trace:
         yield {"type": "trace", "rag_trace": rag_trace}
 
-    # 构建AI消息内容
-    ai_message_content = full_response
-    if image_references:
-        # 如果有图片引用，将内容构建为多部分内容
-        content_parts = [{"type": "text", "text": full_response}]
-        # 添加图片引用
-        for img_ref in image_references:
-            content_parts.append(img_ref)
-        ai_message_content = content_parts
-    
-    # 将响应内容添加到会话消息中
-    messages.append(AIMessage(content=ai_message_content))
+    # 助手落库仅用纯文本；见 chat_with_agent_sync
+    messages.append(AIMessage(content=full_response))
     # 构建额外消息数据（含流式失败时的 error_text 供历史展示）
     extra_message_data = [None] * (len(messages) - 1) + [
         {
@@ -621,6 +712,7 @@ async def iter_chat_stream_events(
             "rag_steps": rag_steps_collected or None,
             "error_text": stream_error,
             "image_references": image_references,  # 添加图片引用
+            "kb_preselect": kb_preselect_meta or None,
         }
     ]
     # 保存会话消息，保存最新一轮对话消息到数据库对应会话并更新 Redis 缓存
