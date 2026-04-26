@@ -67,9 +67,11 @@ class ChatResponse(BaseModel):
     智能体对话响应
     :param response: 响应消息
     :param rag_trace: RAG 追踪信息
+    :param kb_preselect: 知识库前置选档元信息（本回合在智能体前自动圈定的 file_key 等）
     """
     response: str
     rag_trace: Optional[dict[str, Any]] = None
+    kb_preselect: Optional[dict[str, Any]] = None
 
 
 class MessageInfo(BaseModel):
