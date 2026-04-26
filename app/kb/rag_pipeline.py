@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Literal, Optional, TypedDict
+from typing import Any, List, Literal, NotRequired, Optional, TypedDict
 
 from langchain.chat_models import init_chat_model
 from langgraph.graph import END, StateGraph
@@ -38,6 +38,9 @@ class RAGState(TypedDict):
     step_back_answer: Optional[str]
     hypothetical_doc: Optional[str]
     rag_trace: Optional[dict]
+    # 由 search_knowledge_base 传入：仅在这些 filename 上检索；缺省/None=全知识库
+    document_filenames: NotRequired[Optional[List[str]]]
+    include_images: NotRequired[Optional[bool]]
 
 
 def _format_docs(docs: List[dict]) -> str:
@@ -121,9 +124,16 @@ def retrieve_initial(state: RAGState) -> RAGState:
     
     # 从状态中获取是否包含图片的配置，默认为 True
     include_images = state.get("include_images", True)
+    document_filenames = state.get("document_filenames")
     
     emit_rag_step("🔍", "正在检索知识库...", f"查询: {query[:50]}")
-    retrieved = retrieve_documents(query, kb_scope=kb_scope, top_k=5, include_images=include_images) # 检索与用户问题相关的文档
+    retrieved = retrieve_documents(
+        query,
+        kb_scope=kb_scope,
+        top_k=5,
+        include_images=include_images,
+        document_filenames=document_filenames,
+    )
     results = retrieved.get("docs", []) # 检索到的文档列表
     retrieve_meta = retrieved.get("meta", {}) # 检索的元数据
     context = _format_docs(results) # 格式化检索到的文档列表
@@ -168,6 +178,7 @@ def retrieve_initial(state: RAGState) -> RAGState:
         "auto_merge_threshold": retrieve_meta.get("auto_merge_threshold"),
         "auto_merge_replaced_chunks": retrieve_meta.get("auto_merge_replaced_chunks"),
         "auto_merge_steps": retrieve_meta.get("auto_merge_steps"),
+        "document_filenames_filter": retrieve_meta.get("document_filenames_filter"),
     }
     # 返回检索后的文档列表和检索的元数据
     return { 
@@ -314,13 +325,21 @@ def retrieve_expanded(state: RAGState) -> RAGState:
     auto_merge_replaced_chunks = 0
     auto_merge_steps = 0
 
+    doc_fn = state.get("document_filenames")
+    inc_img = state.get("include_images", True)
     hyde_chunk_count = 0
     # 如果查询扩展策略是 hyde 或 complex，则检索和假设性文档相关的文档
     if strategy in ("hyde", "complex"):
         hypothetical_doc = state.get("hypothetical_doc") or generate_hypothetical_document( # 生成假设性文档
             state["question"], state.get("llm_config")
         )
-        retrieved_hyde = retrieve_documents(hypothetical_doc, kb_scope=kb_scope, top_k=5) # 检索和假设性文档相关的文档
+        retrieved_hyde = retrieve_documents(
+            hypothetical_doc,
+            kb_scope=kb_scope,
+            top_k=5,
+            include_images=inc_img,
+            document_filenames=doc_fn,
+        )
         hyde_docs = retrieved_hyde.get("docs", [])
         hyde_chunk_count = len(hyde_docs)
         results.extend(hyde_docs)
@@ -361,7 +380,13 @@ def retrieve_expanded(state: RAGState) -> RAGState:
     # 如果查询扩展策略是 step_back 或 complex，并且不跳过退步检索，则检索和退步问题相关的文档
     if strategy in ("step_back", "complex") and not skip_step_back:
         expanded_query = state.get("expanded_query") or state["question"] # 扩展后的查询
-        retrieved_stepback = retrieve_documents(expanded_query, kb_scope=kb_scope, top_k=5) # 检索和退步问题相关的文档
+        retrieved_stepback = retrieve_documents(
+            expanded_query,
+            kb_scope=kb_scope,
+            top_k=5,
+            include_images=inc_img,
+            document_filenames=doc_fn,
+        )
         results.extend(retrieved_stepback.get("docs", []))
         step_meta = retrieved_stepback.get("meta", {})
         emit_rag_step(
@@ -480,12 +505,19 @@ def build_rag_graph():
 rag_graph = build_rag_graph()
 
 
-def run_rag_graph(question: str, kb_scope: str, llm_config: dict[str, Any]) -> dict:
+def run_rag_graph(
+    question: str,
+    kb_scope: str,
+    llm_config: dict[str, Any],
+    *,
+    document_filenames: list[str] | None = None,
+) -> dict:
     """
     运行 RAG 子图, 用于运行 RAG 子图。
     :param question: 用户问题
     :param kb_scope: 当前智能体检索的知识库范围
     :param llm_config: 聊天模型配置
+    :param document_filenames: 若为非空，仅在这些已校验的 filename 上检索
     :return: RAG 子图结果
     """
     return rag_graph.invoke( # 运行 RAG 子图
@@ -504,5 +536,6 @@ def run_rag_graph(question: str, kb_scope: str, llm_config: dict[str, Any]) -> d
             "hypothetical_doc": None,
             "rag_trace": None,
             "include_images": True,  # 默认包含图片检索
+            "document_filenames": document_filenames,
         }
     )
