@@ -9,6 +9,18 @@ from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
 
 from app.settings import settings
 
+# Milvus 单请求 query 的 (offset+limit) 上界，超过会报 invalid max query result window
+MILVUS_MAX_QUERY_WINDOW = 16384
+
+
+def _milvus_query_row_to_dict(row: object) -> dict:
+    if isinstance(row, dict):
+        return row
+    to_dict = getattr(row, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()  # type: ignore[no-any-return]
+    return {}
+
 
 def _dense_dim() -> int:
     return max(1, int(settings.EMBEDDING_DIM or 1024))
@@ -52,6 +64,19 @@ def kb_filter_expr(kb_scope: str, extra: str = "") -> str:
     if extra:
         return f"{base} && {extra}"
     return base
+
+
+def filename_in_filter_expr(filenames: list[str]) -> str:
+    """
+    将多文档约束拼成 Milvus 布尔表达式：filename in ["a","b"] 或单文件 filename == "a"
+    调用方需保证列表非空且已规范（不含重复）。
+    """
+    if not filenames:
+        raise ValueError("filename_in_filter_expr requires at least one filename")
+    if len(filenames) == 1:
+        return f'filename == "{milvus_escape(filenames[0])}"'
+    parts = ", ".join(f'"{milvus_escape(fn)}"' for fn in filenames)
+    return f"filename in [{parts}]"
 
 
 class MilvusManager:
@@ -218,6 +243,72 @@ class MilvusManager:
             output_fields=output_fields or ["filename", "file_type", "kb_scope"],
             limit=limit,
         )
+
+    def list_distinct_filenames(self, kb_scope: str, *, query_row_limit: int | None = None) -> list[str]:
+        """
+        按 kb_scope 查询 Milvus 中出现过的不重复 filename（用于智能体选档白名单）。
+        单次标量 query 的 limit 受 MILVUS_MAX_QUERY_WINDOW 约束，大量分块时用 query_iterator 逐批拉取再去重。
+        用于智能体在检索知识库之前选定文档候选范围。
+        :param kb_scope: 知识库范围
+        :param query_row_limit: 最多扫描的实体行数；None 表示扫到匹配集结束。需控制超大规模库成本时可设上限（如 65535）。
+        :return: 文件名列表
+        """
+        esc = milvus_escape(kb_scope)
+        filter_expr = f'kb_scope == "{esc}"'
+        client = self._get_client()
+        seen: set[str] = set()
+        scanned = 0
+        iterator = None
+        try:
+            if getattr(client, "query_iterator", None) is not None:
+                # 使用 query_iterator 逐批拉取再去重
+                iterator = client.query_iterator(
+                    collection_name=self.collection_name,
+                    batch_size=min(2048, MILVUS_MAX_QUERY_WINDOW - 1),
+                    filter=filter_expr,
+                    output_fields=["filename"],
+                )
+                stop = False
+                while not stop:
+                    if query_row_limit is not None and scanned >= query_row_limit:
+                        break
+                    batch = iterator.next()
+                    if not batch:
+                        break
+                    for r in batch:
+                        if query_row_limit is not None and scanned >= query_row_limit:
+                            stop = True
+                            break
+                        scanned += 1
+                        d = _milvus_query_row_to_dict(r)
+                        fn = (d.get("filename") or "").strip()
+                        if fn:
+                            seen.add(fn)
+            else:
+                cap = (
+                    min(MILVUS_MAX_QUERY_WINDOW, query_row_limit)
+                    if query_row_limit is not None
+                    else MILVUS_MAX_QUERY_WINDOW
+                )
+                # 使用 query 一次性拉取再去重
+                rows = client.query(
+                    collection_name=self.collection_name,
+                    filter=filter_expr,
+                    output_fields=["filename"],
+                    limit=max(1, int(cap)),
+                )
+                for r in rows or []:
+                    d = _milvus_query_row_to_dict(r)
+                    fn = (d.get("filename") or "").strip()
+                    if fn:
+                        seen.add(fn)
+        finally:
+            if iterator is not None:
+                try:
+                    iterator.close()
+                except Exception:
+                    pass
+        return sorted(seen)
 
     def get_chunks_by_ids(self, chunk_ids: list[str]) -> list[dict]:
         """
