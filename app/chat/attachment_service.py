@@ -207,6 +207,26 @@ def session_attachments_count(user_id: int, agent_id: int, session_id: str) -> i
         db.close()
 
 
+def count_session_image_attachments(user_id: int, agent_id: int, session_id: str) -> int:
+    """
+    当前会话中 kind 为 image 的附件数量（与上传时 classify_kind 一致）。
+    """
+    db = SessionLocal()
+    try:
+        return (
+            db.query(ChatAttachmentRow)
+            .filter(
+                ChatAttachmentRow.user_id == user_id,
+                ChatAttachmentRow.agent_id == agent_id,
+                ChatAttachmentRow.session_id == session_id,
+                ChatAttachmentRow.kind == "image",
+            )
+            .count()
+        )
+    finally:
+        db.close()
+
+
 def session_attachments_total_bytes(user_id: int, agent_id: int, session_id: str) -> int:
     """
     根据用户ID、智能体ID、会话ID获取会话附件总大小
