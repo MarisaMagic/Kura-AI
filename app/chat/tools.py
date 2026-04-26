@@ -10,6 +10,7 @@ from langchain_core.tools import tool
 _LAST_RAG_CONTEXT: dict | None = None
 _KNOWLEDGE_TOOL_CALLS_THIS_TURN = 0
 _MEMORY_TOOL_CALLS_THIS_TURN = 0
+_IMAGE_KB_TOOL_CALLS_THIS_TURN = 0
 _RAG_STEP_QUEUE: Any = None
 _RAG_STEP_LOOP: asyncio.AbstractEventLoop | None = None
 
@@ -28,9 +29,10 @@ def get_last_rag_context(clear: bool = True) -> Optional[dict]:
 
 
 def reset_tool_call_guards() -> None:
-    global _KNOWLEDGE_TOOL_CALLS_THIS_TURN, _MEMORY_TOOL_CALLS_THIS_TURN
+    global _KNOWLEDGE_TOOL_CALLS_THIS_TURN, _MEMORY_TOOL_CALLS_THIS_TURN, _IMAGE_KB_TOOL_CALLS_THIS_TURN
     _KNOWLEDGE_TOOL_CALLS_THIS_TURN = 0
     _MEMORY_TOOL_CALLS_THIS_TURN = 0
+    _IMAGE_KB_TOOL_CALLS_THIS_TURN = 0
 
 
 def try_acquire_knowledge_tool_slot() -> bool:
@@ -51,6 +53,23 @@ def try_acquire_memory_tool_slot() -> bool:
     return True
 
 
+def try_acquire_image_kb_tool_slot(user_id: int, agent_id: int, session_id: str) -> bool:
+    """
+    以图知识库检索：每轮成功次数不超过当前会话中图片类附件数量。
+    无图片附件时返回 False。
+    """
+    from app.chat.attachment_service import count_session_image_attachments
+
+    global _IMAGE_KB_TOOL_CALLS_THIS_TURN
+    max_n = count_session_image_attachments(user_id, agent_id, session_id)
+    if max_n <= 0:
+        return False
+    if _IMAGE_KB_TOOL_CALLS_THIS_TURN >= max_n:
+        return False
+    _IMAGE_KB_TOOL_CALLS_THIS_TURN += 1
+    return True
+
+
 def set_rag_step_queue(queue: Any, *, sync: bool = False) -> None:
     global _RAG_STEP_QUEUE, _RAG_STEP_LOOP
     _RAG_STEP_QUEUE = queue
@@ -65,15 +84,15 @@ def set_rag_step_queue(queue: Any, *, sync: bool = False) -> None:
             _RAG_STEP_LOOP = asyncio.get_event_loop()
 
 
-def log_kb_tool_return_to_terminal(text: str) -> None:
-    """在终端打印 search_knowledge_base 返回给模型的字符串（受 DEBUG_AGENT_KB_PROMPT 控制）。"""
+def log_kb_tool_return_to_terminal(text: str, *, tool_label: str = "search_knowledge_base") -> None:
+    """在终端打印知识库工具返回给模型的字符串（受 DEBUG_AGENT_KB_PROMPT 控制）。"""
     from app.settings import settings
 
     if not getattr(settings, "DEBUG_AGENT_KB_PROMPT", True):
         return
     sep = "=" * 72
     print(
-        f"\n{sep}\n[智能体知识库] search_knowledge_base 工具输出（将注入对话上下文）:\n{sep}\n{text}\n{sep}\n",
+        f"\n{sep}\n[智能体知识库] {tool_label} 工具输出（将注入对话上下文）:\n{sep}\n{text}\n{sep}\n",
         flush=True,
     )
 
