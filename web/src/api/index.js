@@ -1,4 +1,4 @@
-import { request } from '@/utils'
+import { request, getToken } from '@/utils'
 
 export default {
   login: (data) => request.post('/base/access_token', data, { noNeedToken: true }),
@@ -51,7 +51,8 @@ export default {
   /** 智能体对话（DependAuth，不走菜单权限） */
   getAgentChatSessions: (params = {}) => request.get('/user-agent/chat/sessions', { params }),
   /** 当前用户全部智能体下的会话（按最近时间） */
-  getAgentChatSessionsAll: (params = {}) => request.get('/user-agent/chat/sessions/all', { params }),
+  getAgentChatSessionsAll: (params = {}) =>
+    request.get('/user-agent/chat/sessions/all', { params }),
   getAgentChatSessionMessages: (agentId, sessionId) =>
     request.get(`/user-agent/chat/sessions/${encodeURIComponent(sessionId)}`, {
       params: { agent_id: agentId },
@@ -61,9 +62,31 @@ export default {
     const fd = new FormData()
     fd.append('file', file)
     return request.post(
-      `/user-agent/chat/attachments/upload?agent_id=${agentId}&session_id=${encodeURIComponent(sessionId)}`,
+      `/user-agent/chat/attachments/upload?agent_id=${agentId}&session_id=${encodeURIComponent(
+        sessionId
+      )}`,
       fd,
-      { headers: { 'Content-Type': 'multipart/form-data' } },
+      { headers: { 'Content-Type': 'multipart/form-data' } }
+    )
+  },
+  /**
+   * 拉取会话附件二进制（带 token 请求头），用于 img 等无法用 axios 默认 JSON 解析的场景。
+   */
+  fetchChatAttachmentPreviewBlob: (agentId, sessionId, attachmentId) => {
+    const base = import.meta.env.VITE_BASE_API || '/api/v1'
+    const q = new URLSearchParams({
+      agent_id: String(agentId),
+      session_id: String(sessionId || 'default_session'),
+      attachment_id: String(attachmentId),
+    })
+    const headers = {}
+    const token = getToken()
+    if (token) headers.token = token
+    return fetch(`${base}/user-agent/chat/attachments/preview?${q}`, { headers }).then(
+      async (res) => {
+        if (!res.ok) throw new Error(String(res.status))
+        return res.blob()
+      }
     )
   },
   deleteAgentChatSession: ({ agent_id, session_id }) =>
@@ -71,7 +94,8 @@ export default {
       params: { agent_id },
     }),
   getRecentAgents: () => request.get('/user-agent/recent_agents'),
-  touchRecentAgent: (params = {}) => request.post('/user-agent/recent_agents/touch', null, { params }),
+  touchRecentAgent: (params = {}) =>
+    request.post('/user-agent/recent_agents/touch', null, { params }),
   /** 知识库（DependAuth） */
   getKbDocuments: (params = {}) => request.get('/user-agent/kb/documents', { params }),
   uploadKbDocument: (agentId, data) =>

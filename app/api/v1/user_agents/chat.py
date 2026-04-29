@@ -7,10 +7,10 @@ import re
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from app.chat.agent_service import chat_with_agent_stream, chat_with_agent_sync
-from app.chat.attachment_service import save_uploaded_file
+from app.chat.attachment_service import file_bytes_for_attachment, get_attachment_row, save_uploaded_file
 from app.chat.chat_job import create_chat_job, get_job_meta, iter_job_sse_events, request_chat_job_cancel, verify_job_owner
 from app.chat.storage import storage
 from app.controllers.user_agent import user_agent_controller
@@ -69,6 +69,40 @@ async def upload_chat_attachment(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return Success(data=ChatAttachmentUploadResponse(**data).model_dump())  # 返回附件上传结果
+
+
+@router.get("/chat/attachments/preview", summary="预览会话附件（图片等，需登录）", tags=["智能体模块"])
+async def preview_chat_attachment(
+    agent_id: int = Query(..., description="智能体 ID"),
+    session_id: str = Query(..., description="会话 ID"),
+    attachment_id: str = Query(..., description="附件 ID（mg_chat_attachments.id）"),
+    current_user: User = Depends(AuthControl.is_authed),
+):
+    """
+    按 attachment_id 读盘并返回字节流；供前端因 token 请求头无法用 img src 直连时通过 fetch+blob 展示。
+    """
+    user_id = current_user.id
+    ua = await user_agent_controller.get_owned(agent_id, user_id)
+    if not ua:
+        raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
+    sid = (session_id or "default_session").strip() or "default_session"
+    aid = (attachment_id or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail="attachment_id 不能为空")
+    row = get_attachment_row(aid, user_id=user_id, agent_id=agent_id, session_id=sid)
+    if not row:
+        raise HTTPException(status_code=404, detail="附件不存在")
+    raw = file_bytes_for_attachment(aid, user_id=user_id, agent_id=agent_id, session_id=sid)
+    if not raw:
+        raise HTTPException(status_code=404, detail="附件文件缺失或不可读")
+    mime = (row.mime or "").strip() or "application/octet-stream"
+    return Response(
+        content=raw,
+        media_type=mime,
+        headers={
+            "Cache-Control": "private, max-age=300",
+        },
+    )
 
 
 def _session_updated_at_display(iso_ts: str) -> str:

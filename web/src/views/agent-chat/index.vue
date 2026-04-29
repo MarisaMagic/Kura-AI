@@ -53,15 +53,13 @@
                         v-if="m.attachments?.length"
                         class="agent-chat-attachment-boxes agent-chat-attachment-boxes--user"
                       >
-                        <div
+                        <ChatAttachmentItem
                           v-for="(a, ai) in m.attachments"
                           :key="`ua-${m.id}-${ai}`"
-                          class="agent-chat-file-box agent-chat-file-box--readonly"
-                          :title="a.name"
-                        >
-                          <TheIcon :icon="chatAttachmentIcon(a)" :size="18" class="agent-chat-file-box-icon" />
-                          <span class="agent-chat-file-box-name">{{ a.name }}</span>
-                        </div>
+                          :agent-id="chatAgentId"
+                          :session-id="sessionId"
+                          :attachment="a"
+                        />
                       </div>
                     </div>
                   </template>
@@ -226,15 +224,13 @@
                         </n-tooltip>
                       </div>
                       <div v-if="m.attachments?.length" class="agent-chat-attachment-boxes">
-                        <div
+                        <ChatAttachmentItem
                           v-for="(a, ai) in m.attachments"
                           :key="`aa-${m.id}-${ai}`"
-                          class="agent-chat-file-box agent-chat-file-box--readonly"
-                          :title="a.name"
-                        >
-                          <TheIcon :icon="chatAttachmentIcon(a)" :size="18" class="agent-chat-file-box-icon" />
-                          <span class="agent-chat-file-box-name">{{ a.name }}</span>
-                        </div>
+                          :agent-id="chatAgentId"
+                          :session-id="sessionId"
+                          :attachment="a"
+                        />
                       </div>
                     </div>
                   </template>
@@ -357,6 +353,7 @@ import { useI18n } from 'vue-i18n'
 import { NAvatar, NButton, NInput, NSpin, NSwitch, NTooltip, NUpload } from 'naive-ui'
 import AppPage from '@/components/page/AppPage.vue'
 import TheIcon from '@/components/icon/TheIcon.vue'
+import ChatAttachmentItem from './ChatAttachmentItem.vue'
 import api from '@/api'
 import { getToken } from '@/utils'
 import { renderAgentChatMarkdown } from '@/utils/agentChatMarkdown'
@@ -367,6 +364,7 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const chatAgentId = computed(() => Number(route.params.agentId))
 const agentChatHeaderStore = useAgentChatHeaderStore()
 const agentSidebarStore = useAgentSidebarStore()
 const recentAgentsStore = useRecentAgentsStore()
@@ -463,6 +461,7 @@ function attachmentsFromHistoryRow(row) {
         name: (b.filename && String(b.filename).trim()) || t('views.agents.chat_attachment_image_fallback'),
         kind: 'image',
         mime: b.mime || '',
+        attachmentId: b.attachment_id != null ? String(b.attachment_id) : '',
       })
     } else if (b.type === 'file_ref') {
       out.push({
@@ -472,6 +471,7 @@ function attachmentsFromHistoryRow(row) {
           t('views.agents.chat_attachment_file_fallback'),
         kind: b.kind || 'other',
         mime: b.mime || '',
+        attachmentId: b.attachment_id != null ? String(b.attachment_id) : '',
       })
     }
   }
@@ -1264,6 +1264,7 @@ async function submitMessage() {
         name: d.filename || p.name,
         kind: d.kind || p.kind || '',
         mime: d.mime || p.mime || '',
+        attachmentId: aid,
       })
     }
   } catch {
@@ -2168,6 +2169,10 @@ html.dark .agent-chat-input :deep(.n-input__placeholder) {
   justify-content: flex-end;
   max-width: min(85%, 520px);
   margin-left: auto;
+}
+
+.agent-chat-attachment-boxes--user :deep(.agent-chat-attachment-media) {
+  align-items: flex-end;
 }
 
 .agent-chat-file-box {
