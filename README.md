@@ -194,6 +194,11 @@ docker compose stop
 建议在项目根目录下创建 `.env` 环境变量配置（需根据自身情况更改）:
 
 ```
+# ===== App security =====
+# JWT 与（未单独设置 API_KEY_ENCRYPTION_KEY 时）智能体 API Key 字段加密派生用；勿提交仓库
+# 生成: openssl rand -hex 32
+SECRET_KEY=
+
 # ===== Embedding Model (多模态) =====
 EMBEDDING_API_KEY=[你的多模态向量嵌入模型 API Key]
 EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1

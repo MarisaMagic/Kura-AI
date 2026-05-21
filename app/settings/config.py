@@ -35,7 +35,8 @@ class Settings(BaseSettings):
     # 智能体头像：本地目录（可通过环境变量 USER_AGENT_AVATAR_ROOT 覆盖，例如 /data/user_agents_avatar）
     USER_AGENT_AVATAR_ROOT: str = os.path.join(BASE_DIR, "data", "user_agents_avatar")
     USER_AGENT_AVATAR_URL_PREFIX: str = "/api/v1/media/user_agents_avatar"
-    SECRET_KEY: str = "3488a63e1765035d386f05409663f55c83bfae3b3c61a932744b20ad14244dcf"  # openssl rand -hex 32
+    # 须在项目根目录 .env 中设置；勿提交仓库。生成: openssl rand -hex 32
+    SECRET_KEY: str
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 day
     # 用户智能体 API Key 字段级加密：优先设置环境变量 API_KEY_ENCRYPTION_KEY（Fernet 密钥，见 cryptography.fernet.Fernet.generate_key()）
