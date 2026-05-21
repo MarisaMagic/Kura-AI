@@ -11,9 +11,25 @@
   "views": {
     "login": {
       "text_login": "Login",
-      "message_input_username_password": "Please enter username and password",
+      "placeholder_account": "Username or email",
+      "placeholder_password": "Password",
+      "link_register": "No account? Sign up",
+      "message_input_username_password": "Please enter username/email and password",
       "message_verifying": "Verifying...",
       "message_login_success": "Login successful"
+    },
+    "register": {
+      "text_register": "Sign up",
+      "placeholder_email": "Email",
+      "placeholder_username_optional": "Username (optional)",
+      "placeholder_password": "Password (min 8 chars, letters & digits)",
+      "placeholder_password_confirm": "Confirm password",
+      "link_login": "Already have an account? Sign in",
+      "message_input_required": "Please enter email and password",
+      "message_password_mismatch": "Passwords do not match",
+      "message_submitting": "Submitting...",
+      "message_register_success": "Registration successful, please sign in",
+      "message_registration_closed": "Registration is currently disabled"
     },
     "workbench": {
       "label_workbench": "Workbench",

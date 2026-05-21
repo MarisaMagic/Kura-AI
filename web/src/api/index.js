@@ -2,6 +2,8 @@ import { request, getToken } from '@/utils'
 
 export default {
   login: (data) => request.post('/base/access_token', data, { noNeedToken: true }),
+  register: (data) => request.post('/base/register', data, { noNeedToken: true }),
+  registrationEnabled: () => request.get('/base/registration_enabled', { noNeedToken: true }),
   getUserInfo: () => request.get('/base/userinfo'),
   getUserMenu: () => request.get('/base/usermenu'),
   getUserApi: () => request.get('/base/userapi'),

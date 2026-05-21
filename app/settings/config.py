@@ -16,14 +16,21 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Kura AI"
     APP_DESCRIPTION: str = "Description"
 
-    CORS_ORIGINS: typing.List = ["*"]
-    CORS_ALLOW_CREDENTIALS: bool = True
-    CORS_ALLOW_METHODS: typing.List = ["*"]
-    CORS_ALLOW_HEADERS: typing.List = ["*"]
+    # 公网部署请改为实际前端域名，或通过环境变量覆盖（JSON 数组，如 ["https://app.example.com"]）
+    CORS_ORIGINS: typing.List[str] = [
+        "http://localhost:3100",
+        "http://127.0.0.1:3100",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    CORS_ALLOW_CREDENTIALS: bool = False
+    CORS_ALLOW_METHODS: typing.List[str] = ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+    CORS_ALLOW_HEADERS: typing.List[str] = ["*"]
 
-    DEBUG: bool = True
-    # 为 True 时，每次调用 LLM 前在服务端终端打印完整输入消息列表（含系统/用户/工具等）
-    DEBUG_AGENT_KB_PROMPT: bool = True
+    # 生产请保持 False；仅本地调试用 True（会启用 dev 令牌等开发行为）
+    DEBUG: bool = False
+    # 为 True 时在服务端终端打印完整 LLM 输入消息 / 知识库工具原文（易泄露隐私与密钥，默认关闭）
+    DEBUG_AGENT_KB_PROMPT: bool = False
 
     PROJECT_ROOT: str = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     BASE_DIR: str = os.path.abspath(os.path.join(PROJECT_ROOT, os.pardir))
@@ -37,6 +44,18 @@ class Settings(BaseSettings):
     USER_AGENT_AVATAR_URL_PREFIX: str = "/api/v1/media/user_agents_avatar"
     # 须在项目根目录 .env 中设置；勿提交仓库。生成: openssl rand -hex 32
     SECRET_KEY: str
+    # 首次启动且库中无用户时创建的管理员（密码勿提交仓库；至少 8 位且含字母与数字）
+    INITIAL_ADMIN_USERNAME: str = "admin"
+    INITIAL_ADMIN_EMAIL: str = "admin@localhost"
+    INITIAL_ADMIN_PASSWORD: typing.Optional[str] = None
+    # 是否开放邮箱自助注册（公网部署建议 false）
+    ALLOW_PUBLIC_REGISTRATION: bool = True
+    # 登录 / 注册限流（依赖 Redis；Redis 不可用时跳过限流并写日志）
+    AUTH_RATE_LIMIT_ENABLED: bool = True
+    AUTH_LOGIN_RATE_LIMIT: int = 20
+    AUTH_LOGIN_RATE_WINDOW_SECONDS: int = 60
+    AUTH_REGISTER_RATE_LIMIT: int = 5
+    AUTH_REGISTER_RATE_WINDOW_SECONDS: int = 3600
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 day
     # 用户智能体 API Key 字段级加密：优先设置环境变量 API_KEY_ENCRYPTION_KEY（Fernet 密钥，见 cryptography.fernet.Fernet.generate_key()）

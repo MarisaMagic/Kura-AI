@@ -199,6 +199,21 @@ docker compose stop
 # 生成: openssl rand -hex 32
 SECRET_KEY=
 
+# 本地调试可设 true（仅 DEBUG=true 时 Header token=dev 可跳过 JWT，勿用于公网）
+DEBUG=false
+DEBUG_AGENT_KB_PROMPT=false
+
+# 首次启动且数据库无用户时创建的管理员（密码至少 8 位且含字母与数字，勿提交仓库）
+INITIAL_ADMIN_USERNAME=admin
+INITIAL_ADMIN_EMAIL=admin@localhost
+INITIAL_ADMIN_PASSWORD=
+
+# 是否开放邮箱自助注册（公网部署建议 false）
+ALLOW_PUBLIC_REGISTRATION=true
+
+# 浏览器来源白名单（JSON 数组）；默认含 localhost Vite 端口，部署到域名时请改为你的前端地址
+# CORS_ORIGINS=["https://your-frontend.example.com"]
+
 # ===== Embedding Model (多模态) =====
 EMBEDDING_API_KEY=[你的多模态向量嵌入模型 API Key]
 EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1

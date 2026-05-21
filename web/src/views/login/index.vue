@@ -18,8 +18,8 @@
             v-model:value="loginInfo.username"
             autofocus
             class="h-50 items-center pl-10 text-16"
-            placeholder="admin"
-            :maxlength="20"
+            :placeholder="$t('views.login.placeholder_account')"
+            :maxlength="255"
           />
         </div>
         <div mt-30>
@@ -28,8 +28,8 @@
             class="h-50 items-center pl-10 text-16"
             type="password"
             show-password-on="mousedown"
-            placeholder="123456"
-            :maxlength="20"
+            :placeholder="$t('views.login.placeholder_password')"
+            :maxlength="128"
             @keypress.enter="handleLogin"
           />
         </div>
@@ -46,6 +46,9 @@
           >
             {{ $t('views.login.text_login') }}
           </n-button>
+        </div>
+        <div v-if="registrationEnabled" mt-16 f-c-c text-14>
+          <router-link to="/register">{{ $t('views.login.link_register') }}</router-link>
         </div>
       </div>
     </div>
@@ -68,17 +71,28 @@ const loginInfo = ref({
   password: '',
 })
 
+const registrationEnabled = ref(false)
+const loading = ref(false)
+
 initLoginInfo()
+loadRegistrationFlag()
 
 function initLoginInfo() {
   const localLoginInfo = lStorage.get('loginInfo')
-  if (localLoginInfo) {
-    loginInfo.value.username = localLoginInfo.username || ''
-    loginInfo.value.password = localLoginInfo.password || ''
+  if (localLoginInfo?.username) {
+    loginInfo.value.username = localLoginInfo.username
   }
 }
 
-const loading = ref(false)
+async function loadRegistrationFlag() {
+  try {
+    const res = await api.registrationEnabled()
+    registrationEnabled.value = !!res.data?.enabled
+  } catch {
+    registrationEnabled.value = false
+  }
+}
+
 async function handleLogin() {
   const { username, password } = loginInfo.value
   if (!username || !password) {
@@ -94,7 +108,6 @@ async function handleLogin() {
     await addDynamicRoutes()
     if (query.redirect) {
       const path = query.redirect
-      console.log('path', { path, query })
       Reflect.deleteProperty(query, 'redirect')
       router.push({ path, query })
     } else {

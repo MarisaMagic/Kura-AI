@@ -79,7 +79,7 @@ class _KbPromptDebugCallback(BaseCallbackHandler):
     ) -> None:
         from app.settings import settings
 
-        if not getattr(settings, "DEBUG_AGENT_KB_PROMPT", True):
+        if not getattr(settings, "DEBUG_AGENT_KB_PROMPT", False):
             return
         for batch in messages:
             if not batch:

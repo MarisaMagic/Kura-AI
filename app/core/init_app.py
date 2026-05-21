@@ -43,6 +43,8 @@ def make_middlewares():
             methods=["GET", "POST", "PUT", "DELETE"],
             exclude_paths=[
                 "/api/v1/base/access_token",
+                "/api/v1/base/register",
+                "/api/v1/base/registration_enabled",
                 "/api/v1/base/upload_avatar",
                 "/api/v1/user-agent/upload_avatar",
                 r".*user-agent/chat/stream$",  # POST 直连 SSE，勿缓冲整包写入审计
@@ -73,15 +75,27 @@ def register_routers(app: FastAPI, prefix: str = "/api"):
 async def init_superuser():
     user = await user_controller.model.exists()
     if not user:
+        password = settings.INITIAL_ADMIN_PASSWORD
+        if not password:
+            raise RuntimeError(
+                "数据库尚无用户，请在 .env 中配置 INITIAL_ADMIN_PASSWORD 后重启（至少 8 位且含字母与数字）"
+            )
+        from app.utils.password import validate_password_strength
+
+        try:
+            validate_password_strength(password)
+        except ValueError as exc:
+            raise RuntimeError(f"INITIAL_ADMIN_PASSWORD 不符合要求: {exc}") from exc
         await user_controller.create_user(
             UserCreate(
-                username="admin",
-                email="admin@admin.com",
-                password="123456",
+                username=settings.INITIAL_ADMIN_USERNAME,
+                email=settings.INITIAL_ADMIN_EMAIL.strip().lower(),
+                password=password,
                 is_active=True,
                 is_superuser=True,
             )
         )
+        logger.info("已创建初始管理员用户: %s", settings.INITIAL_ADMIN_USERNAME)
 
 
 async def init_menus():

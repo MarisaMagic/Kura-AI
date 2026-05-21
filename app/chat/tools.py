@@ -88,7 +88,7 @@ def log_kb_tool_return_to_terminal(text: str, *, tool_label: str = "search_knowl
     """在终端打印知识库工具返回给模型的字符串（受 DEBUG_AGENT_KB_PROMPT 控制）。"""
     from app.settings import settings
 
-    if not getattr(settings, "DEBUG_AGENT_KB_PROMPT", True):
+    if not getattr(settings, "DEBUG_AGENT_KB_PROMPT", False):
         return
     sep = "=" * 72
     print(

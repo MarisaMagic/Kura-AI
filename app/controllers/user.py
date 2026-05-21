@@ -1,13 +1,15 @@
+import re
 from datetime import datetime
 from typing import List, Optional
 
 from fastapi.exceptions import HTTPException
 
 from app.core.crud import CRUDBase
-from app.models.admin import User
-from app.schemas.login import CredentialsSchema
+from app.models.admin import Role, User
+from app.schemas.login import CredentialsSchema, RegisterSchema
 from app.schemas.users import UserCreate, UserUpdate
-from app.utils.password import get_password_hash, verify_password
+from app.settings import settings
+from app.utils.password import generate_password, get_password_hash, validate_password_strength, verify_password
 
 from .role import role_controller
 
@@ -17,7 +19,7 @@ class UserController(CRUDBase[User, UserCreate, UserUpdate]):
         super().__init__(model=User)
 
     async def get_by_email(self, email: str) -> Optional[User]:
-        return await self.model.filter(email=email).first()
+        return await self.model.filter(email=email.strip().lower()).first()
 
     async def get_by_username(self, username: str) -> Optional[User]:
         return await self.model.filter(username=username).first()
@@ -33,14 +35,69 @@ class UserController(CRUDBase[User, UserCreate, UserUpdate]):
         await user.save()
 
     async def authenticate(self, credentials: CredentialsSchema) -> Optional["User"]:
-        user = await self.model.filter(username=credentials.username).first()
+        account = credentials.username.strip()
+        if "@" in account:
+            user = await self.get_by_email(account.lower())
+        else:
+            user = await self.get_by_username(account)
         if not user:
-            raise HTTPException(status_code=400, detail="无效的用户名")
+            raise HTTPException(status_code=400, detail="无效的账号或密码")
         verified = verify_password(credentials.password, user.password)
         if not verified:
-            raise HTTPException(status_code=400, detail="密码错误!")
+            raise HTTPException(status_code=400, detail="无效的账号或密码")
         if not user.is_active:
             raise HTTPException(status_code=400, detail="用户已被禁用")
+        return user
+
+    async def _unique_username(self, preferred: str) -> str:
+        base = re.sub(r"[^a-zA-Z0-9_]", "_", preferred).strip("_")[:20]
+        if len(base) < 3:
+            base = "user"
+        if not await self.get_by_username(base):
+            return base
+        for i in range(1, 10000):
+            suffix = f"_{i}"
+            candidate = f"{base[: 20 - len(suffix)]}{suffix}"
+            if not await self.get_by_username(candidate):
+                return candidate
+        raise HTTPException(status_code=400, detail="无法生成唯一用户名，请手动指定用户名")
+
+    async def register_user(self, body: RegisterSchema) -> User:
+        email = body.email.strip().lower()
+        if email == settings.INITIAL_ADMIN_EMAIL.strip().lower():
+            raise HTTPException(status_code=400, detail="该邮箱不可用于注册")
+        if await self.get_by_email(email):
+            raise HTTPException(status_code=400, detail="该邮箱已被注册")
+
+        username = body.username
+        if username:
+            if username.lower() == settings.INITIAL_ADMIN_USERNAME.lower():
+                raise HTTPException(status_code=400, detail="该用户名不可使用")
+            if await self.get_by_username(username):
+                raise HTTPException(status_code=400, detail="用户名已被占用")
+        else:
+            local = email.split("@", 1)[0]
+            username = await self._unique_username(local)
+            if username.lower() == settings.INITIAL_ADMIN_USERNAME.lower():
+                username = await self._unique_username(f"{local}_user")
+
+        try:
+            validate_password_strength(body.password)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        user = await self.create_user(
+            UserCreate(
+                email=email,
+                username=username,
+                password=body.password,
+                is_active=True,
+                is_superuser=False,
+            )
+        )
+        role = await Role.filter(name="普通用户").first()
+        if role:
+            await self.update_roles(user, [role.id])
         return user
 
     async def update_roles(self, user: User, role_ids: List[int]) -> None:
@@ -49,12 +106,14 @@ class UserController(CRUDBase[User, UserCreate, UserUpdate]):
             role_obj = await role_controller.get(id=role_id)
             await user.roles.add(role_obj)
 
-    async def reset_password(self, user_id: int):
+    async def reset_password(self, user_id: int) -> str:
         user_obj = await self.get(id=user_id)
         if user_obj.is_superuser:
             raise HTTPException(status_code=403, detail="不允许重置超级管理员密码")
-        user_obj.password = get_password_hash(password="123456")
+        new_password = generate_password()
+        user_obj.password = get_password_hash(new_password)
         await user_obj.save()
+        return new_password
 
 
 user_controller = UserController()

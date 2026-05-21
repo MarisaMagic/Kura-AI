@@ -2,7 +2,7 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, File, Request, UploadFile
 
 from app.controllers.user import user_controller
 from app.core.ctx import CTX_USER_ID
@@ -12,15 +12,41 @@ from app.schemas.base import Fail, Success
 from app.schemas.login import *
 from app.schemas.users import UpdatePassword
 from app.settings import settings
+from app.utils.auth_rate_limit import check_auth_rate_limit
 from app.utils.avatar import ALLOWED_AVATAR_EXTENSIONS, avatar_url_from_filename, enrich_user_avatar, safe_avatar_extension
 from app.utils.jwt_utils import create_access_token
-from app.utils.password import get_password_hash, verify_password
+from app.utils.password import get_password_hash, validate_password_strength, verify_password
 
 router = APIRouter()
 
 
-@router.post("/access_token", summary="获取token")
-async def login_access_token(credentials: CredentialsSchema):
+@router.get("/registration_enabled", summary="是否开放自助注册", tags=["基础模块"])
+async def registration_enabled():
+    return Success(data={"enabled": settings.ALLOW_PUBLIC_REGISTRATION})
+
+
+@router.post("/register", summary="邮箱注册", tags=["基础模块"])
+async def register_user(body: RegisterSchema, request: Request):
+    if not settings.ALLOW_PUBLIC_REGISTRATION:
+        return Fail(code=403, msg="当前未开放注册")
+    check_auth_rate_limit(
+        request,
+        action="register",
+        limit=settings.AUTH_REGISTER_RATE_LIMIT,
+        window_seconds=settings.AUTH_REGISTER_RATE_WINDOW_SECONDS,
+    )
+    user = await user_controller.register_user(body)
+    return Success(msg="注册成功", data={"username": user.username, "email": user.email})
+
+
+@router.post("/access_token", summary="获取token", tags=["基础模块"])
+async def login_access_token(credentials: CredentialsSchema, request: Request):
+    check_auth_rate_limit(
+        request,
+        action="login",
+        limit=settings.AUTH_LOGIN_RATE_LIMIT,
+        window_seconds=settings.AUTH_LOGIN_RATE_WINDOW_SECONDS,
+    )
     user: User = await user_controller.authenticate(credentials)
     await user_controller.update_last_login(user.id)
     access_token_expires = timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
@@ -132,6 +158,10 @@ async def update_user_password(req_in: UpdatePassword):
     verified = verify_password(req_in.old_password, user.password)
     if not verified:
         return Fail(msg="旧密码验证错误！")
+    try:
+        validate_password_strength(req_in.new_password)
+    except ValueError as exc:
+        return Fail(msg=str(exc))
     user.password = get_password_hash(req_in.new_password)
     await user.save()
     return Success(msg="修改成功")

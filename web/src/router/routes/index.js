@@ -100,6 +100,15 @@ export const basicRoutes = [
       title: '登录页',
     },
   },
+  {
+    name: 'Register',
+    path: '/register',
+    component: () => import('@/views/register/index.vue'),
+    isHidden: true,
+    meta: {
+      title: '注册页',
+    },
+  },
   /** 智能体创建/编辑：无侧栏全屏；勿与后端动态菜单中的 /agents 目录冲突 */
   {
     name: 'AgentEditor',
