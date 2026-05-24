@@ -1,32 +1,50 @@
 <template>
   <AppPage :show-footer="false" scroll-in-parent class="!p-0">
-    <div class="agent-editor-layout">
-      <header class="agent-page-header">
-        <h1 class="agent-page-title">{{ $t('views.agents.title_edit_agent') }}</h1>
-        <div class="agent-page-header-actions">
-          <n-button type="primary" :loading="saving" :disabled="pageLoading" @click="handleSubmit">
-            {{ $t('views.agents.button_save_config') }}
-          </n-button>
-        </div>
-      </header>
+    <div class="agent-editor-split">
+      <div class="agent-editor-split__left">
+        <div class="agent-editor-layout">
+          <div class="agent-editor-form-column">
+            <header class="agent-page-header">
+              <h1 class="agent-page-title">{{ $t('views.agents.title_edit_agent') }}</h1>
+              <div class="agent-page-header-actions">
+                <n-button type="primary" :loading="saving" :disabled="pageLoading" @click="handleSubmit">
+                  {{ $t('views.agents.button_save_config') }}
+                </n-button>
+              </div>
+            </header>
 
-      <n-spin :show="pageLoading" class="agent-edit-spin">
-        <AgentFormFields
-          v-show="!pageLoading"
-          ref="formFieldsRef"
+            <n-spin :show="pageLoading" class="agent-edit-spin">
+              <AgentFormFields
+                v-show="!pageLoading"
+                ref="formFieldsRef"
+                :form="form"
+                :rules="rules"
+                :has-saved-api-key="hasSavedApiKey"
+                :dialogue-open="dialogueOpen"
+                :advanced-open="advancedOpen"
+                :avatar-preview="avatarPreview"
+                :avatar-upload-key="avatarUploadKey"
+                :temperature-slider-label="temperatureSliderLabel"
+                @update:dialogue-open="dialogueOpen = $event"
+                @update:advanced-open="advancedOpen = $event"
+                @avatar-change="onAvatarFileChange"
+              />
+            </n-spin>
+          </div>
+        </div>
+      </div>
+
+      <div class="agent-editor-split__right">
+        <AgentEditorPreviewPanel
           :form="form"
-          :rules="rules"
-          :has-saved-api-key="hasSavedApiKey"
-          :dialogue-open="dialogueOpen"
-          :advanced-open="advancedOpen"
+          :agent-id="agentId"
           :avatar-preview="avatarPreview"
-          :avatar-upload-key="avatarUploadKey"
-          :temperature-slider-label="temperatureSliderLabel"
-          @update:dialogue-open="dialogueOpen = $event"
-          @update:advanced-open="advancedOpen = $event"
-          @avatar-change="onAvatarFileChange"
+          :creator-name="userStore.name"
+          :config-stale="configStale"
+          :chat-enabled="chatEnabled"
+          @request-save="handleSubmit"
         />
-      </n-spin>
+      </div>
     </div>
   </AppPage>
 </template>
@@ -38,15 +56,22 @@ import { useI18n } from 'vue-i18n'
 import { NButton, NSpin } from 'naive-ui'
 import AppPage from '@/components/page/AppPage.vue'
 import AgentFormFields from '@/views/agents/components/AgentFormFields.vue'
+import AgentEditorPreviewPanel from '@/views/agents/components/AgentEditorPreviewPanel.vue'
+import { useUserStore } from '@/store'
 import api from '@/api'
 import {
   emptyForm,
   DEFAULT_AVATAR,
   buildAgentFormRules,
 } from '@/views/agents/composables/agentFormCommon.js'
+import {
+  pickPreviewConfig,
+  previewConfigEqual,
+} from '@/views/agents/composables/useAgentConfigDiff.js'
 
 const { t } = useI18n()
 const route = useRoute()
+const userStore = useUserStore()
 
 const formFieldsRef = ref(null)
 const saving = ref(false)
@@ -58,6 +83,8 @@ const avatarUploadKey = ref(0)
 const dialogueOpen = ref(false)
 const advancedOpen = ref(false)
 const hasSavedApiKey = ref(false)
+const savedSnapshot = ref(null)
+const pendingAvatarChanged = ref(false)
 
 const form = ref(emptyForm())
 const rules = computed(() => buildAgentFormRules(t, { isEdit: true }))
@@ -72,6 +99,19 @@ const temperatureSliderLabel = computed(() => {
   const n = typeof v === 'number' && !Number.isNaN(v) ? v : 0.1
   return n.toFixed(2)
 })
+
+const chatEnabled = computed(() => agentId.value != null && !pageLoading.value)
+
+const configStale = computed(() => {
+  if (!savedSnapshot.value) return false
+  if (pendingAvatarChanged.value) return true
+  if (String(form.value.api_key || '').trim()) return true
+  return !previewConfigEqual(pickPreviewConfig(form.value), savedSnapshot.value)
+})
+
+function snapshotFromForm(f) {
+  return pickPreviewConfig(f)
+}
 
 function revokeAvatarBlobIfAny() {
   if (serverAvatarUrl.value?.startsWith('blob:')) {
@@ -99,6 +139,8 @@ async function loadAgent(id) {
       opening_message: d.opening_message || '',
       temperature: d.temperature ?? 0.1,
     }
+    savedSnapshot.value = snapshotFromForm(form.value)
+    pendingAvatarChanged.value = false
     revokeAvatarBlobIfAny()
     serverAvatarUrl.value = d.avatar_url || ''
     pendingAvatarFile.value = null
@@ -106,6 +148,7 @@ async function loadAgent(id) {
     agentId.value = null
     hasSavedApiKey.value = false
     form.value = emptyForm()
+    savedSnapshot.value = null
     serverAvatarUrl.value = ''
   } finally {
     pageLoading.value = false
@@ -124,11 +167,13 @@ function onAvatarFileChange(options) {
   if (f) {
     revokeAvatarBlobIfAny()
     pendingAvatarFile.value = f
+    pendingAvatarChanged.value = true
     serverAvatarUrl.value = URL.createObjectURL(f)
     avatarUploadKey.value += 1
     return
   }
   pendingAvatarFile.value = null
+  pendingAvatarChanged.value = true
   revokeAvatarBlobIfAny()
   if (agentId.value) {
     loadAgent(agentId.value)
@@ -174,56 +219,4 @@ watch(
 )
 </script>
 
-<style scoped>
-.agent-editor-layout {
-  box-sizing: border-box;
-  width: 100%;
-  padding: 28px 32px 40px;
-}
-
-@media (max-width: 639px) {
-  .agent-editor-layout {
-    padding: 20px 18px 28px;
-  }
-}
-
-.agent-page-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 24px;
-  padding-bottom: 20px;
-  border-bottom: 1px solid var(--n-divider-color);
-}
-
-.agent-page-title {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-  font-size: clamp(26px, 2.8vw, 32px);
-  font-weight: 700;
-  line-height: 1.25;
-  letter-spacing: 0.04em;
-  color: var(--n-text-color);
-}
-
-.agent-page-header-actions {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 12px;
-}
-
-.agent-edit-spin {
-  display: block;
-  width: 100%;
-  min-height: 200px;
-}
-
-.agent-edit-spin :deep(.n-spin-content) {
-  display: block;
-  width: 100%;
-}
-</style>
+<style scoped src="@/views/agents/styles/agent-editor-split.css"></style>

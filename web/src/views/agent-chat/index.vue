@@ -1674,7 +1674,7 @@ html.dark .agent-chat-intro-avatar {
   font-size: 26px;
   font-weight: 700;
   letter-spacing: 0.02em;
-  color: var(--n-text-color);
+  color: var(--primary-color, #f4511e);
 }
 
 .agent-chat-intro-sub {

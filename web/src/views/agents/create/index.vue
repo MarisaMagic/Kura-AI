@@ -1,30 +1,48 @@
 <template>
   <AppPage :show-footer="false" scroll-in-parent class="!p-0">
-    <div class="agent-editor-layout">
-      <header class="agent-page-header">
-        <h1 class="agent-page-title">{{ $t('views.agents.title_create_agent') }}</h1>
-        <div class="agent-page-header-actions">
-          <n-button secondary @click="clearAllConfig">{{ $t('views.agents.button_clear_config') }}</n-button>
-          <n-button type="primary" :loading="saving" @click="handleSubmit">
-            {{ $t('views.agents.button_save_config') }}
-          </n-button>
-        </div>
-      </header>
+    <div class="agent-editor-split">
+      <div class="agent-editor-split__left">
+        <div class="agent-editor-layout">
+          <div class="agent-editor-form-column">
+            <header class="agent-page-header">
+              <h1 class="agent-page-title">{{ $t('views.agents.title_create_agent') }}</h1>
+              <div class="agent-page-header-actions">
+                <n-button secondary @click="clearAllConfig">{{ $t('views.agents.button_clear_config') }}</n-button>
+                <n-button type="primary" :loading="saving" @click="handleSubmit">
+                  {{ $t('views.agents.button_save_config') }}
+                </n-button>
+              </div>
+            </header>
 
-      <AgentFormFields
-        ref="formFieldsRef"
-        :form="form"
-        :rules="rules"
-        :has-saved-api-key="false"
-        :dialogue-open="dialogueOpen"
-        :advanced-open="advancedOpen"
-        :avatar-preview="avatarPreview"
-        :avatar-upload-key="avatarUploadKey"
-        :temperature-slider-label="temperatureSliderLabel"
-        @update:dialogue-open="dialogueOpen = $event"
-        @update:advanced-open="advancedOpen = $event"
-        @avatar-change="onAvatarFileChange"
-      />
+            <AgentFormFields
+              ref="formFieldsRef"
+              :form="form"
+              :rules="rules"
+              :has-saved-api-key="false"
+              :dialogue-open="dialogueOpen"
+              :advanced-open="advancedOpen"
+              :avatar-preview="avatarPreview"
+              :avatar-upload-key="avatarUploadKey"
+              :temperature-slider-label="temperatureSliderLabel"
+              @update:dialogue-open="dialogueOpen = $event"
+              @update:advanced-open="advancedOpen = $event"
+              @avatar-change="onAvatarFileChange"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div class="agent-editor-split__right">
+        <AgentEditorPreviewPanel
+          :form="form"
+          :agent-id="null"
+          :avatar-preview="avatarPreview"
+          :creator-name="userStore.name"
+          :config-stale="false"
+          :chat-enabled="false"
+          @request-save="handleSubmit"
+        />
+      </div>
     </div>
   </AppPage>
 </template>
@@ -37,6 +55,8 @@ import { useI18n } from 'vue-i18n'
 import { NButton } from 'naive-ui'
 import AppPage from '@/components/page/AppPage.vue'
 import AgentFormFields from '@/views/agents/components/AgentFormFields.vue'
+import AgentEditorPreviewPanel from '@/views/agents/components/AgentEditorPreviewPanel.vue'
+import { useUserStore } from '@/store'
 import api from '@/api'
 import {
   CREATE_DRAFT_KEY,
@@ -51,6 +71,7 @@ import {
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
+const userStore = useUserStore()
 
 const formFieldsRef = ref(null)
 const saving = ref(false)
@@ -289,45 +310,4 @@ onBeforeUnmount(() => {
 })
 </script>
 
-<style scoped>
-.agent-editor-layout {
-  box-sizing: border-box;
-  width: 100%;
-  padding: 28px 32px 40px;
-}
-
-@media (max-width: 639px) {
-  .agent-editor-layout {
-    padding: 20px 18px 28px;
-  }
-}
-
-.agent-page-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 24px;
-  padding-bottom: 20px;
-  border-bottom: 1px solid var(--n-divider-color);
-}
-
-.agent-page-title {
-  flex: 1;
-  min-width: 0;
-  margin: 0;
-  font-size: clamp(26px, 2.8vw, 32px);
-  font-weight: 700;
-  line-height: 1.25;
-  letter-spacing: 0.04em;
-  color: var(--n-text-color);
-}
-
-.agent-page-header-actions {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 12px;
-}
-</style>
+<style scoped src="@/views/agents/styles/agent-editor-split.css"></style>

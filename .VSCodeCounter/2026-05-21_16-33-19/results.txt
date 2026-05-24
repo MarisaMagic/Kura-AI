@@ -1,0 +1,386 @@
+Date : 2026-05-21 16:33:19
+Directory : d:\LLMProjects\Kura-AI
+Total : 241 files,  27493 codes, 829 comments, 4395 blanks, all 32717 lines
+
+Languages
++--------------------+------------+------------+------------+------------+------------+
+| language           | files      | code       | comment    | blank      | total      |
++--------------------+------------+------------+------------+------------+------------+
+| Python             |        104 |     10,531 |        546 |      1,788 |     12,865 |
+| Vue                |         53 |      9,307 |        113 |        937 |     10,357 |
+| YAML               |          2 |      4,434 |          0 |      1,292 |      5,726 |
+| JavaScript         |         55 |      1,909 |        167 |        243 |      2,319 |
+| JSON               |          6 |        562 |          0 |         10 |        572 |
+| pip requirements   |          1 |        331 |          0 |          0 |        331 |
+| Markdown           |          2 |        166 |          0 |         91 |        257 |
+| CSS                |          2 |        112 |          0 |         16 |        128 |
+| SCSS               |          1 |         77 |          2 |          8 |         87 |
+| HTML               |          1 |         32 |          1 |          3 |         36 |
+| XML                |         13 |         18 |          0 |          6 |         24 |
+| JSON with Comments |          1 |         14 |          0 |          1 |         15 |
++--------------------+------------+------------+------------+------------+------------+
+
+Directories
++-----------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                                                    | files      | code       | comment    | blank      | total      |
++-----------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                                                       |        241 |     27,493 |        829 |      4,395 |     32,717 |
+| . (Files)                                                                               |          4 |        595 |          0 |         93 |        688 |
+| app                                                                                     |        103 |     10,521 |        546 |      1,785 |     12,852 |
+| app (Files)                                                                             |          1 |         59 |          0 |         11 |         70 |
+| app\api                                                                                 |         22 |      1,253 |         61 |        244 |      1,558 |
+| app\api (Files)                                                                         |          1 |          5 |          0 |          5 |         10 |
+| app\api\v1                                                                              |         21 |      1,248 |         61 |        239 |      1,548 |
+| app\api\v1 (Files)                                                                      |          1 |         24 |          0 |          5 |         29 |
+| app\api\v1\apis                                                                         |          2 |         58 |          0 |         19 |         77 |
+| app\api\v1\auditlog                                                                     |          2 |         48 |          0 |         10 |         58 |
+| app\api\v1\base                                                                         |          2 |        152 |          0 |         25 |        177 |
+| app\api\v1\depts                                                                        |          2 |         41 |          0 |         17 |         58 |
+| app\api\v1\menus                                                                        |          2 |         53 |          0 |         20 |         73 |
+| app\api\v1\multimodal_kb                                                                |          2 |         54 |          5 |         18 |         77 |
+| app\api\v1\roles                                                                        |          2 |         61 |          0 |         22 |         83 |
+| app\api\v1\user_agents                                                                  |          4 |        685 |         56 |         81 |        822 |
+| app\api\v1\users                                                                        |          2 |         72 |          0 |         22 |         94 |
+| app\chat                                                                                |         18 |      3,242 |        130 |        507 |      3,879 |
+| app\controllers                                                                         |          8 |        282 |         13 |         80 |        375 |
+| app\core                                                                                |          7 |        605 |         18 |        115 |        738 |
+| app\kb                                                                                  |         18 |      4,163 |        234 |        552 |      4,949 |
+| app\log                                                                                 |          2 |         17 |          1 |         10 |         28 |
+| app\models                                                                              |          6 |        167 |          1 |         57 |        225 |
+| app\schemas                                                                             |         11 |        414 |          0 |        115 |        529 |
+| app\services                                                                            |          2 |         38 |          0 |         13 |         51 |
+| app\settings                                                                            |          2 |        119 |         87 |         19 |        225 |
+| app\utils                                                                               |          6 |        162 |          1 |         62 |        225 |
+| deploy                                                                                  |          1 |          1 |          0 |          1 |          2 |
+| deploy\sample-picture                                                                   |          1 |          1 |          0 |          1 |          2 |
+| web                                                                                     |        133 |     16,376 |        283 |      2,516 |     19,175 |
+| web (Files)                                                                             |          9 |      4,622 |          1 |      1,307 |      5,930 |
+| web\build                                                                               |          9 |        161 |         43 |         37 |        241 |
+| web\build (Files)                                                                       |          2 |         57 |         27 |         11 |         95 |
+| web\build\config                                                                        |          2 |          6 |          5 |          5 |         16 |
+| web\build\plugin                                                                        |          3 |         72 |         11 |         16 |         99 |
+| web\build\script                                                                        |          2 |         26 |          0 |          5 |         31 |
+| web\i18n                                                                                |          4 |        416 |          0 |          9 |        425 |
+| web\i18n (Files)                                                                        |          1 |         12 |          0 |          5 |         17 |
+| web\i18n\messages                                                                       |          3 |        404 |          0 |          4 |        408 |
+| web\public                                                                              |          4 |        102 |          4 |         16 |        122 |
+| web\public (Files)                                                                      |          2 |          2 |          0 |          2 |          4 |
+| web\public\resource                                                                     |          2 |        100 |          4 |         14 |        118 |
+| web\settings                                                                            |          2 |         34 |          0 |          6 |         40 |
+| web\src                                                                                 |        105 |     11,041 |        235 |      1,141 |     12,417 |
+| web\src (Files)                                                                         |          2 |         34 |          2 |          9 |         45 |
+| web\src\api                                                                             |          1 |         93 |         15 |          2 |        110 |
+| web\src\assets                                                                          |         11 |        245 |          0 |          4 |        249 |
+| web\src\assets\js                                                                       |          1 |        230 |          0 |          1 |        231 |
+| web\src\assets\svg                                                                      |         10 |         15 |          0 |          3 |         18 |
+| web\src\components                                                                      |         14 |        686 |         31 |         76 |        793 |
+| web\src\components\common                                                               |          4 |        263 |         12 |         41 |        316 |
+| web\src\components\icon                                                                 |          4 |        123 |          3 |         16 |        142 |
+| web\src\components\page                                                                 |          2 |         58 |          1 |          5 |         64 |
+| web\src\components\query-bar                                                            |          2 |         57 |          0 |          5 |         62 |
+| web\src\components\table                                                                |          2 |        185 |         15 |          9 |        209 |
+| web\src\composables                                                                     |          2 |         91 |          5 |         11 |        107 |
+| web\src\directives                                                                      |          2 |         33 |          1 |          8 |         42 |
+| web\src\layout                                                                          |         16 |      2,128 |         26 |        264 |      2,418 |
+| web\src\layout (Files)                                                                  |          2 |        151 |          9 |         15 |        175 |
+| web\src\layout\components                                                               |         14 |      1,977 |         17 |        249 |      2,243 |
+| web\src\layout\components (Files)                                                       |          1 |         21 |          0 |          3 |         24 |
+| web\src\layout\components\header                                                        |          6 |        648 |          2 |         93 |        743 |
+| web\src\layout\components\header (Files)                                                |          1 |         76 |          1 |          9 |         86 |
+| web\src\layout\components\header\components                                             |          5 |        572 |          1 |         84 |        657 |
+| web\src\layout\components\sidebar                                                       |          5 |      1,103 |         13 |        134 |      1,250 |
+| web\src\layout\components\sidebar (Files)                                               |          3 |        961 |         11 |        114 |      1,086 |
+| web\src\layout\components\sidebar\components                                            |          2 |        142 |          2 |         20 |        164 |
+| web\src\layout\components\tags                                                          |          2 |        205 |          2 |         19 |        226 |
+| web\src\router                                                                          |          6 |        290 |          8 |         27 |        325 |
+| web\src\router (Files)                                                                  |          1 |         58 |          2 |          8 |         68 |
+| web\src\router\guard                                                                    |          4 |         46 |          2 |         11 |         59 |
+| web\src\router\routes                                                                   |          1 |        186 |          4 |          8 |        198 |
+| web\src\store                                                                           |         10 |        375 |         16 |         27 |        418 |
+| web\src\store (Files)                                                                   |          1 |          5 |          0 |          3 |          8 |
+| web\src\store\modules                                                                   |          9 |        370 |         16 |         24 |        410 |
+| web\src\store\modules (Files)                                                           |          1 |          7 |          0 |          1 |          8 |
+| web\src\store\modules\agent-chat-header                                                 |          1 |         34 |          3 |          2 |         39 |
+| web\src\store\modules\agent-sidebar                                                     |          1 |         11 |          1 |          2 |         14 |
+| web\src\store\modules\app                                                               |          1 |         54 |          3 |          4 |         61 |
+| web\src\store\modules\permission                                                        |          1 |         85 |          5 |          6 |         96 |
+| web\src\store\modules\recent-agents                                                     |          1 |         37 |          3 |          2 |         42 |
+| web\src\store\modules\tags                                                              |          2 |         73 |          0 |          5 |         78 |
+| web\src\store\modules\user                                                              |          1 |         69 |          1 |          2 |         72 |
+| web\src\styles                                                                          |          2 |        107 |          2 |         14 |        123 |
+| web\src\utils                                                                           |         16 |        432 |         72 |         98 |        602 |
+| web\src\utils (Files)                                                                   |          2 |         32 |          4 |          4 |         40 |
+| web\src\utils\auth                                                                      |          3 |         28 |         15 |         10 |         53 |
+| web\src\utils\common                                                                    |          6 |        215 |         49 |         55 |        319 |
+| web\src\utils\http                                                                      |          3 |         94 |          4 |         14 |        112 |
+| web\src\utils\storage                                                                   |          2 |         63 |          0 |         15 |         78 |
+| web\src\views                                                                           |         23 |      6,527 |         57 |        601 |      7,185 |
+| web\src\views\agent-chat                                                                |          2 |      2,382 |         35 |        289 |      2,706 |
+| web\src\views\agent-hub                                                                 |          1 |        327 |          0 |         38 |        365 |
+| web\src\views\agents                                                                    |          6 |      1,380 |          5 |        140 |      1,525 |
+| web\src\views\agents\components                                                         |          2 |        640 |          1 |         74 |        715 |
+| web\src\views\agents\composables                                                        |          1 |         44 |          1 |          6 |         51 |
+| web\src\views\agents\create                                                             |          1 |        304 |          3 |         27 |        334 |
+| web\src\views\agents\edit                                                               |          1 |        210 |          0 |         20 |        230 |
+| web\src\views\agents\knowledge-base                                                     |          1 |        182 |          0 |         13 |        195 |
+| web\src\views\error-page                                                                |          4 |         68 |          0 |          8 |         76 |
+| web\src\views\login                                                                     |          1 |        111 |          0 |         11 |        122 |
+| web\src\views\profile                                                                   |          1 |        234 |          2 |          8 |        244 |
+| web\src\views\register                                                                  |          1 |        121 |          0 |          9 |        130 |
+| web\src\views\system                                                                    |          6 |      1,883 |         15 |         95 |      1,993 |
+| web\src\views\system\api                                                                |          1 |        256 |          1 |         12 |        269 |
+| web\src\views\system\auditlog                                                           |          1 |        265 |          2 |         19 |        286 |
+| web\src\views\system\dept                                                               |          1 |        204 |          1 |         13 |        218 |
+| web\src\views\system\menu                                                               |          1 |        340 |          5 |         16 |        361 |
+| web\src\views\system\role                                                               |          1 |        340 |          3 |         20 |        363 |
+| web\src\views\system\user                                                               |          1 |        478 |          3 |         15 |        496 |
+| web\src\views\workbench                                                                 |          1 |         21 |          0 |          3 |         24 |
++-----------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++-----------------------------------------------------------------------------------------+--------------------+------------+------------+------------+------------+
+| filename                                                                                | language           | code       | comment    | blank      | total      |
++-----------------------------------------------------------------------------------------+--------------------+------------+------------+------------+------------+
+| d:\LLMProjects\Kura-AI\README.md                                                        | Markdown           |        152 |          0 |         84 |        236 |
+| d:\LLMProjects\Kura-AI\app\__init__.py                                                  | Python             |         59 |          0 |         11 |         70 |
+| d:\LLMProjects\Kura-AI\app\api\__init__.py                                              | Python             |          5 |          0 |          5 |         10 |
+| d:\LLMProjects\Kura-AI\app\api\v1\__init__.py                                           | Python             |         24 |          0 |          5 |         29 |
+| d:\LLMProjects\Kura-AI\app\api\v1\apis\__init__.py                                      | Python             |          5 |          0 |          4 |          9 |
+| d:\LLMProjects\Kura-AI\app\api\v1\apis\apis.py                                          | Python             |         53 |          0 |         15 |         68 |
+| d:\LLMProjects\Kura-AI\app\api\v1\auditlog\__init__.py                                  | Python             |          5 |          0 |          4 |          9 |
+| d:\LLMProjects\Kura-AI\app\api\v1\auditlog\auditlog.py                                  | Python             |         43 |          0 |          6 |         49 |
+| d:\LLMProjects\Kura-AI\app\api\v1\base\__init__.py                                      | Python             |          5 |          0 |          4 |          9 |
+| d:\LLMProjects\Kura-AI\app\api\v1\base\base.py                                          | Python             |        147 |          0 |         21 |        168 |
+| d:\LLMProjects\Kura-AI\app\api\v1\depts\__init__.py                                     | Python             |          5 |          0 |          4 |          9 |
+| d:\LLMProjects\Kura-AI\app\api\v1\depts\depts.py                                        | Python             |         36 |          0 |         13 |         49 |
+| d:\LLMProjects\Kura-AI\app\api\v1\menus\__init__.py                                     | Python             |          5 |          0 |          4 |          9 |
+| d:\LLMProjects\Kura-AI\app\api\v1\menus\menus.py                                        | Python             |         48 |          0 |         16 |         64 |
+| d:\LLMProjects\Kura-AI\app\api\v1\multimodal_kb\__init__.py                             | Python             |          3 |          0 |          3 |          6 |
+| d:\LLMProjects\Kura-AI\app\api\v1\multimodal_kb\multimodal_kb.py                        | Python             |         51 |          5 |         15 |         71 |
+| d:\LLMProjects\Kura-AI\app\api\v1\roles\__init__.py                                     | Python             |          5 |          0 |          4 |          9 |
+| d:\LLMProjects\Kura-AI\app\api\v1\roles\roles.py                                        | Python             |         56 |          0 |         18 |         74 |
+| d:\LLMProjects\Kura-AI\app\api\v1\user_agents\__init__.py                               | Python             |          6 |          0 |          4 |         10 |
+| d:\LLMProjects\Kura-AI\app\api\v1\user_agents\chat.py                                   | Python             |        493 |         56 |         48 |        597 |
+| d:\LLMProjects\Kura-AI\app\api\v1\user_agents\kb.py                                     | Python             |         73 |          0 |         12 |         85 |
+| d:\LLMProjects\Kura-AI\app\api\v1\user_agents\user_agents.py                            | Python             |        113 |          0 |         17 |        130 |
+| d:\LLMProjects\Kura-AI\app\api\v1\users\__init__.py                                     | Python             |          5 |          0 |          4 |          9 |
+| d:\LLMProjects\Kura-AI\app\api\v1\users\users.py                                        | Python             |         67 |          0 |         18 |         85 |
+| d:\LLMProjects\Kura-AI\app\chat\__init__.py                                             | Python             |          1 |          0 |          1 |          2 |
+| d:\LLMProjects\Kura-AI\app\chat\agent_service.py                                        | Python             |        643 |         40 |         78 |        761 |
+| d:\LLMProjects\Kura-AI\app\chat\attachment_bm25_search.py                               | Python             |        207 |          1 |         27 |        235 |
+| d:\LLMProjects\Kura-AI\app\chat\attachment_service.py                                   | Python             |        442 |          4 |         65 |        511 |
+| d:\LLMProjects\Kura-AI\app\chat\attachment_tools.py                                     | Python             |         66 |          0 |         12 |         78 |
+| d:\LLMProjects\Kura-AI\app\chat\cache.py                                                | Python             |         82 |          0 |         18 |        100 |
+| d:\LLMProjects\Kura-AI\app\chat\chat_job.py                                             | Python             |        207 |         21 |         41 |        269 |
+| d:\LLMProjects\Kura-AI\app\chat\database.py                                             | Python             |         58 |          2 |         22 |         82 |
+| d:\LLMProjects\Kura-AI\app\chat\db_models.py                                            | Python             |        207 |          7 |         43 |        257 |
+| d:\LLMProjects\Kura-AI\app\chat\memory_archive.py                                       | Python             |        230 |          3 |         40 |        273 |
+| d:\LLMProjects\Kura-AI\app\chat\memory_scope.py                                         | Python             |          7 |          0 |          3 |         10 |
+| d:\LLMProjects\Kura-AI\app\chat\memory_search.py                                        | Python             |        180 |          0 |         24 |        204 |
+| d:\LLMProjects\Kura-AI\app\chat\memory_tool.py                                          | Python             |         75 |          3 |         12 |         90 |
+| d:\LLMProjects\Kura-AI\app\chat\memory_turns.py                                         | Python             |         55 |          0 |         10 |         65 |
+| d:\LLMProjects\Kura-AI\app\chat\message_codec.py                                        | Python             |        147 |          1 |         19 |        167 |
+| d:\LLMProjects\Kura-AI\app\chat\milvus_memory.py                                        | Python             |        181 |          0 |         29 |        210 |
+| d:\LLMProjects\Kura-AI\app\chat\storage.py                                              | Python             |        356 |         48 |         34 |        438 |
+| d:\LLMProjects\Kura-AI\app\chat\tools.py                                                | Python             |         98 |          0 |         29 |        127 |
+| d:\LLMProjects\Kura-AI\app\controllers\__init__.py                                      | Python             |          2 |          0 |          1 |          3 |
+| d:\LLMProjects\Kura-AI\app\controllers\api.py                                           | Python             |         35 |          2 |          9 |         46 |
+| d:\LLMProjects\Kura-AI\app\controllers\dept.py                                          | Python             |         62 |         11 |         14 |         87 |
+| d:\LLMProjects\Kura-AI\app\controllers\menu.py                                          | Python             |         10 |          0 |          7 |         17 |
+| d:\LLMProjects\Kura-AI\app\controllers\role.py                                          | Python             |         19 |          0 |          9 |         28 |
+| d:\LLMProjects\Kura-AI\app\controllers\user.py                                          | Python             |        100 |          0 |         20 |        120 |
+| d:\LLMProjects\Kura-AI\app\controllers\user_agent.py                                    | Python             |         11 |          0 |          8 |         19 |
+| d:\LLMProjects\Kura-AI\app\controllers\user_agent_recent.py                             | Python             |         43 |          0 |         12 |         55 |
+| d:\LLMProjects\Kura-AI\app\core\bgtask.py                                               | Python             |         24 |          0 |          8 |         32 |
+| d:\LLMProjects\Kura-AI\app\core\crud.py                                                 | Python             |         36 |          0 |         10 |         46 |
+| d:\LLMProjects\Kura-AI\app\core\ctx.py                                                  | Python             |          4 |          0 |          3 |          7 |
+| d:\LLMProjects\Kura-AI\app\core\dependency.py                                           | Python             |         49 |          3 |          9 |         61 |
+| d:\LLMProjects\Kura-AI\app\core\exceptions.py                                           | Python             |         31 |          0 |         13 |         44 |
+| d:\LLMProjects\Kura-AI\app\core\init_app.py                                             | Python             |        301 |          6 |         37 |        344 |
+| d:\LLMProjects\Kura-AI\app\core\middlewares.py                                          | Python             |        160 |          9 |         35 |        204 |
+| d:\LLMProjects\Kura-AI\app\kb\__init__.py                                               | Python             |          3 |          0 |          3 |          6 |
+| d:\LLMProjects\Kura-AI\app\kb\embedding.py                                              | Python             |        136 |          0 |         14 |        150 |
+| d:\LLMProjects\Kura-AI\app\kb\image_search_tool.py                                      | Python             |        125 |          0 |         19 |        144 |
+| d:\LLMProjects\Kura-AI\app\kb\image_store.py                                            | Python             |        296 |         13 |         37 |        346 |
+| d:\LLMProjects\Kura-AI\app\kb\kb_document_preselect.py                                  | Python             |        127 |          3 |         23 |        153 |
+| d:\LLMProjects\Kura-AI\app\kb\kb_preselect_context.py                                   | Python             |         87 |          0 |         21 |        108 |
+| d:\LLMProjects\Kura-AI\app\kb\kb_scope.py                                               | Python             |         10 |          0 |          3 |         13 |
+| d:\LLMProjects\Kura-AI\app\kb\kb_service.py                                             | Python             |        220 |         20 |         32 |        272 |
+| d:\LLMProjects\Kura-AI\app\kb\kb_tool_formatting.py                                     | Python             |         99 |          0 |         21 |        120 |
+| d:\LLMProjects\Kura-AI\app\kb\milvus_client.py                                          | Python             |        472 |          6 |         36 |        514 |
+| d:\LLMProjects\Kura-AI\app\kb\multimodal_document_loader.py                             | Python             |        648 |         74 |         93 |        815 |
+| d:\LLMProjects\Kura-AI\app\kb\multimodal_embedding.py                                   | Python             |        275 |         25 |         56 |        356 |
+| d:\LLMProjects\Kura-AI\app\kb\multimodal_milvus_writer.py                               | Python             |        128 |         16 |         24 |        168 |
+| d:\LLMProjects\Kura-AI\app\kb\parent_chunk_store.py                                     | Python             |        150 |         26 |         11 |        187 |
+| d:\LLMProjects\Kura-AI\app\kb\rag_image_pipeline.py                                     | Python             |        135 |          0 |         21 |        156 |
+| d:\LLMProjects\Kura-AI\app\kb\rag_pipeline.py                                           | Python             |        472 |         17 |         53 |        542 |
+| d:\LLMProjects\Kura-AI\app\kb\rag_utils.py                                              | Python             |        691 |         34 |         66 |        791 |
+| d:\LLMProjects\Kura-AI\app\kb\search_tool.py                                            | Python             |         89 |          0 |         19 |        108 |
+| d:\LLMProjects\Kura-AI\app\log\__init__.py                                              | Python             |          1 |          0 |          1 |          2 |
+| d:\LLMProjects\Kura-AI\app\log\log.py                                                   | Python             |         16 |          1 |          9 |         26 |
+| d:\LLMProjects\Kura-AI\app\models\__init__.py                                           | Python             |          3 |          1 |          1 |          5 |
+| d:\LLMProjects\Kura-AI\app\models\admin.py                                              | Python             |         69 |          0 |         22 |         91 |
+| d:\LLMProjects\Kura-AI\app\models\base.py                                               | Python             |         46 |          0 |         17 |         63 |
+| d:\LLMProjects\Kura-AI\app\models\enums.py                                              | Python             |         14 |          0 |          6 |         20 |
+| d:\LLMProjects\Kura-AI\app\models\user_agent.py                                         | Python             |         21 |          0 |          5 |         26 |
+| d:\LLMProjects\Kura-AI\app\models\user_agent_recent.py                                  | Python             |         14 |          0 |          6 |         20 |
+| d:\LLMProjects\Kura-AI\app\schemas\__init__.py                                          | Python             |          1 |          0 |          1 |          2 |
+| d:\LLMProjects\Kura-AI\app\schemas\agent_chat.py                                        | Python             |        126 |          0 |         25 |        151 |
+| d:\LLMProjects\Kura-AI\app\schemas\apis.py                                              | Python             |         10 |          0 |          8 |         18 |
+| d:\LLMProjects\Kura-AI\app\schemas\base.py                                              | Python             |         45 |          0 |          8 |         53 |
+| d:\LLMProjects\Kura-AI\app\schemas\depts.py                                             | Python             |         11 |          0 |          8 |         19 |
+| d:\LLMProjects\Kura-AI\app\schemas\kb.py                                                | Python             |         42 |          0 |         12 |         54 |
+| d:\LLMProjects\Kura-AI\app\schemas\login.py                                             | Python             |         34 |          0 |         12 |         46 |
+| d:\LLMProjects\Kura-AI\app\schemas\menus.py                                             | Python             |         43 |          0 |         10 |         53 |
+| d:\LLMProjects\Kura-AI\app\schemas\roles.py                                             | Python             |         23 |          0 |         10 |         33 |
+| d:\LLMProjects\Kura-AI\app\schemas\user_agent.py                                        | Python             |         45 |          0 |         10 |         55 |
+| d:\LLMProjects\Kura-AI\app\schemas\users.py                                             | Python             |         34 |          0 |         11 |         45 |
+| d:\LLMProjects\Kura-AI\app\services\__init__.py                                         | Python             |          0 |          0 |          1 |          1 |
+| d:\LLMProjects\Kura-AI\app\services\agent_api_key.py                                    | Python             |         38 |          0 |         12 |         50 |
+| d:\LLMProjects\Kura-AI\app\settings\__init__.py                                         | Python             |          2 |          0 |          2 |          4 |
+| d:\LLMProjects\Kura-AI\app\settings\config.py                                           | Python             |        117 |         87 |         17 |        221 |
+| d:\LLMProjects\Kura-AI\app\utils\api_key_crypto.py                                      | Python             |         24 |          0 |         13 |         37 |
+| d:\LLMProjects\Kura-AI\app\utils\auth_rate_limit.py                                     | Python             |         29 |          0 |          8 |         37 |
+| d:\LLMProjects\Kura-AI\app\utils\avatar.py                                              | Python             |         17 |          0 |         10 |         27 |
+| d:\LLMProjects\Kura-AI\app\utils\jwt_utils.py                                           | Python             |          7 |          0 |          4 |         11 |
+| d:\LLMProjects\Kura-AI\app\utils\password.py                                            | Python             |         40 |          0 |         12 |         52 |
+| d:\LLMProjects\Kura-AI\app\utils\user_agent_avatar.py                                   | Python             |         45 |          1 |         15 |         61 |
+| d:\LLMProjects\Kura-AI\deploy\sample-picture\logo.svg                                   | XML                |          1 |          0 |          1 |          2 |
+| d:\LLMProjects\Kura-AI\docker-compose.yml                                               | YAML               |        102 |          0 |          6 |        108 |
+| d:\LLMProjects\Kura-AI\requirements.txt                                                 | pip requirements   |        331 |          0 |          0 |        331 |
+| d:\LLMProjects\Kura-AI\run.py                                                           | Python             |         10 |          0 |          3 |         13 |
+| d:\LLMProjects\Kura-AI\web\.eslint-global-variables.json                                | JSON               |         62 |          0 |          1 |         63 |
+| d:\LLMProjects\Kura-AI\web\.prettierrc.json                                             | JSON               |          6 |          0 |          1 |          7 |
+| d:\LLMProjects\Kura-AI\web\README.md                                                    | Markdown           |         14 |          0 |          7 |         21 |
+| d:\LLMProjects\Kura-AI\web\build\config\define.js                                       | JavaScript         |          5 |          5 |          4 |         14 |
+| d:\LLMProjects\Kura-AI\web\build\config\index.js                                        | JavaScript         |          1 |          0 |          1 |          2 |
+| d:\LLMProjects\Kura-AI\web\build\constant.js                                            | JavaScript         |          7 |         15 |          2 |         24 |
+| d:\LLMProjects\Kura-AI\web\build\plugin\html.js                                         | JavaScript         |         13 |          0 |          3 |         16 |
+| d:\LLMProjects\Kura-AI\web\build\plugin\index.js                                        | JavaScript         |         22 |          6 |          8 |         36 |
+| d:\LLMProjects\Kura-AI\web\build\plugin\unplugin.js                                     | JavaScript         |         37 |          5 |          5 |         47 |
+| d:\LLMProjects\Kura-AI\web\build\script\build-cname.js                                  | JavaScript         |         14 |          0 |          2 |         16 |
+| d:\LLMProjects\Kura-AI\web\build\script\index.js                                        | JavaScript         |         12 |          0 |          3 |         15 |
+| d:\LLMProjects\Kura-AI\web\build\utils.js                                               | JavaScript         |         50 |         12 |          9 |         71 |
+| d:\LLMProjects\Kura-AI\web\i18n\index.js                                                | JavaScript         |         12 |          0 |          5 |         17 |
+| d:\LLMProjects\Kura-AI\web\i18n\messages\cn.json                                        | JSON               |        199 |          0 |          1 |        200 |
+| d:\LLMProjects\Kura-AI\web\i18n\messages\en.json                                        | JSON               |        199 |          0 |          1 |        200 |
+| d:\LLMProjects\Kura-AI\web\i18n\messages\index.js                                       | JavaScript         |          6 |          0 |          2 |          8 |
+| d:\LLMProjects\Kura-AI\web\index.html                                                   | HTML               |         32 |          1 |          3 |         36 |
+| d:\LLMProjects\Kura-AI\web\jsconfig.json                                                | JSON with Comments |         14 |          0 |          1 |         15 |
+| d:\LLMProjects\Kura-AI\web\package.json                                                 | JSON               |         63 |          0 |          1 |         64 |
+| d:\LLMProjects\Kura-AI\web\pnpm-lock.yaml                                               | YAML               |      4,332 |          0 |      1,286 |      5,618 |
+| d:\LLMProjects\Kura-AI\web\public\favicon.svg                                           | XML                |          1 |          0 |          1 |          2 |
+| d:\LLMProjects\Kura-AI\web\public\logo.svg                                              | XML                |          1 |          0 |          1 |          2 |
+| d:\LLMProjects\Kura-AI\web\public\resource\loading.css                                  | CSS                |         82 |          0 |         10 |         92 |
+| d:\LLMProjects\Kura-AI\web\public\resource\loading.js                                   | JavaScript         |         18 |          4 |          4 |         26 |
+| d:\LLMProjects\Kura-AI\web\settings\index.js                                            | JavaScript         |          1 |          0 |          1 |          2 |
+| d:\LLMProjects\Kura-AI\web\settings\theme.json                                          | JSON               |         33 |          0 |          5 |         38 |
+| d:\LLMProjects\Kura-AI\web\src\App.vue                                                  | Vue                |         10 |          0 |          2 |         12 |
+| d:\LLMProjects\Kura-AI\web\src\api\index.js                                             | JavaScript         |         93 |         15 |          2 |        110 |
+| d:\LLMProjects\Kura-AI\web\src\assets\js\icons.js                                       | JavaScript         |        230 |          0 |          1 |        231 |
+| d:\LLMProjects\Kura-AI\web\src\assets\svg\agent.svg                                     | XML                |          6 |          0 |          1 |          7 |
+| d:\LLMProjects\Kura-AI\web\src\assets\svg\forbidden.svg                                 | XML                |          1 |          0 |          0 |          1 |
+| d:\LLMProjects\Kura-AI\web\src\assets\svg\front-page.svg                                | XML                |          1 |          0 |          1 |          2 |
+| d:\LLMProjects\Kura-AI\web\src\assets\svg\logo.svg                                      | XML                |          1 |          0 |          1 |          2 |
+| d:\LLMProjects\Kura-AI\web\src\assets\svg\network-error.svg                             | XML                |          1 |          0 |          0 |          1 |
+| d:\LLMProjects\Kura-AI\web\src\assets\svg\no-data.svg                                   | XML                |          1 |          0 |          0 |          1 |
+| d:\LLMProjects\Kura-AI\web\src\assets\svg\not-found.svg                                 | XML                |          1 |          0 |          0 |          1 |
+| d:\LLMProjects\Kura-AI\web\src\assets\svg\server-error.svg                              | XML                |          1 |          0 |          0 |          1 |
+| d:\LLMProjects\Kura-AI\web\src\assets\svg\service-unavailable.svg                       | XML                |          1 |          0 |          0 |          1 |
+| d:\LLMProjects\Kura-AI\web\src\assets\svg\unauthorized.svg                              | XML                |          1 |          0 |          0 |          1 |
+| d:\LLMProjects\Kura-AI\web\src\components\common\AppFooter.vue                          | Vue                |          3 |          0 |          1 |          4 |
+| d:\LLMProjects\Kura-AI\web\src\components\common\AppProvider.vue                        | Vue                |         60 |          1 |          7 |         68 |
+| d:\LLMProjects\Kura-AI\web\src\components\common\LoadingEmptyWrapper.vue                | Vue                |         67 |          3 |         13 |         83 |
+| d:\LLMProjects\Kura-AI\web\src\components\common\ScrollX.vue                            | Vue                |        133 |          8 |         20 |        161 |
+| d:\LLMProjects\Kura-AI\web\src\components\icon\CustomIcon.vue                           | Vue                |         19 |          2 |          2 |         23 |
+| d:\LLMProjects\Kura-AI\web\src\components\icon\IconPicker.vue                           | Vue                |         62 |          1 |          8 |         71 |
+| d:\LLMProjects\Kura-AI\web\src\components\icon\SvgIcon.vue                              | Vue                |         22 |          0 |          3 |         25 |
+| d:\LLMProjects\Kura-AI\web\src\components\icon\TheIcon.vue                              | Vue                |         20 |          0 |          3 |         23 |
+| d:\LLMProjects\Kura-AI\web\src\components\page\AppPage.vue                              | Vue                |         27 |          1 |          2 |         30 |
+| d:\LLMProjects\Kura-AI\web\src\components\page\CommonPage.vue                           | Vue                |         31 |          0 |          3 |         34 |
+| d:\LLMProjects\Kura-AI\web\src\components\query-bar\QueryBar.vue                        | Vue                |         25 |          0 |          2 |         27 |
+| d:\LLMProjects\Kura-AI\web\src\components\query-bar\QueryBarItem.vue                    | Vue                |         32 |          0 |          3 |         35 |
+| d:\LLMProjects\Kura-AI\web\src\components\table\CrudModal.vue                           | Vue                |         54 |          0 |          3 |         57 |
+| d:\LLMProjects\Kura-AI\web\src\components\table\CrudTable.vue                           | Vue                |        131 |         15 |          6 |        152 |
+| d:\LLMProjects\Kura-AI\web\src\composables\index.js                                     | JavaScript         |          1 |          0 |          1 |          2 |
+| d:\LLMProjects\Kura-AI\web\src\composables\useCRUD.js                                   | JavaScript         |         90 |          5 |         10 |        105 |
+| d:\LLMProjects\Kura-AI\web\src\directives\index.js                                      | JavaScript         |          4 |          1 |          2 |          7 |
+| d:\LLMProjects\Kura-AI\web\src\directives\permission.js                                 | JavaScript         |         29 |          0 |          6 |         35 |
+| d:\LLMProjects\Kura-AI\web\src\layout\AgentEditorLayout.vue                             | Vue                |         66 |          1 |          5 |         72 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\AppMain.vue                            | Vue                |         21 |          0 |          3 |         24 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\header\components\AgentChatTitle.vue   | Vue                |        490 |          1 |         68 |        559 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\header\components\FullScreen.vue       | Vue                |         12 |          0 |          3 |         15 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\header\components\MenuCollapse.vue     | Vue                |         10 |          0 |          3 |         13 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\header\components\ThemeMode.vue        | Vue                |         16 |          0 |          3 |         19 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\header\components\UserAvatar.vue       | Vue                |         44 |          0 |          7 |         51 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\header\index.vue                       | Vue                |         76 |          1 |          9 |         86 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\sidebar\SidebarAgentBlock.vue          | Vue                |        305 |          1 |         42 |        348 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\sidebar\SidebarRecentConversations.vue | Vue                |        576 |          6 |         59 |        641 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\sidebar\components\SideLogo.vue        | Vue                |         22 |          0 |          3 |         25 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\sidebar\components\SideMenu.vue        | Vue                |        120 |          2 |         17 |        139 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\sidebar\index.vue                      | Vue                |         80 |          4 |         13 |         97 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\tags\ContextMenu.vue                   | Vue                |        114 |          1 |          9 |        124 |
+| d:\LLMProjects\Kura-AI\web\src\layout\components\tags\index.vue                         | Vue                |         91 |          1 |         10 |        102 |
+| d:\LLMProjects\Kura-AI\web\src\layout\index.vue                                         | Vue                |         85 |          8 |         10 |        103 |
+| d:\LLMProjects\Kura-AI\web\src\main.js                                                  | JavaScript         |         24 |          2 |          7 |         33 |
+| d:\LLMProjects\Kura-AI\web\src\router\guard\auth-guard.js                               | JavaScript         |         14 |          2 |          4 |         20 |
+| d:\LLMProjects\Kura-AI\web\src\router\guard\index.js                                    | JavaScript         |          8 |          0 |          2 |         10 |
+| d:\LLMProjects\Kura-AI\web\src\router\guard\page-loading-guard.js                       | JavaScript         |         13 |          0 |          3 |         16 |
+| d:\LLMProjects\Kura-AI\web\src\router\guard\page-title-guard.js                         | JavaScript         |         11 |          0 |          2 |         13 |
+| d:\LLMProjects\Kura-AI\web\src\router\index.js                                          | JavaScript         |         58 |          2 |          8 |         68 |
+| d:\LLMProjects\Kura-AI\web\src\router\routes\index.js                                   | JavaScript         |        186 |          4 |          8 |        198 |
+| d:\LLMProjects\Kura-AI\web\src\store\index.js                                           | JavaScript         |          5 |          0 |          3 |          8 |
+| d:\LLMProjects\Kura-AI\web\src\store\modules\agent-chat-header\index.js                 | JavaScript         |         34 |          3 |          2 |         39 |
+| d:\LLMProjects\Kura-AI\web\src\store\modules\agent-sidebar\index.js                     | JavaScript         |         11 |          1 |          2 |         14 |
+| d:\LLMProjects\Kura-AI\web\src\store\modules\app\index.js                               | JavaScript         |         54 |          3 |          4 |         61 |
+| d:\LLMProjects\Kura-AI\web\src\store\modules\index.js                                   | JavaScript         |          7 |          0 |          1 |          8 |
+| d:\LLMProjects\Kura-AI\web\src\store\modules\permission\index.js                        | JavaScript         |         85 |          5 |          6 |         96 |
+| d:\LLMProjects\Kura-AI\web\src\store\modules\recent-agents\index.js                     | JavaScript         |         37 |          3 |          2 |         42 |
+| d:\LLMProjects\Kura-AI\web\src\store\modules\tags\helpers.js                            | JavaScript         |          4 |          0 |          3 |          7 |
+| d:\LLMProjects\Kura-AI\web\src\store\modules\tags\index.js                              | JavaScript         |         69 |          0 |          2 |         71 |
+| d:\LLMProjects\Kura-AI\web\src\store\modules\user\index.js                              | JavaScript         |         69 |          1 |          2 |         72 |
+| d:\LLMProjects\Kura-AI\web\src\styles\global.scss                                       | SCSS               |         77 |          2 |          8 |         87 |
+| d:\LLMProjects\Kura-AI\web\src\styles\reset.css                                         | CSS                |         30 |          0 |          6 |         36 |
+| d:\LLMProjects\Kura-AI\web\src\utils\agentChatMarkdown.js                               | JavaScript         |         28 |          4 |          3 |         35 |
+| d:\LLMProjects\Kura-AI\web\src\utils\auth\auth.js                                       | JavaScript         |         15 |          0 |          3 |         18 |
+| d:\LLMProjects\Kura-AI\web\src\utils\auth\index.js                                      | JavaScript         |          2 |          0 |          1 |          3 |
+| d:\LLMProjects\Kura-AI\web\src\utils\auth\token.js                                      | JavaScript         |         11 |         15 |          6 |         32 |
+| d:\LLMProjects\Kura-AI\web\src\utils\common\common.js                                   | JavaScript         |         42 |         29 |          6 |         77 |
+| d:\LLMProjects\Kura-AI\web\src\utils\common\icon.js                                     | JavaScript         |         10 |          0 |          3 |         13 |
+| d:\LLMProjects\Kura-AI\web\src\utils\common\index.js                                    | JavaScript         |          5 |          0 |          1 |          6 |
+| d:\LLMProjects\Kura-AI\web\src\utils\common\is.js                                       | JavaScript         |         80 |         12 |         28 |        120 |
+| d:\LLMProjects\Kura-AI\web\src\utils\common\naiveTools.js                               | JavaScript         |         59 |          8 |         13 |         80 |
+| d:\LLMProjects\Kura-AI\web\src\utils\common\useResize.js                                | JavaScript         |         19 |          0 |          4 |         23 |
+| d:\LLMProjects\Kura-AI\web\src\utils\http\helpers.js                                    | JavaScript         |         29 |          0 |          3 |         32 |
+| d:\LLMProjects\Kura-AI\web\src\utils\http\index.js                                      | JavaScript         |         17 |          0 |          3 |         20 |
+| d:\LLMProjects\Kura-AI\web\src\utils\http\interceptors.js                               | JavaScript         |         48 |          4 |          8 |         60 |
+| d:\LLMProjects\Kura-AI\web\src\utils\index.js                                           | JavaScript         |          4 |          0 |          1 |          5 |
+| d:\LLMProjects\Kura-AI\web\src\utils\storage\index.js                                   | JavaScript         |         16 |          0 |          6 |         22 |
+| d:\LLMProjects\Kura-AI\web\src\utils\storage\storage.js                                 | JavaScript         |         47 |          0 |          9 |         56 |
+| d:\LLMProjects\Kura-AI\web\src\views\agent-chat\ChatAttachmentItem.vue                  | Vue                |        179 |          0 |         24 |        203 |
+| d:\LLMProjects\Kura-AI\web\src\views\agent-chat\index.vue                               | Vue                |      2,203 |         35 |        265 |      2,503 |
+| d:\LLMProjects\Kura-AI\web\src\views\agent-hub\index.vue                                | Vue                |        327 |          0 |         38 |        365 |
+| d:\LLMProjects\Kura-AI\web\src\views\agents\components\AgentAvatarCropModal.vue         | Vue                |        266 |          1 |         36 |        303 |
+| d:\LLMProjects\Kura-AI\web\src\views\agents\components\AgentFormFields.vue              | Vue                |        374 |          0 |         38 |        412 |
+| d:\LLMProjects\Kura-AI\web\src\views\agents\composables\agentFormCommon.js              | JavaScript         |         44 |          1 |          6 |         51 |
+| d:\LLMProjects\Kura-AI\web\src\views\agents\create\index.vue                            | Vue                |        304 |          3 |         27 |        334 |
+| d:\LLMProjects\Kura-AI\web\src\views\agents\edit\index.vue                              | Vue                |        210 |          0 |         20 |        230 |
+| d:\LLMProjects\Kura-AI\web\src\views\agents\knowledge-base\index.vue                    | Vue                |        182 |          0 |         13 |        195 |
+| d:\LLMProjects\Kura-AI\web\src\views\error-page\401.vue                                 | Vue                |         17 |          0 |          2 |         19 |
+| d:\LLMProjects\Kura-AI\web\src\views\error-page\403.vue                                 | Vue                |         17 |          0 |          2 |         19 |
+| d:\LLMProjects\Kura-AI\web\src\views\error-page\404.vue                                 | Vue                |         17 |          0 |          2 |         19 |
+| d:\LLMProjects\Kura-AI\web\src\views\error-page\500.vue                                 | Vue                |         17 |          0 |          2 |         19 |
+| d:\LLMProjects\Kura-AI\web\src\views\login\index.vue                                    | Vue                |        111 |          0 |         11 |        122 |
+| d:\LLMProjects\Kura-AI\web\src\views\profile\index.vue                                  | Vue                |        234 |          2 |          8 |        244 |
+| d:\LLMProjects\Kura-AI\web\src\views\register\index.vue                                 | Vue                |        121 |          0 |          9 |        130 |
+| d:\LLMProjects\Kura-AI\web\src\views\system\api\index.vue                               | Vue                |        256 |          1 |         12 |        269 |
+| d:\LLMProjects\Kura-AI\web\src\views\system\auditlog\index.vue                          | Vue                |        265 |          2 |         19 |        286 |
+| d:\LLMProjects\Kura-AI\web\src\views\system\dept\index.vue                              | Vue                |        204 |          1 |         13 |        218 |
+| d:\LLMProjects\Kura-AI\web\src\views\system\menu\index.vue                              | Vue                |        340 |          5 |         16 |        361 |
+| d:\LLMProjects\Kura-AI\web\src\views\system\role\index.vue                              | Vue                |        340 |          3 |         20 |        363 |
+| d:\LLMProjects\Kura-AI\web\src\views\system\user\index.vue                              | Vue                |        478 |          3 |         15 |        496 |
+| d:\LLMProjects\Kura-AI\web\src\views\workbench\index.vue                                | Vue                |         21 |          0 |          3 |         24 |
+| d:\LLMProjects\Kura-AI\web\unocss.config.js                                             | JavaScript         |         59 |          0 |          2 |         61 |
+| d:\LLMProjects\Kura-AI\web\vite.config.js                                               | JavaScript         |         40 |          0 |          5 |         45 |
+| Total                                                                                   |                    |     27,493 |        829 |      4,395 |     32,717 |
++-----------------------------------------------------------------------------------------+--------------------+------------+------------+------------+------------+

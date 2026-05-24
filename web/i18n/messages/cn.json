@@ -155,7 +155,22 @@
       "chat_sidebar_empty": "暂无对话",
       "chat_sidebar_delete": "删除会话",
       "chat_sidebar_load_more": "加载更多…",
-      "chat_sidebar_no_recent_agents": "暂无最近使用，请从智能体中心进入对话"
+      "chat_sidebar_no_recent_agents": "暂无最近使用，请从智能体中心进入对话",
+      "preview_title": "调试与预览",
+      "preview_button_refresh": "刷新预览",
+      "preview_button_clear": "清空对话",
+      "preview_tab_chat": "试聊",
+      "preview_tab_snapshot": "配置快照",
+      "preview_config_stale_title": "配置未同步",
+      "preview_config_stale": "左侧表单有未保存的修改，试聊仍使用已保存的配置。请先保存后再试聊。",
+      "preview_config_stale_short": "请先保存配置后再试聊",
+      "preview_save_to_chat": "保存智能体后可在此试聊调试",
+      "preview_chat_intro_hint": "在下方输入问题，测试当前智能体效果",
+      "preview_snapshot_model": "模型与参数",
+      "preview_snapshot_capabilities": "能力开关",
+      "preview_snapshot_system_prompt": "生效 System Prompt 预览",
+      "preview_snapshot_default": "（默认）",
+      "preview_snapshot_no_capabilities": "未开启额外能力"
     },
     "profile": {
       "label_profile": "个人中心",

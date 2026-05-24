@@ -1,0 +1,95 @@
+.agent-editor-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: stretch;
+  width: 100%;
+  min-height: calc(100dvh - 57px);
+}
+
+.agent-editor-split__left {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.agent-editor-split__right {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: calc(100dvh - 57px);
+  min-width: 0;
+  border-left: 1px solid var(--n-divider-color);
+  overflow: hidden;
+}
+
+/* 占满左栏，避免表单与预览区之间出现空白 */
+.agent-editor-form-column {
+  width: 100%;
+  max-width: none;
+}
+
+.agent-editor-layout {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 28px 32px 40px;
+}
+
+@media (max-width: 639px) {
+  .agent-editor-layout {
+    padding: 20px 18px 28px;
+  }
+}
+
+.agent-page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--n-divider-color);
+}
+
+.agent-page-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: clamp(26px, 2.8vw, 32px);
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: 0.04em;
+  color: var(--n-text-color);
+}
+
+.agent-page-header-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.agent-edit-spin {
+  display: block;
+  width: 100%;
+  min-height: 200px;
+}
+
+.agent-edit-spin :deep(.n-spin-content) {
+  display: block;
+  width: 100%;
+}
+
+@media (max-width: 1023px) {
+  .agent-editor-split {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-editor-split__right {
+    position: static;
+    height: min(72vh, 640px);
+    border-left: none;
+    border-top: 1px solid var(--n-divider-color);
+  }
+}

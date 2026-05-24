@@ -226,7 +226,6 @@ defineExpose({
 <style scoped>
 .agent-form {
   width: 100%;
-  max-width: 720px;
   font-size: 15px;
 }
 

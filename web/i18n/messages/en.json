@@ -155,7 +155,22 @@
       "chat_sidebar_empty": "No conversations yet",
       "chat_sidebar_delete": "Delete conversation",
       "chat_sidebar_load_more": "Load more…",
-      "chat_sidebar_no_recent_agents": "No recent agents yet. Open a chat from the agent hub."
+      "chat_sidebar_no_recent_agents": "No recent agents yet. Open a chat from the agent hub.",
+      "preview_title": "Debug & preview",
+      "preview_button_refresh": "Refresh preview",
+      "preview_button_clear": "Clear chat",
+      "preview_tab_chat": "Try chat",
+      "preview_tab_snapshot": "Config snapshot",
+      "preview_config_stale_title": "Unsaved changes",
+      "preview_config_stale": "The form has unsaved edits. Preview chat still uses the saved configuration. Save first, then try again.",
+      "preview_config_stale_short": "Save configuration before trying chat",
+      "preview_save_to_chat": "Save the agent to try chat here",
+      "preview_chat_intro_hint": "Enter a question below to test this agent",
+      "preview_snapshot_model": "Model & parameters",
+      "preview_snapshot_capabilities": "Capabilities",
+      "preview_snapshot_system_prompt": "Effective system prompt preview",
+      "preview_snapshot_default": "(default)",
+      "preview_snapshot_no_capabilities": "No extra capabilities enabled"
     },
     "profile": {
       "label_profile": "Profile",
