@@ -14,6 +14,10 @@ from app.chat.database import SessionLocal
 from app.chat.db_models import ChatMessage as ChatMessageRow
 from app.chat.db_models import ChatSession as ChatSessionRow
 from app.chat.message_codec import envelope_to_langchain_message, msg_content_to_str, serialize_message_envelope
+from app.chat.preview_session import (
+    EDITOR_PREVIEW_SESSION_PREFIX,
+    is_editor_preview_session,
+)
 
 
 class ConversationStorage:
@@ -241,9 +245,9 @@ class ConversationStorage:
         :return: 会话列表
         """
         cached = cache.get_json(self._sessions_cache_key(user_id, agent_id))
-        # 1. 检查 Redis 缓存, 如果存在则直接返回
+        # 1. 检查 Redis 缓存, 如果存在则直接返回（剔除编辑器试聊会话）
         if cached is not None:
-            return cached
+            return [x for x in cached if not is_editor_preview_session(x.get("session_id"))]
 
         # 2. 如果 Redis 缓存不存在, 则从数据库加载会话信息列表
         db = SessionLocal() # 创建 PostgreSQL 数据库连接
@@ -251,7 +255,11 @@ class ConversationStorage:
             # 查询符合 user_id 和 agent_id 的所有会话, 并按更新时间降序排序
             sessions = (
                 db.query(ChatSessionRow)
-                .filter(ChatSessionRow.user_id == user_id, ChatSessionRow.agent_id == agent_id)
+                .filter(
+                    ChatSessionRow.user_id == user_id,
+                    ChatSessionRow.agent_id == agent_id,
+                    ~ChatSessionRow.session_id.like(EDITOR_PREVIEW_SESSION_PREFIX + "%"),
+                )
                 .order_by(desc(ChatSessionRow.updated_at), desc(ChatSessionRow.id))
                 .all()
             )
@@ -270,12 +278,14 @@ class ConversationStorage:
         """
         分页查询会话列表（直接查库，不走全量 Redis 缓存）。
         按 updated_at 降序，同时间以 id 降序。
+        不返回编辑器试聊会话（__editor_preview_ 前缀）。
         """
         db = SessionLocal()
         try:
             q = db.query(ChatSessionRow).filter(
                 ChatSessionRow.user_id == user_id,
                 ChatSessionRow.agent_id == agent_id,
+                ~ChatSessionRow.session_id.like(EDITOR_PREVIEW_SESSION_PREFIX + "%"),
             )
             total = q.count()
             rows = (
@@ -301,18 +311,22 @@ class ConversationStorage:
         :param offset: 分页偏移
         :return: 会话列表
         """
-        # 1. 检查 Redis 全量列表缓存, 如果存在则直接返回
+        # 1. 检查 Redis 全量列表缓存, 如果存在则直接返回（剔除编辑器试聊会话）
         key = self._sessions_all_cache_key(user_id)
         cached = cache.get_json(key)
         if cached is not None:
+            filtered = [x for x in cached if not is_editor_preview_session(x.get("session_id"))]
             # 返回分页后的会话列表
-            total = len(cached)
-            return cached[offset : offset + limit], total
+            total = len(filtered)
+            return filtered[offset : offset + limit], total
 
         # 2. 如果 Redis 全量列表缓存不存在, 则从数据库加载会话列表
         db = SessionLocal()
         try:
-            q = db.query(ChatSessionRow).filter(ChatSessionRow.user_id == user_id)
+            q = db.query(ChatSessionRow).filter(
+                ChatSessionRow.user_id == user_id,
+                ~ChatSessionRow.session_id.like(EDITOR_PREVIEW_SESSION_PREFIX + "%"),
+            )
             rows = (
                 q.order_by(desc(ChatSessionRow.updated_at), desc(ChatSessionRow.id)).all()
             )

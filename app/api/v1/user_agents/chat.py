@@ -12,6 +12,7 @@ from fastapi.responses import Response, StreamingResponse
 from app.chat.agent_service import chat_with_agent_stream, chat_with_agent_sync
 from app.chat.attachment_service import file_bytes_for_attachment, get_attachment_row, save_uploaded_file
 from app.chat.chat_job import create_chat_job, get_job_meta, iter_job_sse_events, request_chat_job_cancel, verify_job_owner
+from app.chat.preview_session import is_editor_preview_session
 from app.chat.storage import storage
 from app.controllers.user_agent import user_agent_controller
 from app.controllers.user_agent_recent import list_recent_agents_public, touch_recent_agent
@@ -158,7 +159,8 @@ async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(
             use_knowledge_retrieval=request.use_knowledge_retrieval,
             attachment_ids=request.attachment_ids or None,
         )
-        await touch_recent_agent(user_id, request.agent_id)
+        if not is_editor_preview_session(session_id):
+            await touch_recent_agent(user_id, request.agent_id)
         return Success(data=ChatResponse(**resp).model_dump())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -203,8 +205,9 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
                 regenerate=request.regenerate,
             ):
                 yield chunk
-            # 更新最近使用智能体
-            await touch_recent_agent(user_id, request.agent_id)
+            # 更新最近使用智能体（编辑器试聊会话不置顶）
+            if not is_editor_preview_session(session_id):
+                await touch_recent_agent(user_id, request.agent_id)
         # 如果发生异常，则返回错误信息
         except Exception as e:
             err = {"type": "error", "content": str(e)}

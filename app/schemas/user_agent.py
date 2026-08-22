@@ -14,7 +14,6 @@ class UserAgentCommon(BaseModel):
     description: Optional[str] = None
     system_prompt: Optional[str] = None
     enable_web: bool = False
-    enable_code: bool = False
     opening_message: Optional[str] = None
     temperature: float = Field(default=0.1, ge=0.0, le=2.0)
     supports_vision: bool = Field(

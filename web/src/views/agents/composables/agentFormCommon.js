@@ -15,7 +15,6 @@ export function emptyForm() {
     description: '',
     system_prompt: '',
     enable_web: false,
-    enable_code: false,
     opening_message: '',
     temperature: 0.1,
     supports_vision: false,

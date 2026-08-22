@@ -7,7 +7,6 @@ export const PREVIEW_CONFIG_FIELDS = [
   'description',
   'system_prompt',
   'enable_web',
-  'enable_code',
   'supports_vision',
   'opening_message',
   'temperature',
@@ -61,9 +60,6 @@ export function composeSystemPromptPreview(form) {
   }
   if (form?.enable_web) {
     parts.push('用户已开启「联网」能力说明：当前未接入真实联网工具，请勿编造实时网页内容。')
-  }
-  if (form?.enable_code) {
-    parts.push('用户希望你在适当时给出可运行的代码示例；注意标注语言与前提假设。')
   }
   return parts.join('\n\n')
 }

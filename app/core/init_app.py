@@ -46,6 +46,7 @@ def make_middlewares():
                 "/api/v1/base/register",
                 "/api/v1/base/registration_enabled",
                 "/api/v1/base/upload_avatar",
+                "/api/v1/user/reset_password",
                 "/api/v1/user-agent/upload_avatar",
                 r".*user-agent/chat/stream$",  # POST 直连 SSE，勿缓冲整包写入审计
                 r".*user-agent/chat/jobs/[^/]+/stream$",  # Job 订阅 SSE（刷新可重连），勿缓冲

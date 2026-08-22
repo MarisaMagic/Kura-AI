@@ -79,10 +79,6 @@
               <span class="agent-enable-label">{{ $t('views.agents.label_enable_web') }}</span>
               <n-switch v-model:value="form.enable_web" />
             </div>
-            <div class="agent-enable-pair">
-              <span class="agent-enable-label">{{ $t('views.agents.label_enable_code') }}</span>
-              <n-switch v-model:value="form.enable_code" />
-            </div>
             <div class="agent-enable-pair agent-enable-pair--wide">
               <span class="agent-enable-label">{{ $t('views.agents.label_supports_vision') }}</span>
               <n-switch v-model:value="form.supports_vision" />

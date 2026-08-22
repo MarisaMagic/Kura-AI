@@ -54,7 +54,6 @@
       "label_description": "Description",
       "label_system_prompt": "System prompt",
       "label_enable_web": "Web access",
-      "label_enable_code": "Code tools",
       "label_supports_vision": "Multimodal vision (images)",
       "label_dialogue": "Dialogue",
       "label_opening_message": "Opening message",

@@ -12,6 +12,7 @@ from typing import Any
 
 from app.chat.agent_service import iter_chat_stream_events
 from app.chat.cache import cache
+from app.chat.preview_session import is_editor_preview_session
 from app.controllers.user_agent import user_agent_controller
 from app.settings import settings
 
@@ -184,11 +185,12 @@ async def _run_chat_job(
             await _finish_meta(job_id, status="cancelled", error=None)
         else:
             await _finish_meta(job_id, status="completed", error=None)
-            # 更新最近使用智能体
-            try:
-                await touch_recent_agent(user_id, agent_id)
-            except Exception:
-                pass
+            # 更新最近使用智能体（编辑器试聊会话不置顶）
+            if not is_editor_preview_session(session_id):
+                try:
+                    await touch_recent_agent(user_id, agent_id)
+                except Exception:
+                    pass
     except Exception as e:
         await _append_event(job_id, seq, {"type": "error", "content": str(e)})
         await _finish_meta(job_id, status="failed", error=str(e))

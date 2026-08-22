@@ -6,8 +6,8 @@ import {
   NCheckboxGroup,
   NForm,
   NFormItem,
-  NImage,
   NInput,
+  NModal,
   NSpace,
   NSwitch,
   NTag,
@@ -35,6 +35,44 @@ defineOptions({ name: '用户管理' })
 const $table = ref(null)
 const queryItems = ref({})
 const vPermission = resolveDirective('permission')
+
+// 重置密码弹窗：管理员输入新密码（后端强度校验：至少 8 位且同时包含字母与数字）
+const resetModalVisible = ref(false)
+const resetTargetUser = ref(null)
+const resetPasswordValue = ref('')
+
+function openResetPasswordModal(row) {
+  resetTargetUser.value = row
+  resetPasswordValue.value = ''
+  resetModalVisible.value = true
+}
+
+function validateWritablePassword(pw) {
+  return (
+    typeof pw === 'string' &&
+    pw.length >= 8 &&
+    pw.length <= 128 &&
+    /[A-Za-z]/.test(pw) &&
+    /\d/.test(pw)
+  )
+}
+
+async function handleResetPassword() {
+  const target = resetTargetUser.value
+  if (!target) return
+  if (!validateWritablePassword(resetPasswordValue.value)) {
+    $message.warning('密码需至少 8 位，且同时包含字母与数字')
+    return
+  }
+  try {
+    await api.resetPassword({ user_id: target.id, new_password: resetPasswordValue.value })
+    $message.success('密码已重置')
+    resetModalVisible.value = false
+    await $table.value?.handleSearch()
+  } catch (error) {
+    $message.error('重置密码失败: ' + (error?.message || error))
+  }
+}
 
 const {
   modalVisible,
@@ -204,40 +242,23 @@ const columns = [
             default: () => h('div', {}, '确定删除该用户吗?'),
           }
         ),
-        !row.is_superuser && h(
-          NPopconfirm,
-          {
-            onPositiveClick: async () => {
-              try {
-                await api.resetPassword({ user_id: row.id });
-                $message.success('密码已成功重置为123456');
-                await $table.value?.handleSearch();
-              } catch (error) {
-                $message.error('重置密码失败: ' + error.message);
+        !row.is_superuser &&
+          withDirectives(
+            h(
+              NButton,
+              {
+                size: 'small',
+                type: 'warning',
+                style: 'margin-right: 8px;',
+                onClick: () => openResetPasswordModal(row),
+              },
+              {
+                default: () => '重置密码',
+                icon: renderIcon('material-symbols:lock-reset', { size: 16 }),
               }
-            },
-            onNegativeClick: () => {},
-          },
-          {
-            trigger: () =>
-              withDirectives(
-                h(
-                  NButton,
-                  {
-                    size: 'small',
-                    type: 'warning',
-                    style: 'margin-right: 8px;',
-                  },
-                  {
-                    default: () => '重置密码',
-                    icon: renderIcon('material-symbols:lock-reset', { size: 16 }),
-                  }
-                ),
-                [[vPermission, 'post/api/v1/user/reset_password']]
-              ),
-            default: () => h('div', {}, '确定重置用户密码为123456吗?'),
-          }
-        ),
+            ),
+            [[vPermission, 'post/api/v1/user/reset_password']]
+          ),
       ]
     },
   },
@@ -488,6 +509,28 @@ const validateAddUser = {
             </NFormItem>
           </NForm>
         </CrudModal>
+
+        <!-- 重置密码弹窗：管理员输入新密码 -->
+        <n-modal
+          v-model:show="resetModalVisible"
+          preset="dialog"
+          title="重置密码"
+          :positive-text="'确认重置'"
+          :negative-text="'取消'"
+          @positive-click="handleResetPassword"
+        >
+          <p style="margin-bottom: 8px">为「{{ resetTargetUser?.username }}」设置新密码：</p>
+          <n-input
+            v-model:value="resetPasswordValue"
+            type="password"
+            show-password-on="mousedown"
+            placeholder="请输入新密码"
+            @keydown.enter="handleResetPassword"
+          />
+          <p style="margin: 8px 0 0; font-size: 12px; color: #999">
+            至少 8 位，需同时包含字母与数字
+          </p>
+        </n-modal>
       </CommonPage>
     </NLayoutContent>
   </NLayout>

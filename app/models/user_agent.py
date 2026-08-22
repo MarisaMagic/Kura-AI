@@ -12,7 +12,6 @@ class UserAgent(BaseModel, TimestampMixin):
     description = fields.TextField(null=True, description="简介")
     system_prompt = fields.TextField(null=True, description="提示词")
     enable_web = fields.BooleanField(default=False, description="联网能力")
-    enable_code = fields.BooleanField(default=False, description="写代码能力")
     opening_message = fields.TextField(null=True, description="开场白")
     temperature = fields.FloatField(default=0.1, description="温度")
     avatar_filename = fields.CharField(max_length=255, null=True, description="自定义头像文件名")

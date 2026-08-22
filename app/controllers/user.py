@@ -9,7 +9,7 @@ from app.models.admin import Role, User
 from app.schemas.login import CredentialsSchema, RegisterSchema
 from app.schemas.users import UserCreate, UserUpdate
 from app.settings import settings
-from app.utils.password import generate_password, get_password_hash, validate_password_strength, verify_password
+from app.utils.password import get_password_hash, validate_password_strength, verify_password
 
 from .role import role_controller
 
@@ -106,14 +106,15 @@ class UserController(CRUDBase[User, UserCreate, UserUpdate]):
             role_obj = await role_controller.get(id=role_id)
             await user.roles.add(role_obj)
 
-    async def reset_password(self, user_id: int) -> str:
+    async def reset_password(self, user_id: int, new_password: str) -> None:
         user_obj = await self.get(id=user_id)
         if user_obj.is_superuser:
             raise HTTPException(status_code=403, detail="不允许重置超级管理员密码")
-        new_password = generate_password()
-        user_obj.password = get_password_hash(new_password)
+        try:
+            user_obj.password = get_password_hash(new_password)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
         await user_obj.save()
-        return new_password
 
 
 user_controller = UserController()

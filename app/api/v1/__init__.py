@@ -7,7 +7,6 @@ from .auditlog import auditlog_router
 from .base import base_router
 from .depts import depts_router
 from .menus import menus_router
-from .multimodal_kb import router as multimodal_kb_router
 from .roles import roles_router
 from .user_agents import agent_chat_router, user_agents_router
 from .user_agents.kb import router as user_agent_kb_router
@@ -25,4 +24,3 @@ v1_router.include_router(menus_router, prefix="/menu", dependencies=[DependPermi
 v1_router.include_router(apis_router, prefix="/api", dependencies=[DependPermission])
 v1_router.include_router(depts_router, prefix="/dept", dependencies=[DependPermission])
 v1_router.include_router(auditlog_router, prefix="/auditlog", dependencies=[DependPermission])
-v1_router.include_router(multimodal_kb_router, prefix="/media")

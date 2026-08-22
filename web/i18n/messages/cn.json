@@ -54,7 +54,6 @@
       "label_description": "简介",
       "label_system_prompt": "提示词",
       "label_enable_web": "联网能力",
-      "label_enable_code": "写代码能力",
       "label_supports_vision": "多模态视觉（图片）",
       "label_dialogue": "对话配置",
       "label_opening_message": "开场白",

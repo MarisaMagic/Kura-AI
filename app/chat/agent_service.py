@@ -246,9 +246,6 @@ def _compose_system_prompt(
     # 联网能力说明
     if ua.enable_web:
         parts.append("用户已开启「联网」能力说明：当前未接入真实联网工具，请勿编造实时网页内容。")
-    # 写代码能力说明
-    if ua.enable_code:
-        parts.append("用户希望你在适当时给出可运行的代码示例；注意标注语言与前提假设。")
     if (session_attachment_hint or "").strip():
         parts.append(session_attachment_hint.strip())
     if use_knowledge_retrieval and (kb_retrieval_system_extension or "").strip():
