@@ -4,7 +4,7 @@ from pathlib import Path
 
 from app.settings import settings
 
-DEFAULT_AVATAR_URL = "https://avatars.githubusercontent.com/u/54677442?v=4"
+DEFAULT_AVATAR_URL = f"{settings.USER_AVATAR_URL_PREFIX}/alice.jpg"
 ALLOWED_AVATAR_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 

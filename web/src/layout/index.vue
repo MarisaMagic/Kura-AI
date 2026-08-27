@@ -7,9 +7,7 @@
       :width="235"
       :native-scrollbar="true"
       :collapsed="appStore.collapsed"
-      :class="
-        appStore.collapsed ? 'bg-white dark:bg-dark' : 'bg-hex-f5f6fb dark:bg-hex-101014'
-      "
+      :class="appStore.collapsed ? 'bg-white dark:bg-dark' : 'bg-hex-f5f6fb dark:bg-hex-101014'"
       class="layout-sider"
     >
       <SideBar />
@@ -17,6 +15,7 @@
 
     <article flex-col flex-1 overflow-hidden>
       <header
+        v-if="showHeader"
         class="flex items-center border-b bg-white px-15 bc-eee"
         dark="bg-dark border-0"
         :style="`height: ${header.height}px`"
@@ -31,16 +30,20 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
+import { useBreakpoints } from '@vueuse/core'
 import AppHeader from './components/header/index.vue'
 import SideBar from './components/sidebar/index.vue'
 import AppMain from './components/AppMain.vue'
 import { useAppStore } from '@/store'
 import { header } from '~/settings'
 
-// 移动端适配
-import { useBreakpoints } from '@vueuse/core'
-
 const appStore = useAppStore()
+const route = useRoute()
+
+/** 顶部栏仅保留给仍有内容（AI 对话标题/会话标题）的页面，其余页面隐藏空栏 */
+const showHeader = computed(() => route.name === 'AgentChat')
 const breakpointsEnum = {
   xl: 1600,
   lg: 1199,

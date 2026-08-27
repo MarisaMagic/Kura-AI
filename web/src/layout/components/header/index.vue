@@ -1,27 +1,18 @@
 <template>
-  <div class="app-header-inner w-full min-w-0">
+  <div class="app-header-inner min-w-0 w-full">
     <div class="app-header-left">
-      <MenuCollapse />
       <AgentChatTitle />
     </div>
     <div v-if="sessionTitleCenter" class="app-header-center" :title="sessionTitleCenter">
       <span class="app-header-session-title">{{ sessionTitleCenter }}</span>
     </div>
-    <div class="app-header-right">
-      <ThemeMode />
-      <FullScreen />
-      <UserAvatar />
-    </div>
+    <div class="app-header-right"></div>
   </div>
 </template>
 
 <script setup>
 import { storeToRefs } from 'pinia'
 import AgentChatTitle from './components/AgentChatTitle.vue'
-import MenuCollapse from './components/MenuCollapse.vue'
-import FullScreen from './components/FullScreen.vue'
-import UserAvatar from './components/UserAvatar.vue'
-import ThemeMode from './components/ThemeMode.vue'
 import { useAgentChatHeaderStore } from '@/store'
 
 const agentChatHeader = useAgentChatHeaderStore()

@@ -3,6 +3,8 @@
   "app_name": "Kura AI",
   "header": {
     "label_profile": "Profile",
+    "label_theme": "Toggle theme",
+    "label_fullscreen": "Toggle fullscreen",
     "label_logout": "Logout",
     "label_logout_dialog_title": "Hint",
     "text_logout_confirm": "Logout confirm",

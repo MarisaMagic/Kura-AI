@@ -3,6 +3,8 @@
   "app_name": "Kura AI",
   "header": {
     "label_profile": "个人信息",
+    "label_theme": "切换主题",
+    "label_fullscreen": "切换全屏",
     "label_logout": "退出登录",
     "label_logout_dialog_title": "提示",
     "text_logout_confirm": "确认退出？",

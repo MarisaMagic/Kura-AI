@@ -1,10 +1,11 @@
 <script setup>
 import { computed } from 'vue'
 import { usePermissionStore, useAppStore } from '@/store'
-import SideLogo from './components/SideLogo.vue'
+import SidebarHeader from './components/SidebarHeader.vue'
 import SideMenu from './components/SideMenu.vue'
 import SidebarAgentBlock from './SidebarAgentBlock.vue'
 import SidebarRecentConversations from './SidebarRecentConversations.vue'
+import SidebarUserCard from './components/SidebarUserCard.vue'
 
 const permissionStore = usePermissionStore()
 const appStore = useAppStore()
@@ -17,20 +18,24 @@ const systemMenuRoutes = computed(() => menus.value.filter((r) => r.name === '�
 
 /** 智能体中心改由自定义区块「更多智能体」承担，避免与菜单重复 */
 const restMenuRoutes = computed(() =>
-  menus.value.filter((r) => r.name !== '系统管理' && r.name !== '智能体中心'),
+  menus.value.filter((r) => r.name !== '系统管理' && r.name !== '智能体中心')
 )
 </script>
 
 <template>
   <div class="layout-sidebar-root">
-    <SideLogo />
+    <SidebarHeader />
     <div class="layout-sidebar-main">
       <div class="layout-sidebar-upper">
         <div
           class="layout-sidebar-block"
           :class="{ 'layout-sidebar-block--collapsed': sidebarCollapsed }"
         >
-          <SideMenu v-if="systemMenuRoutes.length" :menu-routes="systemMenuRoutes" class="sidebar-menu-section" />
+          <SideMenu
+            v-if="systemMenuRoutes.length"
+            :menu-routes="systemMenuRoutes"
+            class="sidebar-menu-section"
+          />
           <SidebarAgentBlock />
         </div>
       </div>
@@ -46,6 +51,7 @@ const restMenuRoutes = computed(() =>
         </div>
       </div>
     </div>
+    <SidebarUserCard />
   </div>
 </template>
 
