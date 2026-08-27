@@ -116,16 +116,17 @@ def make_search_knowledge_by_image_tool(
         if not docs:
             empty_msg = "No relevant documents found in knowledge base."
             log_kb_tool_return_to_terminal(empty_msg, tool_label="search_knowledge_by_image")
-            _set_last_rag_context({"rag_trace": rag_trace, "image_references": []})
+            _set_last_rag_context({"rag_trace": rag_trace, "image_references": [], "kb_sources": []})
             return empty_msg
 
-        out, image_references = format_knowledge_retrieval_tool_output(docs)
+        out, image_references, kb_sources = format_knowledge_retrieval_tool_output(docs)
         log_kb_tool_return_to_terminal(out, tool_label="search_knowledge_by_image")
 
         _set_last_rag_context(
             {
                 "rag_trace": rag_trace,
                 "image_references": image_references,
+                "kb_sources": kb_sources,
             }
         )
         return out
@@ -137,6 +138,7 @@ def make_search_knowledge_by_image_tool(
             "图片块 URL 以工具返回的公网/相对路径为准，回答中配图须原样使用返回链接。"
             "需传入 attachment_id；每轮以图成功检索次数不超过当前会话中图片类附件张数；"
             "与 search_knowledge_base（以文检索）的额度相互独立。"
+            "回答中凡引用检索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），让用户可追溯出处。"
         ),
         args_schema=_ImageKbArgs,
         func=_search_knowledge_by_image,

@@ -150,7 +150,7 @@
                   <div
                     v-if="!m.pending && (m.content || '').trim()"
                     class="agent-chat-md"
-                    v-html="renderAgentChatMarkdown(m.content)"
+                    v-html="renderAgentChatMarkdown(m.content, m.sources)"
                   />
                 </div>
               </div>

@@ -256,6 +256,14 @@ def _compose_system_prompt(
             "须与工具返回的「图片公网访问 URL」逐字一致。"
             "禁止使用 image://、file://、kb_image:// 等自定义协议，禁止用 [1][2] 或序号代替 URL。"
         )
+        parts.append(
+            "知识库作答纪律：回答必须仅依据知识库检索工具的返回内容与多轮对话上下文；"
+            "凡引用检索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致）。"
+            "当工具返回明确提示知识库无相关资料（或检索未命中）时，必须如实告知用户「知识库中未找到相关资料」"
+            "并说明可补充资料后重试，不得编造知识库结论或凭想象作答；"
+            "若无确凿资料支撑，宁可说明「知识库中未找到相关资料」，也不要虚构。"
+            "注意区分知识库中的结论与你的一般常识推断，后者不得冒充知识库内容。"
+        )
     return "\n\n".join(parts)
 
 
@@ -456,6 +464,8 @@ def chat_with_agent_sync(
     rag_trace = rag_context.get("rag_trace") if rag_context else None
     # 获取图片引用
     image_references = rag_context.get("image_references") if rag_context else None
+    # 获取知识库来源列表
+    kb_sources = rag_context.get("kb_sources") if rag_context else None
 
     error_text = str(caught_exc) if caught_exc else None
 
@@ -468,6 +478,7 @@ def chat_with_agent_sync(
             "rag_steps": rag_collector.steps or None,
             "error_text": error_text,
             "image_references": image_references,  # 添加图片引用
+            "sources": kb_sources,  # 添加知识库来源
             "kb_preselect": kb_preselect_meta or None,
         }
     ]
@@ -483,6 +494,7 @@ def chat_with_agent_sync(
     return {
         "response": response_content,
         "rag_trace": rag_trace,
+        "sources": kb_sources,
         "kb_preselect": kb_preselect_meta or None,
     }
 
@@ -692,10 +704,16 @@ async def iter_chat_stream_events(
     rag_trace = rag_context.get("rag_trace") if rag_context else None
     # 获取图片引用
     image_references = rag_context.get("image_references") if rag_context else None
+    # 获取知识库来源列表
+    kb_sources = rag_context.get("kb_sources") if rag_context else None
 
     # 如果 RAG 追踪存在, 则输出 RAG 追踪
     if rag_trace:
         yield {"type": "trace", "rag_trace": rag_trace}
+
+    # 输出知识库来源列表（供前端渲染「来源」）
+    if kb_sources:
+        yield {"type": "sources", "sources": kb_sources}
 
     # 助手落库仅用纯文本；见 chat_with_agent_sync
     messages.append(AIMessage(content=full_response))
@@ -706,6 +724,7 @@ async def iter_chat_stream_events(
             "rag_steps": rag_steps_collected or None,
             "error_text": stream_error,
             "image_references": image_references,  # 添加图片引用
+            "sources": kb_sources,  # 添加知识库来源
             "kb_preselect": kb_preselect_meta or None,
         }
     ]

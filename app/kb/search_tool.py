@@ -73,20 +73,34 @@ def make_search_knowledge_tool(
 
         docs = rag_result.get("docs", []) if isinstance(rag_result, dict) else []
         rag_trace = rag_result.get("rag_trace", {}) if isinstance(rag_result, dict) else {}
+        no_answer = bool(rag_result.get("no_answer")) if isinstance(rag_result, dict) else False
+
+        if no_answer:
+            # 二次门控判定知识库无相关资料：返回拒答指令，禁止模型在低质量上下文上硬编
+            refuse_msg = (
+                "KNOWLEDGE_BASE_NO_RELEVANT_INFO: 本知识库经两次检索与逐块相关性评估，未找到与用户问题相关的资料。"
+                "请如实告知用户：知识库中没有相关资料，可建议用户上传补充相关资料后重试；"
+                "不要引用任何检索片段，也不要编造任何知识库结论。"
+            )
+            emit_rag_step("🚫", "向用户说明知识库无相关资料")
+            log_kb_tool_return_to_terminal(refuse_msg, tool_label="search_knowledge_base")
+            _set_last_rag_context({"rag_trace": rag_trace, "image_references": [], "kb_sources": []})
+            return refuse_msg
 
         if not docs:
             empty_msg = "No relevant documents found in knowledge base."
             log_kb_tool_return_to_terminal(empty_msg, tool_label="search_knowledge_base")
-            _set_last_rag_context({"rag_trace": rag_trace, "image_references": []})
+            _set_last_rag_context({"rag_trace": rag_trace, "image_references": [], "kb_sources": []})
             return empty_msg
 
-        out, image_references = format_knowledge_retrieval_tool_output(docs)
+        out, image_references, kb_sources = format_knowledge_retrieval_tool_output(docs)
         log_kb_tool_return_to_terminal(out, tool_label="search_knowledge_base")
 
         _set_last_rag_context(
             {
                 "rag_trace": rag_trace,
                 "image_references": image_references,
+                "kb_sources": kb_sources,
             }
         )
 
@@ -100,6 +114,7 @@ def make_search_knowledge_tool(
             "图片的存储路径以 PostgreSQL（mg_kb_images.stored_relpath）为准；工具返回中会给出「图片公网访问 URL」。"
             "回答用户时若需配图，必须使用工具返回的完整 http(s) URL 写入 Markdown 图片语法，与原文字符完全一致；"
             "不得使用 image://、file://、序号或自拟路径。"
+            "回答中凡引用检索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），让用户可追溯出处。"
             "调用约束：同一用户提问轮次内最多成功检索一次；得到工具返回后应直接整合为最终回答，勿重复检索。"
         ),
         args_schema=_SearchKbArgs,

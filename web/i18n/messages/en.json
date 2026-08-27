@@ -120,6 +120,7 @@
       "chat_msg_need_login": "Please sign in first",
       "chat_msg_stream_error": "Reply failed",
       "chat_feed_error_title": "Error",
+      "chat_sources_label": "Sources",
       "chat_msg_aborted": "Stopped",
       "chat_msg_restart_ok": "Started a new conversation",
       "chat_msg_like_ok": "Thanks for your feedback",

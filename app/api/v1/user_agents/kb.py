@@ -59,9 +59,10 @@ async def kb_upload(
             display_filename=result["display_filename"],
             chunk_count=result["chunk_count"],
             parent_chunks=result["parent_chunks"],
-            message="上传并入库成功",
+            message="内容未变化，已跳过重建" if result.get("unchanged") else "上传并入库成功",
+            unchanged=bool(result.get("unchanged")),
         ).model_dump(),
-        msg="上传成功",
+        msg="文件内容未变化，未重新入库" if result.get("unchanged") else "上传成功",
     )
 
 

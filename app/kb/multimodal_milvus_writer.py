@@ -63,24 +63,20 @@ class MultimodalMilvusWriter:
         
         logger.info(f"Writing {len(text_chunks)} text chunks and {len(image_chunks)} image chunks")
         
-        # 1. 处理文本块
+        # 1. 处理文本块（稀疏向量由服务端 BM25 Function 基于 text 自动计算，无需客户端生成）
         if text_chunks:
-            all_texts = [doc["text"] for doc in text_chunks]
-            self.embedding_service.fit_corpus(all_texts)
-            
             total = len(text_chunks)
             for i in range(0, total, bs):
                 batch = text_chunks[i : i + bs]
                 texts = [doc["text"] for doc in batch]
                 
-                # 获取文本的密集向量和稀疏向量
-                dense_embeddings, sparse_embeddings = self.embedding_service.get_all_embeddings(texts=texts)
+                # 获取文本的密集向量
+                dense_embeddings = self.embedding_service.get_text_embeddings(texts)
                 
                 # 构建插入数据
                 insert_data = [
                     {
                         "dense_embedding": dense_emb,
-                        "sparse_embedding": sparse_emb,
                         "kb_scope": doc["kb_scope"],
                         "text": doc["text"],
                         "filename": doc["filename"],
@@ -103,7 +99,7 @@ class MultimodalMilvusWriter:
                         "image_width": 0,
                         "image_height": 0,
                     }
-                    for doc, dense_emb, sparse_emb in zip(batch, dense_embeddings, sparse_embeddings)
+                    for doc, dense_emb in zip(batch, dense_embeddings)
                 ]
                 
                 # 插入数据到 Milvus
@@ -122,21 +118,17 @@ class MultimodalMilvusWriter:
                 batch = image_chunks[i : i + bs]
                 batch_paths = [doc.get("image_path", "") for doc in batch]
                 
-                # 获取图片的密集向量（使用多模态模型）
+# 获取图片的密集向量（使用多模态模型）
                 try:
                     image_dense_embeddings = self.embedding_service.get_image_embeddings(batch_paths)
                 except Exception as e:
                     logger.error(f"Failed to generate image embeddings: {e}")
                     image_dense_embeddings = [[0.0] * int(settings.EMBEDDING_DIM or 1536) for _ in batch]
                 
-                # 图片块无文本，稀疏向量为空
-                image_sparse_embeddings = self.embedding_service.get_sparse_embeddings(["" for _ in batch])
-                
-                # 构建插入数据
+                # 构建插入数据（图片块无文本，服务端 BM25 自动得到空稀疏向量）
                 insert_data = [
                     {
                         "dense_embedding": dense_emb,
-                        "sparse_embedding": sparse_emb,
                         "kb_scope": doc["kb_scope"],
                         "text": "",  # 图片块不存储文本
                         "filename": doc["filename"],
@@ -147,7 +139,7 @@ class MultimodalMilvusWriter:
                         "chunk_id": doc.get("chunk_id", ""),
                         "parent_chunk_id": doc.get("parent_chunk_id", ""),
                         "root_chunk_id": doc.get("root_chunk_id", ""),
-                        "chunk_level": doc.get("chunk_level", 4),  # L4 图片块
+                        "chunk_level": 4,  # L4 图片块
                         "content_type": "image",
                         "image_path": doc.get("image_path", ""),
                         # 文本位置信息（图片块为0）
@@ -159,7 +151,7 @@ class MultimodalMilvusWriter:
                         "image_width": doc.get("image_width", 0),
                         "image_height": doc.get("image_height", 0),
                     }
-                    for doc, dense_emb, sparse_emb in zip(batch, image_dense_embeddings, image_sparse_embeddings)
+                    for doc, dense_emb in zip(batch, image_dense_embeddings)
                 ]
                 
                 # 插入数据到 Milvus

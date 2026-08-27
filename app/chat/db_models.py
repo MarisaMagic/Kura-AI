@@ -43,6 +43,7 @@ class KbDocument(Base):
     stored_filename: Mapped[str] = mapped_column(String(512), nullable=False)
     file_type: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 文件内容 sha256，用于同内容重传跳过重建
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -223,6 +224,7 @@ class ChatMessage(Base):
     rag_steps: Mapped[list | None] = mapped_column(JSON, nullable=True)
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_references: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 图片引用列表
+    sources: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 知识库来源列表（与回答中 [来源N] 编号对应）
 
     session = relationship("ChatSession", back_populates="messages")
 

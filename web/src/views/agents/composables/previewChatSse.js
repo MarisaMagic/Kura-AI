@@ -63,6 +63,13 @@ export function applyPreviewChatSsePayload(data, messagesRef, idx) {
       ragTrace: data.rag_trace || null,
       pending: cur.pending,
     }
+  } else if (data.type === 'sources') {
+    const cur = list[idx]
+    list[idx] = {
+      ...cur,
+      sources: Array.isArray(data.sources) ? data.sources : [],
+      pending: cur.pending,
+    }
   } else if (data.type === 'error') {
     const cur = list[idx]
     list[idx] = {

@@ -71,6 +71,7 @@ class ChatResponse(BaseModel):
     """
     response: str
     rag_trace: Optional[dict[str, Any]] = None
+    sources: Optional[list[dict[str, Any]]] = None
     kb_preselect: Optional[dict[str, Any]] = None
 
 
@@ -92,6 +93,7 @@ class MessageInfo(BaseModel):
     rag_trace: Optional[dict[str, Any]] = None
     rag_steps: Optional[list[dict[str, Any]]] = None
     error_text: Optional[str] = None
+    sources: Optional[list[dict[str, Any]]] = None
 
 
 class SessionMessagesResponse(BaseModel):

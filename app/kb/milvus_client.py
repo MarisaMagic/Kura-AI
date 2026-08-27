@@ -5,7 +5,7 @@ Milvus：密集 + 稀疏混合检索，按 kb_scope 隔离。
 
 from __future__ import annotations
 
-from pymilvus import AnnSearchRequest, DataType, MilvusClient, RRFRanker
+from pymilvus import AnnSearchRequest, DataType, Function, FunctionType, MilvusClient, RRFRanker
 
 from app.settings import settings
 
@@ -100,13 +100,12 @@ class MilvusManager:
             self.client = MilvusClient(uri=self.uri)
         return self.client
 
-    def init_collection(self, dense_dim: int | None = None) -> None:
+    def init_collection(self, dense_dim: int | None = None, *, collection_name: str | None = None) -> None:
         """
         初始化 Milvus 集合
         创建一个名为 kura_ai_kb 的集合，并添加以下字段：
         - id: 主键
         - dense_embedding: 密集向量
-        - sparse_embedding: 稀疏向量
         - kb_scope: 知识库范围
         - text: 文本
         - filename: 文件名
@@ -126,25 +125,31 @@ class MilvusManager:
         - image_position_y: 图片位置Y坐标（图片块才有）
         - image_width: 图片宽度（图片块才有）
         - image_height: 图片高度（图片块才有）
-        
-        创建索引：
+
+        稀疏向量不使用本地 BM25 词表，改为服务端 BM25 Function（bm25_fn）：
+        以 text 字段为输入、bm25_sparse 为输出，由 Milvus 在写入时自动计算，
+        查询侧直接用文本发起 BM25 检索，彻底消除客户端词表漂移/IDF 失真问题。
+        analyzer 使用 standard（英文按词切分、中文按单字切分，与原有单字 BM25 行为一致）。
+
+        索引：
         - dense_embedding: 使用 HNSW 索引
-        - sparse_embedding: 使用 SPARSE_INVERTED_INDEX 索引
-        
+        - bm25_sparse: SPARSE_INVERTED_INDEX（BM25 度量；本版本加载集合要求向量字段均须有索引）
+
         :param dense_dim: 密集向量维度
+        :param collection_name: 目标集合名，缺省用 self.collection_name（供迁移脚本创建临时集合）
         :return: None
         """
         if dense_dim is None:
             dense_dim = _dense_dim()
+        name = collection_name or self.collection_name
         client = self._get_client()
-        if client.has_collection(self.collection_name):
+        if client.has_collection(name):
             return
         schema = client.create_schema(auto_id=True, enable_dynamic_field=True)
         schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
         schema.add_field("dense_embedding", DataType.FLOAT_VECTOR, dim=dense_dim)
-        schema.add_field("sparse_embedding", DataType.SPARSE_FLOAT_VECTOR)
         schema.add_field("kb_scope", DataType.VARCHAR, max_length=128)
-        schema.add_field("text", DataType.VARCHAR, max_length=2000)
+        schema.add_field("text", DataType.VARCHAR, max_length=2000, enable_analyzer=True)
         schema.add_field("filename", DataType.VARCHAR, max_length=512)
         schema.add_field("file_type", DataType.VARCHAR, max_length=50)
         schema.add_field("file_path", DataType.VARCHAR, max_length=1024)
@@ -164,6 +169,19 @@ class MilvusManager:
         schema.add_field("image_position_y", DataType.INT64)
         schema.add_field("image_width", DataType.INT64)
         schema.add_field("image_height", DataType.INT64)
+        # BM25 Function 的输出字段（稀疏向量，无需建索引，由服务端在写入时基于 text 计算）
+        schema.add_field("bm25_sparse", DataType.SPARSE_FLOAT_VECTOR)
+
+        # 服务端 BM25 稀疏向量（写入时基于 text 自动计算）
+        # 注意：本 Milvus 版本（2.5.x）的 BM25 Function 不接受任何 params（analyzer 配置需 2.6+），
+        # 使用内置 standard 分词器（英文按词、中文按 unicode 词组切分；中文精确单字召回由 dense 腿兜底）。
+        bm25_function = Function(
+            name="bm25_fn",
+            function_type=FunctionType.BM25,
+            input_field_names=["text"],
+            output_field_names="bm25_sparse",
+        )
+        schema.add_function(bm25_function)
 
         index_params = client.prepare_index_params()
 
@@ -183,21 +201,16 @@ class MilvusManager:
             metric_type="IP",  # 使用 IP 距离
             params={"M": 16, "efConstruction": 256},  # M: 节点最多连接的相似节点; efConstruction: 维护的候选队列大小
         )
-
-        """
-        Sparse 向量使用 SPARSE_INVERTED_INDEX 索引
-        SPARSE_INVERTED_INDEX 索引是一种基于倒排索引的稀疏向量索引。
-        """
+        # BM25 Function 输出字段必须建 SPARSE_INVERTED_INDEX（本版本集合加载要求向量字段有索引）
         index_params.add_index(
-            field_name="sparse_embedding",
-            index_type="SPARSE_INVERTED_INDEX",  # 使用 SPARSE_INVERTED_INDEX 索引
-            metric_type="IP",  # 使用 IP 距离
-            params={"drop_ratio_build": 0.2},  # drop_ratio_build: 构建索引时，丢弃的稀疏向量比例
+            field_name="bm25_sparse",
+            index_type="SPARSE_INVERTED_INDEX",
+            metric_type="BM25",
         )
 
         # 创建集合
         client.create_collection(
-            collection_name=self.collection_name,
+            collection_name=name,
             schema=schema,
             index_params=index_params,
         )
@@ -341,15 +354,15 @@ class MilvusManager:
     def hybrid_retrieve(
         self,
         dense_embedding: list[float],
-        sparse_embedding: dict,
+        query_text: str,
         top_k: int,
         filter_expr: str,
         rrf_k: int = 60,
     ) -> list[dict]:
         """
-        混合检索
+        混合检索：dense（HNSW）+ 服务端 BM25（bm25_fn，输入为查询文本），RRF 融合。
         :param dense_embedding: 密集向量
-        :param sparse_embedding: 稀疏向量
+        :param query_text: 查询文本（作为 BM25 Function 的输入）
         :param top_k: 限制返回的记录数
         :param filter_expr: 过滤表达式
         :param rrf_k: RRF 参数
@@ -378,10 +391,11 @@ class MilvusManager:
             limit=top_k * 2,
             expr=filter_expr,
         )
+        # BM25 稀疏腿：直接用文本发起，服务端经 bm25_fn 对查询文本计算稀疏向量并召回
         sparse_search = AnnSearchRequest(
-            data=[sparse_embedding],
-            anns_field="sparse_embedding",
-            param={"metric_type": "IP", "params": {"drop_ratio_search": 0.2}},
+            data=[query_text],
+            anns_field="bm25_sparse",
+            param={"metric_type": "BM25"},
             limit=top_k * 2,
             expr=filter_expr,
         )

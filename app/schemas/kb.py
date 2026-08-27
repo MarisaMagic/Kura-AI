@@ -41,6 +41,7 @@ class KbUploadResponse(BaseModel):
     chunk_count: int
     parent_chunks: int
     message: str = ""
+    unchanged: Optional[bool] = None
 
 
 class KbDeleteResponse(BaseModel):

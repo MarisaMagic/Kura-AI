@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
-from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader, UnstructuredExcelLoader
+from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from loguru import logger
 
@@ -28,11 +28,75 @@ def _filename_fingerprint(filename: str) -> str:
     return hashlib.sha256(filename.encode("utf-8")).hexdigest()[:16]
 
 
+class _SheetPage:
+    """Excel 逐 sheet 解析后的"页"（结构与 loader.load() 的 Document 兼容）。"""
+
+    def __init__(self, page_content: str, page: int) -> None:
+        self.page_content = page_content
+        self.metadata = {"page": page}
+
+
+def _excel_sheet_to_markdown_table(sheet) -> str:
+    """
+    将单个工作表转为 Markdown 表格文本（含表头行）。
+    表头行列数不足时以「列N」补齐；数据行按表头宽度截断或空单元格补齐。
+    :param sheet: openpyxl worksheet
+    :return: Markdown 表格文本
+    """
+    raw_rows: list[list[str]] = []
+    for row in sheet.iter_rows(values_only=True):
+        cells = ["" if v is None else str(v).strip() for v in row]
+        while cells and cells[-1] == "":
+            cells.pop()
+        raw_rows.append(cells)
+    # 去掉首尾的完全空行
+    while raw_rows and not any(raw_rows[0]):
+        raw_rows.pop(0)
+    while raw_rows and not any(raw_rows[-1]):
+        raw_rows.pop()
+    if not raw_rows:
+        return ""
+
+    ncols = max(len(r) for r in raw_rows)
+    header = raw_rows[0] + [f"列{i + 1}" for i in range(len(raw_rows[0]), ncols)]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(["---"] * ncols) + " |",
+    ]
+    for r in raw_rows[1:]:
+        row = (r + [""] * ncols)[:ncols]
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
+def _load_excel_pages(file_path: str) -> list[_SheetPage]:
+    """
+    逐 sheet 读取 Excel 并转为 Markdown 表格"页"列表（sheet 序号作 page_number）。
+    :param file_path: Excel 文件路径
+    :return: _SheetPage 列表
+    """
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(file_path, read_only=True, data_only=True)
+    pages: list[_SheetPage] = []
+    try:
+        for idx, sheet in enumerate(workbook.worksheets, 1):
+            if sheet.sheet_state == "hidden":
+                continue
+            table = _excel_sheet_to_markdown_table(sheet)
+            if not table:
+                continue
+            pages.append(_SheetPage(f"工作表：{sheet.title}\n\n{table}", idx))
+    finally:
+        workbook.close()
+    return pages
+
+
 class MultimodalDocumentLoader:
-    def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50) -> None:
+    def __init__(self, chunk_size: int = 900, chunk_overlap: int = 90) -> None:
         """
         初始化多模态分块器
-        :param chunk_size: 分块大小
+        :param chunk_size: 分块大小（默认 900，推导 L1=1800 / L2=900 / L3=450）
         :param chunk_overlap: 分块重叠大小
         """
         level_1_size = max(1200, chunk_size * 2)
@@ -723,6 +787,9 @@ class MultimodalDocumentLoader:
         # 根据文件名确定文档类型
         file_lower = filename.lower()
 
+        loader = None
+        raw_docs: Optional[list] = None
+
         if file_lower.endswith(".pdf"):
             doc_type = "PDF"
             loader = PyPDFLoader(file_path)
@@ -735,13 +802,15 @@ class MultimodalDocumentLoader:
             images = self._extract_images_from_docx(file_path, user_id, agent_id, kb_scope, filename)
         elif file_lower.endswith((".xlsx", ".xls")):
             doc_type = "Excel"
-            loader = UnstructuredExcelLoader(file_path)
+            # 逐 sheet 转 Markdown 表格，sheet 序号作 page_number
+            raw_docs = _load_excel_pages(file_path)
             images = []  # Excel 暂不支持图片提取
         else:
             raise ValueError(f"不支持的文件类型: {filename}")
 
         # 加载文档文本
-        raw_docs = loader.load()
+        if raw_docs is None:
+            raw_docs = loader.load()
         documents: list[dict] = []
         page_global_chunk_idx = 0
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import uuid
@@ -10,7 +11,7 @@ from pathlib import Path
 from fastapi import UploadFile
 
 from app.chat.database import SessionLocal
-from app.chat.db_models import KbDocument
+from app.chat.db_models import KbDocument, KbParentChunk
 from app.kb.image_store import get_image_store
 from app.kb.kb_scope import kb_scope_for
 from app.kb.milvus_client import MilvusManager, milvus_escape
@@ -202,11 +203,41 @@ async def ingest_upload(
     stored = f"{uuid.uuid4().hex}_{normalize_display_filename(display_filename).replace('/', '_')}" # 生成存储文件名
     path = ddir / stored # 获取存储文件路径
 
+    # 2. 读取文件内容并计算 sha256：同展示名且内容未变时直接返回现有元数据，不删不重建
+    content = await file.read() # 读取文件内容
+    content_hash = hashlib.sha256(content).hexdigest() # 计算文件内容哈希
+    db = SessionLocal() # 创建 PostgreSQL 会话
+    try:
+        existing = (
+            db.query(KbDocument)
+            .filter(
+                KbDocument.kb_scope == kb_scope,
+                KbDocument.display_filename == display_filename,
+            )
+            .first()
+        )
+        if existing and existing.content_hash and existing.content_hash == content_hash:
+            parent_chunks = (
+                db.query(KbParentChunk)
+                .filter(
+                    KbParentChunk.kb_scope == kb_scope,
+                    KbParentChunk.filename == display_filename,
+                )
+                .count()
+            )
+            return {
+                "display_filename": display_filename,
+                "chunk_count": existing.chunk_count or 0,
+                "parent_chunks": parent_chunks,
+                "unchanged": True,
+            }
+    finally:
+        db.close()
+
     # 覆盖同展示名：先删旧数据
     delete_kb_document(kb_scope, user_id, agent_id, display_filename) # 删除旧数据
 
-    # 2. 读取文件内容并写入磁盘目录
-    content = await file.read() # 读取文件内容
+    # 写入磁盘目录
     path.write_bytes(content) # 写入文件内容
 
     try:
@@ -256,6 +287,7 @@ async def ingest_upload(
             stored_filename=stored,
             file_type=ft,
             chunk_count=len(leaf_docs),
+            content_hash=content_hash,
         )
         db.add(rec)
         db.commit()
@@ -268,4 +300,5 @@ async def ingest_upload(
         "parent_chunks": len(parent_docs),
         "text_chunks": text_count,
         "image_chunks": image_count,
+        "unchanged": False,
     }

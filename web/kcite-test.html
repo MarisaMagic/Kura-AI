@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>kcite 来源标注渲染测试</title>
+    <style>
+      body {
+        font-family: 'Noto Sans SC', sans-serif;
+        margin: 24px;
+        color: #0f172a;
+      }
+      #md {
+        max-width: 720px;
+        padding: 16px;
+        border: 1px solid #e2e8f0;
+        border-radius: 8px;
+        font-size: 16px;
+        line-height: 1.72;
+      }
+      #md p {
+        margin: 0 0 0.5em;
+      }
+      .agent-chat-sources {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin-top: 10px;
+        max-width: 720px;
+      }
+      .agent-chat-source-chip {
+        display: inline-flex;
+        padding: 2px 10px;
+        border-radius: 999px;
+        background: #eef2f7;
+        color: #334155;
+        font-size: 12px;
+        line-height: 1.7;
+        border: 1px solid #e2e8f0;
+        scroll-margin: 8px;
+      }
+      #results {
+        margin-top: 16px;
+        font-family: monospace;
+        font-size: 13px;
+      }
+      .pass {
+        color: #15803d;
+      }
+      .fail {
+        color: #b91c1c;
+      }
+      html.dark body {
+        background: #101014;
+        color: rgba(255, 255, 255, 0.88);
+      }
+      html.dark #md {
+        border-color: rgba(148, 163, 184, 0.28);
+      }
+      html.dark .agent-chat-source-chip {
+        background: rgba(148, 163, 184, 0.14);
+        border-color: rgba(148, 163, 184, 0.28);
+        color: #cbd5e1;
+      }
+    </style>
+  </head>
+  <body>
+    <h2>renderAgentChatMarkdown 来源标注渲染测试（临时页，验证后可删除）</h2>
+    <div id="feed-body">
+      <div id="md"></div>
+      <div class="agent-chat-sources" id="sources"></div>
+    </div>
+    <div id="results"></div>
+
+    <script type="module">
+      import { renderAgentChatMarkdown } from '/src/utils/agentChatMarkdown.js'
+
+      const sources = [
+        { index: 1, filename: '产品手册.pdf', page_number: 12 },
+        { index: 2, filename: '部署指南.pdf', page_number: 'N/A' },
+        { index: 3, filename: '接口文档.docx', page_number: 5 },
+      ]
+
+      const checks = []
+      const ok = (name, cond) => checks.push([name, !!cond])
+
+      const mdText = [
+        '普通引用：根据官方文档所述[来源1]，该配置默认开启。',
+        '多编号与空格：支持 [来源1、3] 和 [来源 2] 两种写法。',
+        '加粗内引用：**重要结论[来源3]**已证实。',
+        '无对应来源：[来源9] 应渲染胶囊但无 title。',
+        '行内代码 `[来源1]` 不解析。',
+        '',
+        '```',
+        '[来源1] 代码块内保持原样',
+        '```',
+      ].join('\n')
+
+      const html = renderAgentChatMarkdown(mdText, sources)
+      const mdEl = document.getElementById('md')
+      mdEl.innerHTML = html
+
+      // —— chips 区模拟 index.vue 的结构契约 ——
+      const sourcesEl = document.getElementById('sources')
+      sourcesEl.innerHTML =
+        sources
+          .map(
+            (s) =>
+              `<span class="agent-chat-source-chip" data-kcite-chip="${s.index}">[${s.index}] ${s.filename} · P${s.page_number}</span>`,
+          )
+          .join('')
+
+      // —— 与 index.vue 相同的点击委托逻辑 ——
+      window.__clickLog = null
+      mdEl.addEventListener('click', (e) => {
+        const badge = e.target.closest && e.target.closest('.kcite')
+        if (!badge) return
+        const n = badge.getAttribute('data-kcite')
+        if (!n) return
+        const chip = e.currentTarget.parentElement.querySelector(`[data-kcite-chip="${n}"]`)
+        if (!chip) return
+        chip.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+        chip.classList.remove('kcite-flash')
+        void chip.offsetWidth
+        chip.classList.add('kcite-flash')
+        window.setTimeout(() => chip.classList.remove('kcite-flash'), 1400)
+        window.__clickLog = n
+      })
+
+      // —— 断言 ——
+      const badges = mdEl.querySelectorAll('.kcite')
+      ok('正文引用生成 4 个胶囊（1、1、3、2、3、9 分别计数）', badges.length === 6)
+
+      const b1 = badges[0]
+      ok('胶囊 1 的 title 为「产品手册.pdf · P12」', b1 && b1.getAttribute('title') === '产品手册.pdf · P12')
+      ok('胶囊 2 的 title 为「部署指南.pdf」（page=N/A 不拼）', b1 && mdEl.querySelectorAll('.kcite')[3].getAttribute('title') === '部署指南.pdf')
+      ok('无来源的胶囊 9 无 title', mdEl.querySelector('[data-kcite="9"]')?.getAttribute('title') == null)
+      ok('加粗内引用被解析（strong 内存在胶囊）', !!mdEl.querySelector('strong .kcite'))
+      ok('多编号引用拆分为 .kcite-sep 分隔', !!mdEl.querySelector('.kcite-sep'))
+
+      const pre = mdEl.querySelector('pre')
+      ok('代码块内 [来源1] 保持纯文本', !!pre && pre.textContent.includes('[来源1] 代码块内保持原样'))
+      ok('代码块内没有胶囊', pre ? pre.querySelectorAll('.kcite').length === 0 : false)
+      const codeInline = mdEl.querySelector('code:not(pre code)')
+      ok('行内代码 [来源1] 不解析', !!codeInline && codeInline.textContent === '[来源1]' && !codeInline.querySelector('.kcite'))
+
+      const sep = mdEl.querySelectorAll('.kcite-sep').length
+      ok('多编号间的逗号分隔符出现', sep === 1)
+
+      const sup = mdEl.querySelector('sup.kcite-group')
+      ok('包裹元素为 sup.kcite-group', !!sup)
+
+      // —— 输出结果与原始 HTML ——
+      const lines = checks.map(([name, pass]) => `<div class="${pass ? 'pass' : 'fail'}">${pass ? 'PASS' : 'FAIL'} - ${name}</div>`)
+      lines.push('<hr />')
+      lines.push('<pre id="rawhtml" style="white-space:pre-wrap;font-size:11px;max-width:900px;overflow:auto"></pre>')
+      document.getElementById('results').innerHTML = lines.join('')
+      document.getElementById('rawhtml').textContent = b1?.outerHTML ?? ''
+
+      window.__allPass = checks.every(([, pass]) => pass)
+    </script>
+  </body>
+</html>

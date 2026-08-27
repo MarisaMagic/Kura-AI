@@ -353,6 +353,7 @@ def _rerank_documents(
         "image_count": len(image_docs),
         "include_images": include_images,
         "return_cap": return_cap,
+        "rerank_below_min": False,
     }
     
     if skip_rerank:
@@ -397,6 +398,17 @@ def _rerank_documents(
                     doc["rerank_score"] = sc
                 reranked.append(doc)
         if reranked:
+            # rerank 分数阈值门控（可选）：最高分低于 RERANK_MIN_SCORE 时标记不达标，供上层走「无相关资料」路径
+            below_min = False
+            min_score = getattr(settings, "RERANK_MIN_SCORE", None)
+            if min_score is not None:
+                try:
+                    top = max((float(d.get("rerank_score") or 0.0) for d in reranked), default=0.0)
+                    meta["max_rerank_score"] = top
+                    below_min = top < float(min_score)
+                except (TypeError, ValueError):
+                    meta["max_rerank_score"] = None
+            meta["rerank_below_min"] = below_min
             # 合并回图片块
             final_docs = reranked + image_docs
             final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
@@ -637,19 +649,14 @@ def retrieve_documents(
         filter_expr = base_filter
     
     try:
-        # 使用多模态嵌入服务生成向量
-        # 首先训练语料库（用于稀疏向量）
-        _multimodal_embedding_service.fit_corpus([query])
-        
-        # 获取查询的密集向量和稀疏向量
+        # 使用多模态嵌入服务生成查询的密集向量（BM25 稀疏向量由 Milvus 服务端 Function 基于文本计算）
         dense_embeddings = _multimodal_embedding_service.get_text_embeddings([query])
         dense_embedding = dense_embeddings[0]
-        sparse_embedding = _multimodal_embedding_service.get_sparse_embedding(query)
-        
-        # 混合检索，检索 candidate_k 个相似文档
+
+        # 混合检索（dense + 服务端 BM25），检索 candidate_k 个相似文档
         retrieved = _milvus_manager.hybrid_retrieve(
             dense_embedding=dense_embedding,
-            sparse_embedding=sparse_embedding,
+            query_text=query,
             top_k=candidate_k,
             filter_expr=filter_expr,
         )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Literal, NotRequired, Optional, TypedDict
+from typing import Any, List, Literal, NotRequired, Optional, Tuple, TypedDict
 
 from langchain.chat_models import init_chat_model
 from langgraph.graph import END, StateGraph
@@ -16,8 +16,13 @@ from app.kb.rag_utils import (
 from app.settings import settings
 
 
-class GradeDocuments(BaseModel):
+class ChunkRating(BaseModel):
+    chunk_index: int = Field(description="被评分的片段编号（与提示中的 [N] 一致）")
     binary_score: str = Field(description="'yes' or 'no'")
+
+
+class ChunkGrades(BaseModel):
+    ratings: List[ChunkRating] = Field(description="每个片段的相关性评分，覆盖提示中全部编号片段")
 
 
 class RewriteStrategy(BaseModel):
@@ -41,6 +46,8 @@ class RAGState(TypedDict):
     # 由 search_knowledge_base 传入：仅在这些 filename 上检索；缺省/None=全知识库
     document_filenames: NotRequired[Optional[List[str]]]
     include_images: NotRequired[Optional[bool]]
+    # 二次门控判定为「知识库无相关资料」时为 True；search_tool 据此返回拒答文案
+    no_answer: NotRequired[bool]
 
 
 def _format_docs(docs: List[dict]) -> str:
@@ -99,15 +106,57 @@ def _router_model(llm_config: dict[str, Any] | None):
     )
 
 
-GRADE_PROMPT = (
-    "You are a grader assessing relevance of a retrieved document to a user question. \n "
-    "Here is the retrieved document: \n\n {context} \n\n"
+PER_CHUNK_GRADE_PROMPT = (
+    "You are a grader assessing the relevance of each retrieved document chunk to a user question. \n"
+    "Here is the list of retrieved chunks: \n\n {context} \n\n"
     "Here is the user question: {question} \n"
-    "If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. \n"
-    "Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question.\n"
-    "Reply with JSON only (field binary_score: 'yes' or 'no'). "
-    "DashScope json_object mode requires the word json in the prompt."
+    "For EVERY numbered chunk, judge whether it contains keyword(s) or semantic meaning related to the user question "
+    "and whether it can actually help answer the question; a chunk that only coincidentally shares a keyword should get 'no'. \n"
+    "Reply with JSON only: field ratings is a list of objects with chunk_index (int, the [N] number) and binary_score ('yes' or 'no'). "
+    "Every numbered chunk must appear exactly once in ratings. DashScope json_object mode requires the word json in the prompt."
 )
+
+
+def _to_chunk_grading_payload(docs: List[dict]) -> str:
+    """将检索片段格式化为逐块打分的提示正文（编号与工具输出 [N] 一致）。"""
+    if not docs:
+        return "（无任何检索片段）"
+    parts = []
+    for i, doc in enumerate(docs, 1):
+        source = doc.get("filename", "Unknown")
+        page = doc.get("page_number", "N/A")
+        if doc.get("content_type") == "image":
+            label = " [图片片段]"
+            text = "（图片片段，无文本）"
+        else:
+            label = ""
+            text = doc.get("text") or "（空文本片段）"
+        parts.append(f"[{i}] {source} (Page {page}){label}\n{text}")
+    return "\n\n---\n\n".join(parts)
+
+
+def _apply_per_chunk_grades(docs: List[dict], ratings: Any) -> Tuple[List[dict], bool]:
+    """
+    将模型返回的逐块评分映射回 docs（编号从 1 起，与提示一致）。
+    返回 (逐块评分列表, 是否至少一块通过)。缺失/异常编号按 'no' 处理。
+    """
+    by_index: dict[int, str] = {}
+    for r in ratings or []:
+        try:
+            idx = int(getattr(r, "chunk_index", None))
+        except (TypeError, ValueError):
+            continue
+        score = (getattr(r, "binary_score", "") or "").strip().lower()
+        if score in ("yes", "no"):
+            by_index[idx] = score
+    grades = []
+    passed = False
+    for i, _doc in enumerate(docs, 1):
+        score = by_index.get(i, "no")
+        if score == "yes":
+            passed = True
+        grades.append({"chunk_index": i, "binary_score": score})
+    return grades, passed
 
 
 def retrieve_initial(state: RAGState) -> RAGState:
@@ -136,6 +185,12 @@ def retrieve_initial(state: RAGState) -> RAGState:
     )
     results = retrieved.get("docs", []) # 检索到的文档列表
     retrieve_meta = retrieved.get("meta", {}) # 检索的元数据
+    if retrieve_meta.get("rerank_below_min"):
+        # rerank 分数未达阈值：质量门控为「无相关资料」，结果清空，后续走拒答路径
+        results = []
+        retrieve_meta = dict(retrieve_meta)
+        retrieve_meta["gated_by_rerank_min_score"] = True
+        emit_rag_step("🚫", "检索结果低于 rerank 分数阈值", "按知识库无相关资料处理")
     context = _format_docs(results) # 格式化检索到的文档列表
     emit_rag_step(
         "🧱",
@@ -193,43 +248,125 @@ def grade_documents_node(state: RAGState) -> RAGState:
     from app.chat.tools import emit_rag_step
 
     """
-    评估文档相关性, 用于评估检索到的文档是否与用户问题相关。
+    逐块评估文档相关性（一次调用覆盖全部候选块），用于判断检索结果是否与用户问题相关。
     :param state: 状态
-    :return: 评估后的文档列表和评估的元数据
+    :return: 评估后的路由与元数据
     """
     llm_config = state.get("llm_config") or {} # 聊天模型配置
     grader = _grader_model(llm_config) # 评分模型
-    emit_rag_step("📊", "正在评估文档相关性...")
+    rag_trace = state.get("rag_trace", {}) or {}
+    docs = state.get("docs") or []
+
+    if not docs:
+        grade_update = {
+            "grade_score": "no",
+            "grade_route": "rewrite_question",
+            "rewrite_needed": True,
+            "per_chunk_grades": [],
+        }
+        rag_trace.update(grade_update)
+        return {"route": "rewrite_question", "rag_trace": rag_trace}
+
     if not grader:
+        emit_rag_step("📊", "无可用评分模型，跳过相关性评估")
         grade_update = {
             "grade_score": "unknown",
             "grade_route": "rewrite_question",
             "rewrite_needed": True,
+            "per_chunk_grades": [],
         }
-        rag_trace = state.get("rag_trace", {}) or {}
         rag_trace.update(grade_update)
         return {"route": "rewrite_question", "rag_trace": rag_trace}
-    # 评估文档相关性
+
+    emit_rag_step("📊", "正在逐块评估文档相关性...", f"候选 {len(docs)} 块")
     question = state["question"] # 用户问题
-    context = state.get("context", "") # 格式化后的检索到的文档列表
-    prompt = GRADE_PROMPT.format(question=question, context=context) # 评估文档相关性的提示
-    response = grader.with_structured_output(GradeDocuments, method="json_mode").invoke( # 评估文档相关性
-        [{"role": "user", "content": prompt}] 
-    )
-    score = (response.binary_score or "").strip().lower() 
-    route = "generate_answer" if score == "yes" else "rewrite_question" # 如果评分是 yes，则返回生成答案，否则返回重写查询
+    prompt = PER_CHUNK_GRADE_PROMPT.format(question=question, context=_to_chunk_grading_payload(docs)) # 评估文档相关性的提示
+    try:
+        response = grader.with_structured_output(ChunkGrades, method="json_mode").invoke( # 逐块评估文档相关性
+            [{"role": "user", "content": prompt}]
+        )
+        ratings = getattr(response, "ratings", None)
+    except Exception as e:
+        # 打分失败时放行生成，避免检索链路整体报错
+        emit_rag_step("⚠️", "逐块相关性评估失败，放行生成", str(e)[:120])
+        grade_update = {
+            "grade_score": "unknown",
+            "grade_route": "generate_answer",
+            "rewrite_needed": False,
+            "per_chunk_grades": [],
+            "grade_error": str(e)[:200],
+        }
+        rag_trace.update(grade_update)
+        return {"route": "generate_answer", "rag_trace": rag_trace}
+
+    per_chunk_grades, passed = _apply_per_chunk_grades(docs, ratings)
+    # 任一候选块相关即通过；全部不相关才考虑重写查询
+    route = "generate_answer" if passed else "rewrite_question"
+    yes_count = sum(1 for g in per_chunk_grades if g.get("binary_score") == "yes")
     if route == "generate_answer":
-        emit_rag_step("✅", "文档相关性评估通过", f"评分: {score}")
+        emit_rag_step("✅", "文档相关性评估通过", f"{yes_count}/{len(per_chunk_grades)} 块相关")
     else:
-        emit_rag_step("⚠️", "文档相关性不足，将重写查询", f"评分: {score}")
+        emit_rag_step("⚠️", "文档相关性不足，将重写查询", f"{yes_count}/{len(per_chunk_grades)} 块均不相关")
     grade_update = {
-        "grade_score": score,
+        "grade_score": "yes" if passed else "no",
         "grade_route": route,
         "rewrite_needed": route == "rewrite_question",
+        "per_chunk_grades": per_chunk_grades,
     }
-    rag_trace = state.get("rag_trace", {}) or {}
     rag_trace.update(grade_update)
     return {"route": route, "rag_trace": rag_trace}
+
+
+def grade_expanded_node(state: RAGState) -> RAGState:
+    from app.chat.tools import emit_rag_step
+
+    """
+    扩展检索后的二次质量门控：对改写后的检索结果再逐块打分。
+    全部不相关（或无结果）且启用拒答时，置 no_answer 标志，由工具侧转换为「知识库无相关资料」的拒答提示。
+    """
+    rag_trace = state.get("rag_trace", {}) or {}
+    docs = state.get("docs") or []
+    refusal_enabled = bool(getattr(settings, "KB_GRADE_REFUSAL_ENABLED", True))
+
+    if not refusal_enabled:
+        rag_trace.update({"second_grade": "skipped", "second_grade_reason": "KB_GRADE_REFUSAL_ENABLED=false"})
+        return {"route": "generate_answer", "rag_trace": rag_trace}
+
+    if not docs:
+        emit_rag_step("🚫", "知识库无相关资料", "扩展检索无结果，将告知用户")
+        rag_trace.update({"second_grade": "empty", "grade_route": "no_answer", "no_answer": True})
+        return {"route": "no_answer", "no_answer": True, "rag_trace": rag_trace}
+
+    llm_config = state.get("llm_config") or {}
+    grader = _grader_model(llm_config) # 评分模型
+    if not grader:
+        rag_trace.update({"second_grade": "no_model", "no_answer": False})
+        return {"route": "generate_answer", "rag_trace": rag_trace}
+
+    emit_rag_step("📊", "正在二次评估扩展检索相关性...", f"候选 {len(docs)} 块")
+    question = state["question"]
+    prompt = PER_CHUNK_GRADE_PROMPT.format(question=question, context=_to_chunk_grading_payload(docs))
+    try:
+        response = grader.with_structured_output(ChunkGrades, method="json_mode").invoke(
+            [{"role": "user", "content": prompt}]
+        )
+        ratings = getattr(response, "ratings", None)
+    except Exception as e:
+        # 评分失败放行生成，避免链路报错
+        emit_rag_step("⚠️", "二次相关性评估失败，放行生成", str(e)[:120])
+        rag_trace.update({"second_grade": "error", "second_grade_error": str(e)[:200], "no_answer": False})
+        return {"route": "generate_answer", "rag_trace": rag_trace}
+
+    per_chunk_grades, passed = _apply_per_chunk_grades(docs, ratings)
+    rag_trace["second_grade_per_chunk_grades"] = per_chunk_grades
+    yes_count = sum(1 for g in per_chunk_grades if g.get("binary_score") == "yes")
+    if passed:
+        emit_rag_step("✅", "扩展检索相关性通过", f"{yes_count}/{len(per_chunk_grades)} 块相关")
+        rag_trace.update({"second_grade": "pass", "grade_route": "generate_answer", "no_answer": False})
+        return {"route": "generate_answer", "rag_trace": rag_trace}
+    emit_rag_step("🚫", "知识库无相关资料", "多次检索均未通过相关性评估，将告知用户")
+    rag_trace.update({"second_grade": "fail_all", "grade_route": "no_answer", "no_answer": True})
+    return {"route": "no_answer", "no_answer": True, "rag_trace": rag_trace}
 
 
 def rewrite_question_node(state: RAGState) -> RAGState:
@@ -340,10 +477,14 @@ def retrieve_expanded(state: RAGState) -> RAGState:
             include_images=inc_img,
             document_filenames=doc_fn,
         )
+        hyde_meta = retrieved_hyde.get("meta", {})
         hyde_docs = retrieved_hyde.get("docs", [])
+        if hyde_meta.get("rerank_below_min"):
+            # rerank 分数未达阈值：丢弃该路结果
+            hyde_docs = []
+            emit_rag_step("🚫", "HyDE 检索低于 rerank 分数阈值", "已丢弃该路结果")
         hyde_chunk_count = len(hyde_docs)
         results.extend(hyde_docs)
-        hyde_meta = retrieved_hyde.get("meta", {})
         emit_rag_step(
             "🧱",
             "HyDE 三级检索",
@@ -387,8 +528,13 @@ def retrieve_expanded(state: RAGState) -> RAGState:
             include_images=inc_img,
             document_filenames=doc_fn,
         )
-        results.extend(retrieved_stepback.get("docs", []))
         step_meta = retrieved_stepback.get("meta", {})
+        step_docs = retrieved_stepback.get("docs", [])
+        if step_meta.get("rerank_below_min"):
+            # rerank 分数未达阈值：丢弃该路结果
+            step_docs = []
+            emit_rag_step("🚫", "Step-back 检索低于 rerank 分数阈值", "已丢弃该路结果")
+        results.extend(step_docs)
         emit_rag_step(
             "🧱",
             "Step-back 三级检索",
@@ -467,6 +613,7 @@ def build_rag_graph():
     graph.add_node("grade_documents", grade_documents_node)
     graph.add_node("rewrite_question", rewrite_question_node)
     graph.add_node("retrieve_expanded", retrieve_expanded)
+    graph.add_node("grade_expanded", grade_expanded_node)
 
     graph.set_entry_point("retrieve_initial")
 
@@ -497,8 +644,18 @@ def build_rag_graph():
     )
     # 如果重写查询，则扩展查询
     graph.add_edge("rewrite_question", "retrieve_expanded")
-    # 如果扩展查询，则结束
-    graph.add_edge("retrieve_expanded", END)
+    # 扩展检索后做二次质量门控（拒答或放行生成）
+    graph.add_edge("retrieve_expanded", "grade_expanded")
+    graph.add_conditional_edges(
+        "grade_expanded",
+        lambda state: state.get("route"),
+        {
+            # 相关性通过，则生成答案
+            "generate_answer": END,
+            # 相关性不足或无结果，置 no_answer 标志并结束（由工具侧转换为拒答提示）
+            "no_answer": END,
+        },
+    )
     return graph.compile()
 
 
@@ -537,5 +694,6 @@ def run_rag_graph(
             "rag_trace": None,
             "include_images": True,  # 默认包含图片检索
             "document_filenames": document_filenames,
+            "no_answer": False,
         }
     )

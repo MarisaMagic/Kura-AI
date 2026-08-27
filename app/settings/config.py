@@ -185,10 +185,15 @@ class Settings(BaseSettings):
 
     # RAG：可选单独指定打分模型；未设置则与智能体对话模型相同
     RAG_GRADE_MODEL: typing.Optional[str] = None
+    # 扩展检索后二次质量门控：逐块打分全部不相关（或无结果）时置 no_answer，工具侧返回拒答文案；
+    # 关闭后保持旧行为（改写后直接生成）
+    KB_GRADE_REFUSAL_ENABLED: bool = True
+    # Rerank 分数阈值：最高 relevance_score 低于该值时按「知识库无相关资料」处理；None=禁用（默认）
+    RERANK_MIN_SCORE: typing.Optional[float] = None
 
     # Auto-merge / 叶子层（与 SuperMew 一致）
     AUTO_MERGE_ENABLED: bool = True
-    AUTO_MERGE_THRESHOLD: int = 2
+    AUTO_MERGE_THRESHOLD: int = 3
     LEAF_RETRIEVE_LEVEL: int = 3
     # 多模态 RAG：命中「文本块」时按 PostgreSQL 中 related_text_ids 拉取同页/邻近关联图片并并入候选
     KB_RELATED_IMAGE_EXPANSION: bool = True

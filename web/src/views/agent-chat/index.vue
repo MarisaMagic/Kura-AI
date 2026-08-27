@@ -164,8 +164,43 @@
                         <div
                           v-if="!m.pending && (m.content || '').trim()"
                           class="agent-chat-md"
-                          v-html="renderAgentChatMarkdown(m.content)"
+                          @click="onAgentMdClick"
+                          v-html="renderAgentChatMarkdown(m.content, m.sources)"
                         />
+                        <div v-if="!m.pending && m.sources?.length" class="agent-chat-sources">
+                          <span class="agent-chat-sources-label">{{
+                            $t('views.agents.chat_sources_label')
+                          }}</span>
+                          <template v-for="src in m.sources" :key="`src-${src.chunk_id || src.index}`">
+                            <a
+                              v-if="src.image_url"
+                              :href="src.image_url"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              class="agent-chat-source-chip"
+                              :data-kcite-chip="src.index"
+                            >
+                              [{{ src.index }}] {{ src.filename
+                              }}<template
+                                v-if="src.page_number && src.page_number !== 'N/A'"
+                              >
+                                · P{{ src.page_number }}</template
+                              >
+                            </a>
+                            <span
+                              v-else
+                              class="agent-chat-source-chip"
+                              :data-kcite-chip="src.index"
+                            >
+                              [{{ src.index }}] {{ src.filename
+                              }}<template
+                                v-if="src.page_number && src.page_number !== 'N/A'"
+                              >
+                                · P{{ src.page_number }}</template
+                              >
+                            </span>
+                          </template>
+                        </div>
                       </div>
                       <div
                         v-if="
@@ -623,6 +658,13 @@ function applyChatSsePayload(data, idx) {
       ragTrace: data.rag_trace || null,
       pending: cur.pending,
     }
+  } else if (data.type === 'sources') {
+    const cur = messages.value[idx]
+    messages.value[idx] = {
+      ...cur,
+      sources: Array.isArray(data.sources) ? data.sources : [],
+      pending: cur.pending,
+    }
   } else if (data.type === 'error') {
     const cur = messages.value[idx]
     messages.value[idx] = {
@@ -873,6 +915,7 @@ async function maybeResumePendingChatJob() {
       thinkingOpen: true,
       ragSteps: [],
       ragTrace: null,
+      sources: [],
     })
     idx = messages.value.length - 1
     sessionPhase.value = 'chat'
@@ -928,6 +971,7 @@ async function loadMessagesForSession(agentId, sid) {
       ragSteps: Array.isArray(row.rag_steps) ? row.rag_steps : [],
       ragTrace: row.rag_trace || null,
       errorText: row.error_text || undefined,
+      sources: Array.isArray(row.sources) ? row.sources : [],
     }
     if (role === 'user') {
       const att = attachmentsFromHistoryRow(row)
@@ -1111,6 +1155,22 @@ async function copyAssistantPlain(m) {
   } catch {
     window.$message?.error(t('views.agents.chat_copy_fail'))
   }
+}
+
+// v-html 内的引用胶囊无法直接绑 Vue 事件，用事件委托统一处理：
+// 点击 [来源N] 胶囊 → 平滑滚动到本消息底部对应来源 chip 并闪烁提示。
+function onAgentMdClick(e) {
+  const badge = e.target.closest?.('.kcite')
+  if (!badge) return
+  const n = badge.getAttribute('data-kcite')
+  if (!n) return
+  const chip = e.currentTarget.parentElement?.querySelector(`[data-kcite-chip="${n}"]`)
+  if (!chip) return
+  chip.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  chip.classList.remove('kcite-flash')
+  void chip.offsetWidth
+  chip.classList.add('kcite-flash')
+  window.setTimeout(() => chip.classList.remove('kcite-flash'), 1400)
 }
 
 async function copyAssistantMarkdown(m) {
@@ -1317,6 +1377,7 @@ async function submitMessage() {
     thinkingOpen: false,
     ragSteps: [],
     ragTrace: null,
+    sources: [],
   })
   scrollBodyToBottom()
 
@@ -1392,6 +1453,7 @@ async function regenerateAssistant(assistantMsg) {
     thinkingOpen: false,
     ragSteps: [],
     ragTrace: null,
+    sources: [],
   }
   scrollBodyToBottom()
 
@@ -2319,6 +2381,57 @@ html.dark .agent-chat-msg-stopped {
 
 html.dark .agent-chat-md {
   color: rgba(255, 255, 255, 0.88);
+}
+
+/* 知识库来源列表 */
+.agent-chat-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.agent-chat-sources-label {
+  font-size: 12px;
+  color: #64748b;
+  margin-right: 2px;
+}
+
+.agent-chat-source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #eef2f7;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.7;
+  text-decoration: none;
+  border: 1px solid #e2e8f0;
+  /* 点击正文引用胶囊跳转后与容器边缘保持间距 */
+  scroll-margin: 8px;
+}
+
+a.agent-chat-source-chip:hover {
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+
+html.dark .agent-chat-sources-label {
+  color: #94a3b8;
+}
+
+html.dark .agent-chat-source-chip {
+  background: rgba(148, 163, 184, 0.14);
+  border-color: rgba(148, 163, 184, 0.28);
+  color: #cbd5e1;
+}
+
+html.dark a.agent-chat-source-chip:hover {
+  border-color: #cbd5e1;
+  color: #f1f5f9;
 }
 
 .agent-chat-md :deep(p) {

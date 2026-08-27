@@ -36,14 +36,16 @@ def _kb_image_absolute_fs_path(stored_relpath: str) -> Path:
 
 def format_knowledge_retrieval_tool_output(
     docs: list[dict[str, Any]],
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """
     将 RAG/检索产出的 docs 格式化为给模型的字符串与多模态 image_references 列表。
-    返回 (工具输出正文, image_references)。
+    返回 (工具输出正文, image_references, kb_sources)；
+    kb_sources 的 index 与正文中 [i] 编号一致，供前端渲染「来源」列表。
     """
     image_references: list[dict[str, Any]] = []
+    kb_sources: list[dict[str, Any]] = []
     if not docs:
-        return "No relevant documents found in knowledge base.", []
+        return "No relevant documents found in knowledge base.", [], []
 
     formatted: list[str] = []
     image_count = 0
@@ -71,11 +73,23 @@ def format_knowledge_retrieval_tool_output(
             chunk_text = f"[{i}] {source} (Page {page}) - {img_info}\nchunk_id: {chunk_id}\nScore: {score:.4f}"
             formatted.append(chunk_text)
 
+            public_url = _kb_image_public_url(stored_relpath)
+            kb_sources.append(
+                {
+                    "index": i,
+                    "filename": source,
+                    "page_number": page,
+                    "chunk_id": chunk_id,
+                    "score": score,
+                    "content_type": "image",
+                    "image_url": public_url,
+                }
+            )
+
             if not stored_relpath:
                 formatted.append("（PostgreSQL 中无 stored_relpath，无法生成图片链接）")
                 continue
 
-            public_url = _kb_image_public_url(stored_relpath)
             on_disk = _kb_image_absolute_fs_path(stored_relpath).is_file()
 
             formatted.append(f"PostgreSQL stored_relpath（知识库图片表中的相对存储路径）: {stored_relpath}")
@@ -109,6 +123,16 @@ def format_knowledge_retrieval_tool_output(
         else:
             text = result.get("text", "")
             formatted.append(f"[{i}] {source} (Page {page})\n{text}\nScore: {score:.4f}")
+            kb_sources.append(
+                {
+                    "index": i,
+                    "filename": source,
+                    "page_number": page,
+                    "chunk_id": result.get("chunk_id", ""),
+                    "score": score,
+                    "content_type": "text",
+                }
+            )
 
     if image_count > 0:
         formatted.insert(0, f"检索结果：{len(docs)} 个文档（包含 {image_count} 张图片）\n")
@@ -116,4 +140,4 @@ def format_knowledge_retrieval_tool_output(
         formatted.insert(0, f"检索结果：{len(docs)} 个文档\n")
 
     out = "Retrieved Chunks:\n" + "\n\n---\n\n".join(formatted)
-    return out, image_references
+    return out, image_references, kb_sources

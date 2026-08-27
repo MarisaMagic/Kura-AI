@@ -1,0 +1,70 @@
+/* 知识库 [来源N] 引用标注样式（由 agentChatMarkdown.js 引入）。
+   v-html 注入的内容不受组件 scoped 样式约束，故作为全局样式集中放在这里。 */
+
+.kcite-group {
+  font-size: 0;
+  line-height: 0;
+  white-space: nowrap;
+  margin: 0 1px;
+}
+
+.kcite {
+  display: inline-block;
+  min-width: 1.1em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(244, 81, 30, 0.32);
+  background: rgba(244, 81, 30, 0.09);
+  color: var(--primary-color, #f4511e);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
+  vertical-align: middle;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.kcite:hover {
+  background: rgba(244, 81, 30, 0.2);
+  border-color: rgba(244, 81, 30, 0.58);
+}
+
+.kcite-sep {
+  display: inline-block;
+  margin: 0 2px;
+  font-size: 12px;
+  line-height: 1.4;
+  vertical-align: middle;
+  color: #94a3b8;
+}
+
+html.dark .kcite {
+  background: rgba(255, 138, 92, 0.16);
+  border-color: rgba(255, 138, 92, 0.4);
+  color: #ff9d7a;
+}
+
+html.dark .kcite:hover {
+  background: rgba(255, 138, 92, 0.28);
+  border-color: rgba(255, 138, 92, 0.65);
+  color: #ffb59a;
+}
+
+/* 点击引用胶囊跳转后，来源 chip 的反馈动画（由 index.vue 动态追加 .kcite-flash） */
+@keyframes kcite-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(244, 81, 30, 0.55);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 10px rgba(244, 81, 30, 0);
+  }
+}
+
+.kcite-flash {
+  animation: kcite-ring 1.3s cubic-bezier(0.2, 0.6, 0.4, 1) 1;
+}
