@@ -20,7 +20,7 @@
                 <p class="agent-chat-intro-sub">{{ introDescription }}</p>
                 <p class="agent-chat-intro-creator">
                   <TheIcon icon="mdi:account-outline" :size="16" />
-                  <span>{{ $t('views.agents.chat_label_creator') }} · {{ userStore.name }}</span>
+                  <span>{{ $t('views.agents.chat_label_creator') }} · {{ creatorName }}</span>
                 </p>
                 <div
                   v-if="hasIntroOpeningText"
@@ -1039,6 +1039,12 @@ async function initChatSessionState() {
 
 const agentAvatarSrc = computed(() => agent.value?.avatar_url || DEFAULT_AVATAR)
 
+/** 智能体发布者名（非属主使用时展示发布者，自身智能体回退为当前用户名） */
+const creatorName = computed(() => {
+  const owner = agent.value?.owner_username && String(agent.value.owner_username).trim()
+  return owner || userStore.name || ''
+})
+
 /** 顶部会话标题：最新一条用户提问摘要，否则智能体名 */
 const chatSessionTitle = computed(() => {
   const users = messages.value.filter((m) => m.role === 'user' && (m.content || '').trim())
@@ -1474,8 +1480,9 @@ function syncAgentToHeader() {
     title: a.name || '',
     avatarUrl: a.avatar_url || '',
     subtitle: desc || a.name || '',
-    creatorName: userStore.name || '',
+    creatorName: (a.owner_username && String(a.owner_username).trim()) || userStore.name || '',
     agentId: a.id,
+    isOwner: Number(a.user_id) === Number(userStore.userId),
   })
   if (a.name) {
     document.title = `${a.name} | ${baseDocTitle}`

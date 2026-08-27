@@ -4,7 +4,12 @@
       <header class="agent-page-header">
         <h1 class="agent-page-title">{{ $t('views.agents.title_agent_hub') }}</h1>
       </header>
-      <n-spin :show="loading">
+      <n-tabs v-model:value="activeTab" type="segment" size="large" class="agent-hub-tabs">
+        <n-tab name="mine">{{ $t('views.agents.tab_mine') }}</n-tab>
+        <n-tab name="public">{{ $t('views.agents.tab_public') }}</n-tab>
+      </n-tabs>
+
+      <n-spin v-if="activeTab === 'mine'" :show="loading">
         <div v-if="!list.length && !loading" class="empty-tip">
           {{ $t('views.agents.text_empty_agents') }}
         </div>
@@ -88,9 +93,65 @@
                   class="agent-card-avatar"
                 />
                 <div class="agent-card-text">
-                  <div class="agent-card-title">{{ item.name }}</div>
+                  <div class="agent-card-title">
+                    <span class="agent-card-title-text">{{ item.name }}</span>
+                    <n-tag
+                      v-if="item.is_published"
+                      size="tiny"
+                      type="success"
+                      :bordered="false"
+                      class="agent-card-published-tag"
+                    >
+                      {{ $t('views.agents.published_badge') }}
+                    </n-tag>
+                  </div>
                   <div class="agent-card-desc">
                     {{ item.description || $t('views.agents.text_no_description') }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </n-card>
+        </div>
+      </n-spin>
+
+      <n-spin v-else :show="publicLoading">
+        <div v-if="!publicList.length && !publicLoading" class="empty-tip">
+          {{ $t('views.agents.public_empty') }}
+        </div>
+        <div class="agent-grid">
+          <n-card
+            v-for="item in publicList"
+            :key="item.id"
+            size="small"
+            class="agent-card"
+            :bordered="true"
+          >
+            <div class="agent-card-body">
+              <div
+                class="agent-card-main"
+                role="button"
+                tabindex="0"
+                @click="goChat(item.id)"
+                @keydown.enter.prevent="goChat(item.id)"
+              >
+                <n-avatar
+                  round
+                  :size="48"
+                  :src="item.avatar_url"
+                  object-fit="cover"
+                  class="agent-card-avatar"
+                />
+                <div class="agent-card-text">
+                  <div class="agent-card-title">
+                    <span class="agent-card-title-text">{{ item.name }}</span>
+                  </div>
+                  <div class="agent-card-desc">
+                    {{ item.description || $t('views.agents.text_no_description') }}
+                  </div>
+                  <div class="agent-card-owner">
+                    <TheIcon icon="mdi:account-outline" :size="14" />
+                    <span class="agent-card-owner-name">{{ item.owner_username || '—' }}</span>
                   </div>
                 </div>
               </div>
@@ -103,18 +164,21 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { NAvatar, NButton, NCard, NPopconfirm, NSpin } from 'naive-ui'
+import { NAvatar, NButton, NCard, NPopconfirm, NSpin, NTab, NTabs, NTag } from 'naive-ui'
 import AppPage from '@/components/page/AppPage.vue'
 import TheIcon from '@/components/icon/TheIcon.vue'
 import api from '@/api'
 
 const { t } = useI18n()
 const router = useRouter()
+const activeTab = ref('mine')
 const loading = ref(false)
 const list = ref([])
+const publicLoading = ref(false)
+const publicList = ref([])
 
 async function fetchList() {
   loading.value = true
@@ -123,6 +187,16 @@ async function fetchList() {
     list.value = res.data || []
   } finally {
     loading.value = false
+  }
+}
+
+async function fetchPublicList() {
+  publicLoading.value = true
+  try {
+    const res = await api.getPublicAgentList({ page: 1, page_size: 100 })
+    publicList.value = res.data || []
+  } finally {
+    publicLoading.value = false
   }
 }
 
@@ -148,6 +222,10 @@ async function handleDelete(id) {
   await fetchList()
 }
 
+watch(activeTab, (tab) => {
+  if (tab === 'public') fetchPublicList()
+})
+
 onMounted(fetchList)
 </script>
 
@@ -165,7 +243,7 @@ onMounted(fetchList)
 }
 
 .agent-page-header {
-  margin-bottom: 24px;
+  margin-bottom: 20px;
   padding-bottom: 20px;
   border-bottom: 1px solid var(--n-divider-color);
 }
@@ -177,6 +255,10 @@ onMounted(fetchList)
   line-height: 1.25;
   letter-spacing: 0.04em;
   color: var(--n-text-color);
+}
+
+.agent-hub-tabs {
+  margin-bottom: 18px;
 }
 
 .empty-tip {
@@ -340,15 +422,26 @@ html.dark .agent-card:hover {
 }
 
 .agent-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   font-size: 16px;
   font-weight: 600;
   line-height: 1.35;
   color: var(--n-text-color);
+}
+
+.agent-card-title-text {
+  flex-shrink: 1;
+  min-width: 0;
   overflow: hidden;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 1;
-  word-break: break-word;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-card-published-tag {
+  flex-shrink: 0;
 }
 
 .agent-card-desc {
@@ -360,5 +453,20 @@ html.dark .agent-card:hover {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   word-break: break-word;
+}
+
+.agent-card-owner {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--n-text-color-3);
+}
+
+.agent-card-owner-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

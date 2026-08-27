@@ -44,6 +44,7 @@ export default {
   getAuditLogList: (params = {}) => request.get('/auditlog/list', { params }),
   // user agents
   getUserAgentList: (params = {}) => request.get('/user-agent/list', { params }),
+  getPublicAgentList: (params = {}) => request.get('/user-agent/public', { params }),
   getUserAgent: (params = {}) => request.get('/user-agent/get', { params }),
   createUserAgent: (data = {}) => request.post('/user-agent/create', data),
   updateUserAgent: (data = {}) => request.post('/user-agent/update', data),

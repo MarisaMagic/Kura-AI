@@ -20,10 +20,11 @@ router = APIRouter()
 
 
 async def _public_agent_dict(obj: UserAgent, username: str) -> dict:
-    """不包含密文，附带 has_api_key。"""
+    """不包含密文，附带 has_api_key 与属主用户名（头像按属主目录存储）。"""
     d = await obj.to_dict(exclude_fields=["api_key_ciphertext"])
     d["has_api_key"] = bool(obj.api_key_ciphertext)
     d["avatar_url"] = agent_avatar_url(username, obj.avatar_filename)
+    d["owner_username"] = username
     return d
 
 
@@ -43,14 +44,38 @@ async def list_user_agents(
     return SuccessExtra(data=data, total=total, page=page, page_size=page_size)
 
 
+@router.get("/public", summary="智能体广场（已发布，不含自己的）", tags=["智能体模块"])
+async def list_public_agents(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    user_id = CTX_USER_ID.get()
+    base = UserAgent.filter(is_published=True).exclude(user_id=user_id)
+    total = await base.count()
+    objs = (
+        await base.select_related("user")
+        .order_by("-updated_at")
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    data = []
+    for obj in objs:
+        owner = obj.user
+        data.append(await _public_agent_dict(obj, owner.username if owner else ""))
+    return SuccessExtra(data=data, total=total, page=page, page_size=page_size)
+
+
 @router.get("/get", summary="智能体详情", tags=["智能体模块"])
 async def get_user_agent(agent_id: int = Query(..., description="智能体 ID")):
     user_id = CTX_USER_ID.get()
-    user_obj = await user_controller.get(id=user_id)
-    obj = await user_agent_controller.get_owned(agent_id, user_id)
+    obj = await user_agent_controller.get_accessible(agent_id, user_id)
     if not obj:
         return Fail(code=404, msg="智能体不存在或无权限访问")
-    d = await _public_agent_dict(obj, user_obj.username)
+    owner = await obj.user
+    d = await _public_agent_dict(obj, owner.username)
+    if int(obj.user_id or 0) != int(user_id):
+        d["has_api_key"] = False
     return Success(data=d)
 
 
@@ -78,6 +103,8 @@ async def update_user_agent(body: UserAgentUpdate):
     if api_key and api_key.strip():
         obj.api_key_ciphertext = encrypt_api_key(api_key.strip())
     obj = obj.update_from_dict(payload)
+    if obj.is_published and not obj.api_key_ciphertext:
+        return Fail(code=400, msg="发布智能体前请先配置模型 API Key")
     await obj.save()
     user_obj = await user_controller.get(id=user_id)
     d = await _public_agent_dict(obj, user_obj.username)

@@ -17,7 +17,7 @@ async def touch_recent_agent(user_id: int, agent_id: int) -> bool:
     """
     记录用户使用某智能体；校验归属后更新/插入，并裁剪为最多 RECENT_AGENT_LIMIT 条。
     """
-    ua = await user_agent_controller.get_owned(agent_id, user_id)
+    ua = await user_agent_controller.get_accessible(agent_id, user_id)
     if not ua:
         return False
 
@@ -44,11 +44,13 @@ async def list_recent_agents_public(user_id: int, limit: int = RECENT_AGENT_LIMI
     rows = await UserAgentRecent.filter(user_id=user_id).order_by("-last_used_at").limit(limit).all()
     out = []
     for r in rows:
-        agent = await UserAgent.filter(id=r.agent_id, user_id=user_id).first()
+        agent = await UserAgent.filter(id=r.agent_id).select_related("user").first()
         if not agent:
             continue
+        owner = agent.user
+        owner_username = (owner.username if owner else "") or username
         d = await agent.to_dict(exclude_fields=["api_key_ciphertext"])
         d["has_api_key"] = bool(agent.api_key_ciphertext)
-        d["avatar_url"] = agent_avatar_url(username, agent.avatar_filename)
+        d["avatar_url"] = agent_avatar_url(owner_username, agent.avatar_filename)
         out.append(d)
     return out

@@ -46,6 +46,7 @@
             }}</span>
           </button>
           <button
+            v-if="headerStore.isOwner"
             type="button"
             class="agent-chat-popover-action"
             :disabled="!headerStore.agentId"
@@ -59,6 +60,7 @@
             }}</span>
           </button>
           <button
+            v-if="headerStore.isOwner"
             type="button"
             class="agent-chat-popover-action"
             :disabled="!headerStore.agentId"

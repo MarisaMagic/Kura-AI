@@ -51,7 +51,7 @@ async def upload_chat_attachment(
     :return: Success
     """
     user_id = current_user.id
-    ua = await user_agent_controller.get_owned(agent_id, user_id)
+    ua = await user_agent_controller.get_accessible(agent_id, user_id)
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     sid = (session_id or "default_session").strip() or "default_session"
@@ -83,7 +83,7 @@ async def preview_chat_attachment(
     按 attachment_id 读盘并返回字节流；供前端因 token 请求头无法用 img src 直连时通过 fetch+blob 展示。
     """
     user_id = current_user.id
-    ua = await user_agent_controller.get_owned(agent_id, user_id)
+    ua = await user_agent_controller.get_accessible(agent_id, user_id)
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     sid = (session_id or "default_session").strip() or "default_session"
@@ -145,7 +145,7 @@ def _upstream_http_exception(exc: Exception) -> HTTPException | None:
 @router.post("/chat", summary="智能体对话（非流式）", tags=["智能体模块"])
 async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(AuthControl.is_authed)):
     user_id = current_user.id
-    ua = await user_agent_controller.get_owned(request.agent_id, user_id)
+    ua = await user_agent_controller.get_accessible(request.agent_id, user_id)
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     session_id = (request.session_id or "default_session").strip() or "default_session"
@@ -183,7 +183,7 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
     # 获取当前用户ID
     user_id = current_user.id
     # 获取用户配置的智能体信息
-    ua = await user_agent_controller.get_owned(request.agent_id, user_id)
+    ua = await user_agent_controller.get_accessible(request.agent_id, user_id)
     # 如果智能体不存在或无权限访问，则返回404错误
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
@@ -236,7 +236,7 @@ async def create_chat_job_endpoint(request: ChatRequest, current_user: User = De
     # 获取当前用户ID
     user_id = current_user.id
     # 获取用户配置的智能体信息
-    ua = await user_agent_controller.get_owned(request.agent_id, user_id)
+    ua = await user_agent_controller.get_accessible(request.agent_id, user_id)
     # 如果智能体不存在或无权限访问，则返回404错误
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
@@ -358,18 +358,18 @@ def _enrich_session_rows(ua, items: list[dict]) -> list[SessionInfo]:
     return enriched
 
 
-async def _enrich_all_user_sessions(user_id: int, items: list[dict]) -> list[SessionInfo]:
+async def _enrich_all_user_sessions(items: list[dict]) -> list[SessionInfo]:
     """
     跨智能体会话列表：按 agent_id 批量补全智能体名称。
     通过智能体名称、更新时间等字段补全会话列表信息。用于展示用户所有会话列表中的元数据。
-    :param user_id: 用户ID
+    会话均属于当前用户，按 id 直接回填即可（覆盖共享的已发布智能体与已下架智能体的历史会话）。
     :param items: 会话列表
     :return: 跨智能体会话列表
     """
     agent_ids = list({int(x["agent_id"]) for x in items if x.get("agent_id") is not None})
     names: dict[int, str] = {}
     if agent_ids:
-        agents = await UserAgent.filter(user_id=user_id, id__in=agent_ids).all()
+        agents = await UserAgent.filter(id__in=agent_ids).all()
         for a in agents:
             names[a.id] = (a.name or "").strip()
     enriched = []
@@ -411,7 +411,7 @@ async def list_chat_sessions(
     # 获取当前用户ID
     user_id = current_user.id
     # 获取用户配置的智能体信息
-    ua = await user_agent_controller.get_owned(agent_id, user_id)
+    ua = await user_agent_controller.get_accessible(agent_id, user_id)
     # 如果智能体不存在或无权限访问，则返回404错误
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
@@ -469,7 +469,7 @@ async def list_chat_sessions_all(
     # 获取会话列表, 通过 PostgreSQL 和 Redis 缓存获取
     items, total = storage.list_session_infos_all_paginated(user_id, limit, offset)
     # 补全当前用户所有会话列表信息
-    enriched = await _enrich_all_user_sessions(user_id, items)
+    enriched = await _enrich_all_user_sessions(items)
     # 是否有更多
     has_more = offset + len(enriched) < total
     # 返回会话列表响应
@@ -502,7 +502,7 @@ async def get_chat_session_messages(
     # 获取当前用户ID
     user_id = current_user.id
     # 获取用户配置的智能体信息
-    ua = await user_agent_controller.get_owned(agent_id, user_id)
+    ua = await user_agent_controller.get_accessible(agent_id, user_id)
     # 如果智能体不存在或无权限访问，则返回404错误
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
@@ -545,7 +545,7 @@ async def delete_chat_session(
     # 获取当前用户ID
     user_id = current_user.id
     # 获取用户配置的智能体信息
-    ua = await user_agent_controller.get_owned(agent_id, user_id)
+    ua = await user_agent_controller.get_accessible(agent_id, user_id)
     # 如果智能体不存在或无权限访问，则返回404错误
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")

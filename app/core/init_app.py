@@ -209,6 +209,7 @@ async def init_db():
     await ensure_user_avatar_column()
     await ensure_user_agent_base_url_column()
     await ensure_user_agent_supports_vision_column()
+    await ensure_user_agent_is_published_column()
 
 
 async def ensure_user_avatar_column() -> None:
@@ -259,6 +260,24 @@ async def ensure_user_agent_supports_vision_column() -> None:
         if "duplicate column" in msg or "already exists" in msg:
             return
         logger.warning('ensure_user_agent_supports_vision_column: %s', e)
+
+
+async def ensure_user_agent_is_published_column() -> None:
+    """旧库可能缺少 is_published 列；aerich 未覆盖时补齐（SQLite）。"""
+    try:
+        conn = Tortoise.get_connection("sqlite")
+    except Exception:
+        return
+    try:
+        await conn.execute_query(
+            'ALTER TABLE "user_agent" ADD COLUMN "is_published" INTEGER NOT NULL DEFAULT 0'
+        )
+        logger.info('Added column "user_agent"."is_published"')
+    except Exception as e:
+        msg = str(e).lower()
+        if "duplicate column" in msg or "already exists" in msg:
+            return
+        logger.warning('ensure_user_agent_is_published_column: %s', e)
 
 
 async def ensure_agent_menus():

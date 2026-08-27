@@ -9,16 +9,19 @@ export const useAgentChatHeaderStore = defineStore('agentChatHeader', {
     subtitle: '',
     creatorName: '',
     agentId: null,
+    /** 当前登录用户是否为该智能体属主（非属主隐藏编辑/知识库入口） */
+    isOwner: true,
     /** 当前会话标题（首条用户消息摘要），顶栏居中展示 */
     sessionTitle: '',
   }),
   actions: {
-    setAgentMeta({ title, avatarUrl, subtitle, creatorName, agentId } = {}) {
+    setAgentMeta({ title, avatarUrl, subtitle, creatorName, agentId, isOwner } = {}) {
       this.agentTitle = title || ''
       this.avatarUrl = avatarUrl || ''
       this.subtitle = subtitle || ''
       this.creatorName = creatorName || ''
       this.agentId = agentId != null ? agentId : null
+      if (isOwner !== undefined) this.isOwner = !!isOwner
     },
     setAgentTitle(title) {
       this.agentTitle = title || ''
@@ -32,6 +35,7 @@ export const useAgentChatHeaderStore = defineStore('agentChatHeader', {
       this.subtitle = ''
       this.creatorName = ''
       this.agentId = null
+      this.isOwner = true
       this.sessionTitle = ''
     },
   },

@@ -89,6 +89,21 @@
     </section>
 
     <section class="agent-section">
+      <header class="section-header">{{ $t('views.agents.section_publish') }}</header>
+      <div class="section-body">
+        <n-form-item :show-label="false" class="agent-enable-row-item">
+          <div class="agent-enable-row">
+            <div class="agent-enable-pair">
+              <span class="agent-enable-label">{{ $t('views.agents.label_publish') }}</span>
+              <n-switch v-model:value="form.is_published" />
+            </div>
+            <span class="agent-enable-hint">{{ $t('views.agents.publish_hint') }}</span>
+          </div>
+        </n-form-item>
+      </div>
+    </section>
+
+    <section class="agent-section">
       <header
         class="section-header section-header--collapsible"
         role="button"
@@ -376,6 +391,13 @@ html.dark .section-header {
   max-width: 12em;
   white-space: normal;
   line-height: 1.35;
+}
+
+.agent-enable-hint {
+  flex-basis: 100%;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--n-text-color-3);
 }
 
 .agent-avatar-box {

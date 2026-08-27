@@ -20,6 +20,7 @@ class UserAgentCommon(BaseModel):
         default=False,
         description="启用后允许本会话图片附件以多模态理解（需模型支持视觉）；关闭时上传图片将被拒绝",
     )
+    is_published: bool = Field(default=False, description="发布到广场：开启后所有用户可查看并对话")
 
     @field_validator("base_url", mode="before")
     @classmethod

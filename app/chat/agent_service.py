@@ -121,10 +121,9 @@ def _run_kb_document_preselect_with_context(
     *,
     regenerate: bool,
     ua: UserAgent,
-    user_id: int,
     agent_id: int,
 ) -> tuple[list[str] | None, dict[str, Any]]:
-    """知识库前置选档：可附带最近多轮对话，meta 含 context_* 与选档结果。"""
+    """知识库前置选档：可附带最近多轮对话，meta 含 context_* 与选档结果。选档范围按属主隔离。"""
     from app.kb.kb_document_preselect import run_kb_document_preselect
     from app.kb.kb_preselect_context import build_kb_preselect_conversation_context
     from app.kb.kb_scope import kb_scope_for
@@ -136,7 +135,7 @@ def _run_kb_document_preselect_with_context(
     )
     filt, pre_meta = run_kb_document_preselect(
         (current_question or "").strip(),
-        kb_scope_for(user_id, agent_id),
+        kb_scope_for(ua.user_id, agent_id),
         _llm_config_from_ua(ua),
         conversation_context=ctx or None,
     )
@@ -272,9 +271,9 @@ def build_model_and_agent(
     kb_retrieval_system_extension: str | None = None,
 ) -> tuple[Any, Any]:
     """
-    构建模型和智能体（知识库检索按 user_id + agent_id 隔离）。
+    构建模型和智能体（知识库检索按属主隔离：使用他人已发布智能体时检索发布者的知识库）。
     :param ua: 智能体
-    :param user_id: 所属用户 ID
+    :param user_id: 聊天者用户 ID（会话附件/会话记忆按聊天者隔离；知识库按属主隔离）
     :param agent_id: 智能体 ID
     :param session_id: 会话 ID（会话附件工具作用域）
     :param use_knowledge_retrieval: 是否注册知识库检索工具
@@ -299,7 +298,7 @@ def build_model_and_agent(
         temperature=float(ua.temperature),
         stream_usage=True,
     )
-    kb_scope = kb_scope_for(user_id, ua.id)
+    kb_scope = kb_scope_for(ua.user_id, ua.id)
     llm_config = {
         "api_key": plain.strip(),
         "base_url": base_url,
@@ -394,7 +393,6 @@ def chat_with_agent_sync(
             (user_text or "").strip(),
             regenerate=False,
             ua=ua,
-            user_id=user_id,
             agent_id=agent_id,
         )
     kb_ext = _format_kb_system_extension(retrieval_filter) if use_knowledge_retrieval else None
@@ -559,7 +557,6 @@ async def iter_chat_stream_events(
                 preselect_query,
                 regenerate=regenerate,
                 ua=ua,
-                user_id=user_id,
                 agent_id=agent_id,
             )
         )

@@ -154,7 +154,7 @@ async def _run_chat_job(
     seq = 0
     try:
         # 获取智能体
-        ua = await user_agent_controller.get_owned(agent_id, user_id)
+        ua = await user_agent_controller.get_accessible(agent_id, user_id)
         # 如果智能体不存在或无权限，则返回错误
         if not ua:
             await _append_event(job_id, seq, {"type": "error", "content": "智能体不存在或无权限"})
