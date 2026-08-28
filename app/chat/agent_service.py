@@ -30,14 +30,16 @@ from app.chat.memory_turns import apply_sliding_window_turns
 from app.chat.message_codec import expand_messages_for_model, msg_content_to_str
 from app.chat.storage import storage
 from app.chat.tools import (
-    get_current_weather,
+    emit_rag_step,
     get_last_rag_context,
     reset_tool_call_guards,
     set_rag_step_queue,
 )
+from app.chat.web_search_tool import make_web_search_tool
 from app.kb.image_search_tool import make_search_knowledge_by_image_tool
 from app.kb.kb_scope import kb_scope_for
 from app.kb.search_tool import make_search_knowledge_tool
+from app.mcp_client.service import load_agent_mcp_tools
 from app.models.user_agent import UserAgent
 from app.settings import settings
 from app.utils.api_key_crypto import decrypt_api_key_safe
@@ -98,6 +100,24 @@ class _KbPromptDebugCallback(BaseCallbackHandler):
 
 def _agent_invoke_config() -> dict[str, Any]:
     return {"recursion_limit": 30, "callbacks": [_KbPromptDebugCallback()]}
+
+
+def _wrap_async_tool_for_sync(tool: Any) -> Any:
+    """
+    将 async-only 工具（MCP 适配器产出）包装为同步可调用，供 chat_with_agent_sync 路径使用。
+    调用方须保证运行在无活动事件循环的线程中（endpoint 经 asyncio.to_thread 包裹）。
+    """
+    from langchain_core.tools import StructuredTool
+
+    def _sync_func(*args: Any, **kwargs: Any) -> Any:
+        return asyncio.run(tool.ainvoke(kwargs if kwargs else (args[0] if args else {})))
+
+    return StructuredTool.from_function(
+        func=_sync_func,
+        name=getattr(tool, "name", None) or "mcp_tool",
+        description=getattr(tool, "description", "") or "",
+        args_schema=getattr(tool, "args_schema", None),
+    )
 
 
 def _llm_config_from_ua(ua: UserAgent) -> dict[str, Any]:
@@ -225,6 +245,7 @@ def _compose_system_prompt(
     ua: UserAgent,
     use_knowledge_retrieval: bool = True,
     *,
+    use_web_search: bool = False,
     session_attachment_hint: str = "",
     kb_retrieval_system_extension: str | None = None,
 ) -> str:
@@ -232,6 +253,7 @@ def _compose_system_prompt(
     组合智能体的系统提示词（工具如何调用由各工具的 description 说明，此处不重复指令）。
     :param ua: 智能体
     :param use_knowledge_retrieval: 保留参数以兼容调用方；不在此写入知识库工具说明
+    :param use_web_search: 为 True 时写入联网搜索作答纪律
     :param session_attachment_hint: 本会话已上传附件的纯事实列表（无工具调用指引）
     :return: 系统提示词
     """
@@ -242,9 +264,16 @@ def _compose_system_prompt(
         parts.append(base)
     else:
         parts.append("You are a helpful assistant.")
-    # 联网能力说明
-    if ua.enable_web:
-        parts.append("用户已开启「联网」能力说明：当前未接入真实联网工具，请勿编造实时网页内容。")
+    # 联网搜索作答纪律（工具为 web_search，DuckDuckGo 实时结果）
+    if use_web_search:
+        parts.append(
+            "联网搜索作答纪律：回答必须仅依据 web_search 工具的返回内容与多轮对话上下文；"
+            "凡引用搜索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），并保证引用的 URL 与工具返回逐字一致。"
+            "当工具返回明确提示搜索失败或无结果（TOOL_CALL_LIMIT_REACHED / WEB_SEARCH_NO_RESULTS / 联网搜索出错）时，"
+            "必须如实告知用户「联网搜索未找到相关内容」并可建议换个问法重试，"
+            "不得编造搜索结果、实时数据或来源链接；"
+            "注意区分搜索结论与你的一般常识推断，后者不得冒充联网检索结果。"
+        )
     if (session_attachment_hint or "").strip():
         parts.append(session_attachment_hint.strip())
     if use_knowledge_retrieval and (kb_retrieval_system_extension or "").strip():
@@ -274,9 +303,11 @@ def build_model_and_agent(
     session_id: str,
     *,
     use_knowledge_retrieval: bool = True,
+    use_web_search: bool = False,
     session_attachment_hint: str = "",
     knowledge_base_document_filter: list[str] | None = None,
     kb_retrieval_system_extension: str | None = None,
+    extra_tools: list[Any] | None = None,
 ) -> tuple[Any, Any]:
     """
     构建模型和智能体（知识库检索按属主隔离：使用他人已发布智能体时检索发布者的知识库）。
@@ -285,9 +316,11 @@ def build_model_and_agent(
     :param agent_id: 智能体 ID
     :param session_id: 会话 ID（会话附件工具作用域）
     :param use_knowledge_retrieval: 是否注册知识库检索工具
+    :param use_web_search: 是否注册联网搜索工具（与知识库检索互斥，由请求层校验）
     :param session_attachment_hint: 本会话附件列表说明
     :param knowledge_base_document_filter: 由入口前置选档得到；None=全库，非空=仅这些 filename
     :param kb_retrieval_system_extension: 与选档结果对应的系统补充说明（file_key 列表等）
+    :param extra_tools: 外部预加载的附加工具（如 MCP 服务工具）
     :return: 模型和智能体
     """
     # 解密 API Key
@@ -312,8 +345,10 @@ def build_model_and_agent(
         "base_url": base_url,
         "model_name": ua.model_name,
     }
-    tools: list[Any] = [get_current_weather]
+    tools: list[Any] = []
     tools.extend(make_session_attachment_tools(user_id, agent_id, session_id))
+    if use_web_search and getattr(settings, "WEB_SEARCH_ENABLED", True):
+        tools.append(make_web_search_tool())  # 联网搜索（DuckDuckGo）
     if use_knowledge_retrieval:
         tools.append(
             make_search_knowledge_tool(
@@ -327,6 +362,8 @@ def build_model_and_agent(
         )  # 以图检索
     if getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
         tools.append(make_search_session_memory_tool(user_id, agent_id, session_id, llm_config)) # 添加会话记忆检索工具
+    if extra_tools:
+        tools.extend(extra_tools)  # MCP 服务等外部预加载工具
     # create_agent 创建智能体, 使用模型和系统提示词
     agent = create_agent(
         model=model,
@@ -334,6 +371,7 @@ def build_model_and_agent(
         system_prompt=_compose_system_prompt(
             ua,
             use_knowledge_retrieval=use_knowledge_retrieval,
+            use_web_search=use_web_search,
             session_attachment_hint=session_attachment_hint,
             kb_retrieval_system_extension=kb_retrieval_system_extension,
         ),
@@ -371,6 +409,7 @@ def chat_with_agent_sync(
     session_id: str,
     *,
     use_knowledge_retrieval: bool = True,
+    use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
 ) -> dict:
     """
@@ -380,6 +419,7 @@ def chat_with_agent_sync(
     :param user_id: 用户 ID
     :param agent_id: 智能体 ID
     :param session_id: 会话 ID
+    :param use_web_search: 是否启用联网搜索工具（与知识库检索互斥）
     :param attachment_ids: 本会话已上传附件 ID（顺序与引用一致）
     :return: 响应结果
     """
@@ -405,6 +445,17 @@ def chat_with_agent_sync(
         )
     kb_ext = _format_kb_system_extension(retrieval_filter) if use_knowledge_retrieval else None
 
+    # 加载该智能体已启用的 MCP 工具（本函数在无线事件循环的线程中运行，asyncio.run 安全）；
+    # MCP 工具为 async-only，包装为同步调用；单服务失败仅记录到 rag_steps，不中断对话。
+    mcp_tools: list[Any] = []
+    mcp_errors: list[dict] = []
+    try:
+        raw_mcp_tools, mcp_errors = asyncio.run(load_agent_mcp_tools(agent_id))
+        mcp_tools = [_wrap_async_tool_for_sync(t) for t in raw_mcp_tools]
+    except RuntimeError:
+        # 兜底：若意外处于运行中的事件循环（不应发生），跳过 MCP 不阻断对话
+        mcp_tools, mcp_errors = [], [{"name": "(loader)", "error": "sync 路径处于活动事件循环，已跳过 MCP 加载"}]
+
     # 构建智能体和大模型（含会话附件工具）
     agent, model = build_model_and_agent(
         ua,
@@ -412,9 +463,11 @@ def chat_with_agent_sync(
         agent_id,
         session_id,
         use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
         session_attachment_hint=session_attachment_hint,
         knowledge_base_document_filter=retrieval_filter if use_knowledge_retrieval else None,
         kb_retrieval_system_extension=kb_ext if use_knowledge_retrieval else None,
+        extra_tools=mcp_tools,
     )
 
     human_content = build_storable_human_content(
@@ -438,6 +491,12 @@ def chat_with_agent_sync(
 
     rag_collector = _SyncRagStepCollector()
     set_rag_step_queue(rag_collector, sync=True)
+
+    # MCP 加载结果写入本轮步骤（供响应与历史展示）
+    if mcp_tools:
+        emit_rag_step("🧩", "MCP 工具已加载", f"{len(mcp_tools)} 个工具")
+    for err in mcp_errors:
+        emit_rag_step("⚠️", f"MCP 服务「{err['name']}」不可用", err["error"][:120])
 
     to_invoke = _prepare_to_invoke_messages(
         messages,
@@ -464,8 +523,10 @@ def chat_with_agent_sync(
     rag_trace = rag_context.get("rag_trace") if rag_context else None
     # 获取图片引用
     image_references = rag_context.get("image_references") if rag_context else None
-    # 获取知识库来源列表
+    # 获取来源列表（知识库 / 联网搜索互斥，合并走统一 sources 通道）
     kb_sources = rag_context.get("kb_sources") if rag_context else None
+    web_sources = rag_context.get("web_sources") if rag_context else None
+    merged_sources = kb_sources or web_sources
 
     error_text = str(caught_exc) if caught_exc else None
 
@@ -478,7 +539,7 @@ def chat_with_agent_sync(
             "rag_steps": rag_collector.steps or None,
             "error_text": error_text,
             "image_references": image_references,  # 添加图片引用
-            "sources": kb_sources,  # 添加知识库来源
+            "sources": merged_sources,  # 添加来源（知识库或联网搜索）
             "kb_preselect": kb_preselect_meta or None,
         }
     ]
@@ -494,7 +555,7 @@ def chat_with_agent_sync(
     return {
         "response": response_content,
         "rag_trace": rag_trace,
-        "sources": kb_sources,
+        "sources": merged_sources,
         "kb_preselect": kb_preselect_meta or None,
     }
 
@@ -507,6 +568,7 @@ async def iter_chat_stream_events(
     session_id: str,
     *,
     use_knowledge_retrieval: bool = True,
+    use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
     regenerate: bool = False,
     cancel_check: Callable[[], bool] | None = None,
@@ -520,6 +582,7 @@ async def iter_chat_stream_events(
     :param agent_id: 智能体 ID
     :param session_id: 会话 ID
     :param use_knowledge_retrieval: 是否启用知识库检索
+    :param use_web_search: 是否启用联网搜索工具（与知识库检索互斥）
     :param regenerate: 为 True 时不追加用户消息，移除末尾助手消息后基于当前历史重答
     :param cancel_check: 若返回 True 则协作停止生成（如同步读 Redis 取消标记）
     :return: 异步迭代器
@@ -574,15 +637,20 @@ async def iter_chat_stream_events(
         )
     kb_ext = _format_kb_system_extension(retrieval_filter) if use_knowledge_retrieval else None
 
+    # 加载该智能体已启用的 MCP 工具（单服务失败仅记录，不中断对话）
+    mcp_tools, mcp_errors = await load_agent_mcp_tools(agent_id)
+
     agent, model = build_model_and_agent(
         ua,
         user_id,
         agent_id,
         session_id,
         use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
         session_attachment_hint=session_attachment_hint,
         knowledge_base_document_filter=retrieval_filter if use_knowledge_retrieval else None,
         kb_retrieval_system_extension=kb_ext if use_knowledge_retrieval else None,
+        extra_tools=mcp_tools,
     )
 
     # 创建输出队列, 收集 RAG 步骤
@@ -597,6 +665,12 @@ async def iter_chat_stream_events(
 
     # 设置 RAG 步骤队列（须在构造 to_invoke 之前，便于预注入步骤写入 rag_step）
     set_rag_step_queue(_RagStepProxy())
+
+    # MCP 加载结果写入思考区步骤
+    if mcp_tools:
+        emit_rag_step("🧩", "MCP 工具已加载", f"{len(mcp_tools)} 个工具")
+    for err in mcp_errors:
+        emit_rag_step("⚠️", f"MCP 服务「{err['name']}」不可用", err["error"][:120])
 
     if not regenerate:
         human_content = build_storable_human_content(
@@ -733,16 +807,18 @@ async def iter_chat_stream_events(
     rag_trace = rag_context.get("rag_trace") if rag_context else None
     # 获取图片引用
     image_references = rag_context.get("image_references") if rag_context else None
-    # 获取知识库来源列表
+    # 获取来源列表（知识库 / 联网搜索互斥，合并走统一 sources 通道）
     kb_sources = rag_context.get("kb_sources") if rag_context else None
+    web_sources = rag_context.get("web_sources") if rag_context else None
+    merged_sources = kb_sources or web_sources
 
     # 如果 RAG 追踪存在, 则输出 RAG 追踪
     if rag_trace:
         yield {"type": "trace", "rag_trace": rag_trace}
 
-    # 输出知识库来源列表（供前端渲染「来源」）
-    if kb_sources:
-        yield {"type": "sources", "sources": kb_sources}
+    # 输出来源列表（供前端渲染「来源」）
+    if merged_sources:
+        yield {"type": "sources", "sources": merged_sources}
 
     # 助手落库仅用纯文本；见 chat_with_agent_sync
     messages.append(AIMessage(content=full_response))
@@ -753,7 +829,7 @@ async def iter_chat_stream_events(
             "rag_steps": rag_steps_collected or None,
             "error_text": stream_error,
             "image_references": image_references,  # 添加图片引用
-            "sources": kb_sources,  # 添加知识库来源
+            "sources": merged_sources,  # 添加来源（知识库或联网搜索）
             "kb_preselect": kb_preselect_meta or None,
             "thinking_text": "".join(thinking_text_parts) or None,  # 工具调用前的过渡文本, 历史回放
         }
@@ -775,6 +851,7 @@ async def chat_with_agent_stream(
     session_id: str,
     *,
     use_knowledge_retrieval: bool = True,
+    use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
     regenerate: bool = False,
 ) -> AsyncIterator[str]:
@@ -786,6 +863,7 @@ async def chat_with_agent_stream(
     :param agent_id: 智能体 ID
     :param session_id: 会话 ID
     :param use_knowledge_retrieval: 是否启用知识库检索
+    :param use_web_search: 是否启用联网搜索工具（与知识库检索互斥）
     :param regenerate: 是否重新生成最后一轮助手回复
     :return: 异步迭代器
     """
@@ -796,6 +874,7 @@ async def chat_with_agent_stream(
         agent_id,
         session_id,
         use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
         attachment_ids=attachment_ids,
         regenerate=regenerate,
     ):

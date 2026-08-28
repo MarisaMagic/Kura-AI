@@ -28,6 +28,11 @@
               @update:advanced-open="advancedOpen = $event"
               @avatar-change="onAvatarFileChange"
             />
+
+            <section class="mcp-create-section">
+              <header class="mcp-create-header">{{ $t('views.agents.mcp_section_title') }}</header>
+              <div class="mcp-create-hint">{{ $t('views.agents.mcp_create_first_hint') }}</div>
+            </section>
           </div>
         </div>
       </div>
@@ -311,3 +316,35 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped src="@/views/agents/styles/agent-editor-split.css"></style>
+
+<style scoped>
+.mcp-create-section {
+  margin-bottom: 20px;
+}
+
+.mcp-create-header {
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.45;
+  letter-spacing: 0.04em;
+  color: var(--n-text-color);
+  border-left: 4px solid var(--n-primary-color);
+  background: #ececef;
+  border-radius: 8px;
+}
+
+html.dark .mcp-create-header {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.mcp-create-hint {
+  font-size: 13px;
+  color: var(--n-text-color-3);
+  text-align: center;
+  padding: 18px 0;
+  border: 1px dashed var(--n-border-color);
+  border-radius: 8px;
+}
+</style>

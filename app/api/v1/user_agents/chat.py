@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime
@@ -150,13 +151,17 @@ async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     session_id = (request.session_id or "default_session").strip() or "default_session"
     try:
-        resp = chat_with_agent_sync(
+        # 放到线程池执行：chat_with_agent_sync 内部会用 asyncio.run 加载 MCP 工具，
+        # 需运行在无活动事件循环的线程中；同时避免同步 LLM 调用阻塞事件循环。
+        resp = await asyncio.to_thread(
+            chat_with_agent_sync,
             ua,
             request.message.strip(),
             user_id,
             request.agent_id,
             session_id,
             use_knowledge_retrieval=request.use_knowledge_retrieval,
+            use_web_search=request.use_web_search,
             attachment_ids=request.attachment_ids or None,
         )
         if not is_editor_preview_session(session_id):
@@ -201,6 +206,7 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
                 request.agent_id,
                 session_id,
                 use_knowledge_retrieval=request.use_knowledge_retrieval,
+                use_web_search=request.use_web_search,
                 attachment_ids=request.attachment_ids or None,
                 regenerate=request.regenerate,
             ):
@@ -249,6 +255,7 @@ async def create_chat_job_endpoint(request: ChatRequest, current_user: User = De
         session_id=session_id,
         message=request.message.strip(),
         use_knowledge_retrieval=request.use_knowledge_retrieval,
+        use_web_search=request.use_web_search,
         attachment_ids=request.attachment_ids or None,
         regenerate=request.regenerate,
     )
@@ -544,16 +551,9 @@ async def delete_chat_session(
     :param current_user: 当前用户
     :return: Success
     """
-    # 获取当前用户ID
     user_id = current_user.id
-    # 获取用户配置的智能体信息
-    ua = await user_agent_controller.get_accessible(agent_id, user_id)
-    # 如果智能体不存在或无权限访问，则返回404错误
-    if not ua:
-        raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
-    # 删除会话，通过 PostgreSQL 和 Redis 缓存删除
+    # 只校验会话属于当前用户（智能体已删除时仍允许清掉侧栏残留）
     deleted = storage.delete_session(user_id, agent_id, session_id)
-    # 如果删除失败，则返回404错误
     if not deleted:
         raise HTTPException(status_code=404, detail="会话不存在")
     # 返回会话删除响应

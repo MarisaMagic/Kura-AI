@@ -45,8 +45,9 @@ md.renderer.rules.kura_citation = (tokens, idx, _options, env) => {
   const esc = (v) => md.utils.escapeHtml(String(v))
   const badges = indices.map((n) => {
     const src = byIndex.get(String(n))
-    let title = src && src.filename ? String(src.filename) : ''
+    let title = src && (src.filename || src.title) ? String(src.filename || src.title) : ''
     if (title && src.page_number && src.page_number !== 'N/A') title += ` · P${src.page_number}`
+    if (title && src.url) title += `\n${src.url}`
     return `<span class="kcite" data-kcite="${esc(n)}"${
       title ? ` title="${esc(title)}"` : ''
     }>${esc(n)}</span>`

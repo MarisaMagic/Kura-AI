@@ -1,5 +1,6 @@
 <template>
   <div class="agent-editor-preview agent-chat-layout">
+    <div class="agent-chat-main">
     <div ref="bodyScrollRef" class="agent-chat-body" @scroll.passive="onBodyScroll">
       <n-alert
         v-if="configStale && chatEnabled"
@@ -165,27 +166,21 @@
         </div>
       </div>
     </div>
+    <div class="agent-chat-toolbar">
+      <div class="agent-chat-toolbar-fade"></div>
+      <div class="agent-chat-toolbar-inner">
+        <n-button size="small" round quaternary :disabled="chatDisabled || sending" @click="handleRestartChat">
+          <template #icon>
+            <TheIcon icon="mdi:plus-circle-outline" :size="18" />
+          </template>
+          {{ $t('views.agents.chat_button_restart') }}
+        </n-button>
+      </div>
+    </div>
+    </div>
 
     <footer class="agent-chat-footer">
       <div class="agent-chat-footer-inner">
-        <div class="agent-chat-toolbar">
-          <n-button size="small" round quaternary :disabled="chatDisabled || sending" @click="handleRestartChat">
-            <template #icon>
-              <TheIcon icon="mdi:plus-circle-outline" :size="18" />
-            </template>
-            {{ $t('views.agents.chat_button_restart') }}
-          </n-button>
-          <div class="agent-chat-kb-toggle">
-            <n-switch
-              :value="useKnowledgeRetrieval"
-              :disabled="chatDisabled || sending"
-              size="small"
-              @update:value="useKnowledgeRetrieval = $event"
-            />
-            <span class="agent-chat-kb-toggle-label">{{ $t('views.agents.chat_kb_retrieval') }}</span>
-          </div>
-        </div>
-
         <div class="agent-chat-composer">
           <n-input
             v-model:value="inputText"
@@ -206,6 +201,24 @@
             >
               <TheIcon icon="mdi:paperclip" :size="22" />
             </n-button>
+            <div class="agent-chat-kb-toggle">
+              <n-switch
+                :value="useKnowledgeRetrieval"
+                :disabled="chatDisabled || sending"
+                size="small"
+                @update:value="onKbToggle"
+              />
+              <span class="agent-chat-kb-toggle-label">{{ $t('views.agents.chat_kb_retrieval') }}</span>
+            </div>
+            <div class="agent-chat-kb-toggle">
+              <n-switch
+                :value="useWebSearch"
+                :disabled="chatDisabled || sending"
+                size="small"
+                @update:value="onWebToggle"
+              />
+              <span class="agent-chat-kb-toggle-label">{{ $t('views.agents.chat_web_search') }}</span>
+            </div>
             <n-button
               :type="sending ? 'warning' : 'primary'"
               circle
@@ -214,7 +227,7 @@
               :title="sending ? $t('views.agents.chat_button_stop') : $t('views.agents.chat_button_send')"
               @click="onSendClick"
             >
-              <TheIcon :icon="sending ? 'mdi:stop' : 'mdi:send'" :size="20" />
+              <TheIcon :icon="sending ? 'mdi:stop' : 'mdi:arrow-up'" :size="20" />
             </n-button>
           </div>
         </div>
@@ -249,6 +262,18 @@ const { t } = useI18n()
 const inputText = ref('')
 const bodyScrollRef = ref(null)
 const useKnowledgeRetrieval = ref(false)
+const useWebSearch = ref(false)
+
+// 知识库检索与联网搜索互斥
+function onKbToggle(val) {
+  useKnowledgeRetrieval.value = val
+  if (val) useWebSearch.value = false
+}
+
+function onWebToggle(val) {
+  useWebSearch.value = val
+  if (val) useKnowledgeRetrieval.value = false
+}
 
 const avatarSrc = computed(() => props.avatarPreview || DEFAULT_AVATAR)
 
@@ -285,6 +310,7 @@ const {
   agentId: resolvedAgentId,
   sessionId,
   useKnowledgeRetrieval,
+  useWebSearch,
   t,
 })
 

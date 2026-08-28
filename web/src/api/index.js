@@ -120,4 +120,15 @@ export default {
     request.post('/user-agent/kb/upload/cancel', null, { params, ...config }),
   deleteKbDocument: ({ agent_id, filename }) =>
     request.delete('/user-agent/kb/document', { params: { agent_id, filename } }),
+  /** MCP 服务配置（DependAuth，仅智能体属主） */
+  getAgentMcpServers: (params = {}) => request.get('/user-agent/mcp/servers', { params }),
+  createAgentMcpServer: (agentId, data = {}) =>
+    request.post(`/user-agent/mcp/servers/create?agent_id=${agentId}`, data),
+  updateAgentMcpServer: (agentId, serverId, data = {}) =>
+    request.post(`/user-agent/mcp/servers/update?agent_id=${agentId}&server_id=${serverId}`, data),
+  deleteAgentMcpServer: ({ agent_id, server_id }) =>
+    request.delete('/user-agent/mcp/servers/delete', { params: { agent_id, server_id } }),
+  testAgentMcpServer: (agentId, data = {}) =>
+    request.post(`/user-agent/mcp/servers/test?agent_id=${agentId}`, data, { timeout: 20000 }),
+  getAgentMcpPresets: () => request.get('/user-agent/mcp/presets'),
 }

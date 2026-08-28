@@ -11,6 +11,7 @@ from sqlalchemy import desc
 
 from app.chat.cache import cache
 from app.chat.database import SessionLocal
+from app.chat.db_models import ChatAttachment as ChatAttachmentRow
 from app.chat.db_models import ChatMessage as ChatMessageRow
 from app.chat.db_models import ChatSession as ChatSessionRow
 from app.chat.message_codec import envelope_to_langchain_message, msg_content_to_str, serialize_message_envelope
@@ -445,6 +446,13 @@ class ConversationStorage:
             except Exception:
                 pass
 
+            try:
+                from app.chat.attachment_service import purge_attachments_for_session
+
+                purge_attachments_for_session(user_id, agent_id, session_id)
+            except Exception:
+                pass
+
             # 删除会话（级联删除消息与 mg_chat_memory_cursor）
             db.delete(session)
             # 提交事务到数据库
@@ -457,6 +465,69 @@ class ConversationStorage:
             return True
         finally:
             db.close()
+
+    def purge_chat_data_for_agent(self, user_id: int, agent_id: int) -> int:
+        """
+        删除某用户某智能体下全部会话、消息、记忆向量、附件与相关 Redis 缓存。
+        :return: 删除的会话条数
+        """
+        from app.chat.attachment_service import purge_attachments_for_agent
+        from app.chat.memory_archive import purge_session_memory_vectors
+
+        db = SessionLocal()
+        session_ids: list[str] = []
+        try:
+            sessions = (
+                db.query(ChatSessionRow)
+                .filter(
+                    ChatSessionRow.user_id == user_id,
+                    ChatSessionRow.agent_id == agent_id,
+                )
+                .all()
+            )
+            session_ids = [s.session_id for s in sessions]
+            for s in sessions:
+                try:
+                    purge_session_memory_vectors(user_id, agent_id, s.session_id)
+                except Exception:
+                    pass
+                db.delete(s)
+            db.commit()
+        finally:
+            db.close()
+
+        try:
+            purge_attachments_for_agent(user_id, agent_id)
+        except Exception:
+            pass
+
+        for sid in session_ids:
+            cache.delete(self._messages_cache_key(user_id, agent_id, sid))
+        cache.delete(self._sessions_cache_key(user_id, agent_id))
+        cache.delete(self._sessions_all_cache_key(user_id))
+        return len(session_ids)
+
+    def purge_orphan_chat_data(self, existing_agent_ids: set[int]) -> int:
+        """
+        清理 agent_id 已不在智能体表中的会话与附件。
+        :param existing_agent_ids: 仍存在的智能体 ID
+        :return: 清理涉及的 (user_id, agent_id) 组数
+        """
+        db = SessionLocal()
+        try:
+            sq = db.query(ChatSessionRow.user_id, ChatSessionRow.agent_id)
+            aq = db.query(ChatAttachmentRow.user_id, ChatAttachmentRow.agent_id)
+            if existing_agent_ids:
+                ids = list(existing_agent_ids)
+                sq = sq.filter(~ChatSessionRow.agent_id.in_(ids))
+                aq = aq.filter(~ChatAttachmentRow.agent_id.in_(ids))
+            pairs = {(int(r.user_id), int(r.agent_id)) for r in sq.distinct().all()}
+            pairs |= {(int(r.user_id), int(r.agent_id)) for r in aq.distinct().all()}
+        finally:
+            db.close()
+        for uid, aid in pairs:
+            self.purge_chat_data_for_agent(uid, aid)
+        return len(pairs)
 
 
 storage = ConversationStorage()

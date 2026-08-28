@@ -225,6 +225,17 @@ class Settings(BaseSettings):
     # 「当前用户问题」段最大字符数（与「前序对话」分开截断）
     KB_PRESELECT_MAX_CURRENT_QUESTION_CHARS: int = 8000
 
+    # 联网搜索（免费、无需 API Key；provider: auto=ddgs 优先失败回退 bing_html / ddgs=DuckDuckGo / bing_html=Bing 国内版解析）
+    WEB_SEARCH_ENABLED: bool = True
+    WEB_SEARCH_PROVIDER: str = "auto"
+    WEB_SEARCH_MAX_RESULTS: int = 5
+    WEB_SEARCH_REGION: str = "zh-cn"
+    WEB_SEARCH_TIMEOUT_SECONDS: int = 15
+    # 可选代理（仅 ddgs provider 使用），如 http://127.0.0.1:7890
+    WEB_SEARCH_PROXY: str = ""
+    # 单轮对话内 web_search 工具最大调用次数（防 ReAct 循环触发限流）
+    WEB_SEARCH_MAX_CALLS_PER_TURN: int = 2
+
     @property
     def chat_database_url(self) -> str:
         raw = (self.CHAT_DATABASE_URL or self.DATABASE_URL or "").strip()

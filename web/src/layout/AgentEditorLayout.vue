@@ -45,7 +45,7 @@ function goBack() {
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  background: var(--n-color);
+  background: #ffffff;
 }
 .agent-editor-shell__bar {
   flex-shrink: 0;
@@ -53,7 +53,11 @@ function goBack() {
   align-items: center;
   padding: 12px 16px;
   border-bottom: 1px solid var(--n-divider-color);
-  background: var(--n-color);
+  background: #ffffff;
+}
+html.dark .agent-editor-shell,
+html.dark .agent-editor-shell__bar {
+  background: #18181c;
 }
 .agent-editor-shell__main {
   flex: 1;

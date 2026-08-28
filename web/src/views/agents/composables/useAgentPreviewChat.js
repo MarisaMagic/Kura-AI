@@ -12,7 +12,7 @@ const baseApi = import.meta.env.VITE_BASE_API || '/api/v1'
 /**
  * 编辑器右侧预览试聊（独立 session，不写入 recent、不刷新侧栏）。
  */
-export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval, t }) {
+export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval, useWebSearch, t }) {
   const messages = ref([])
   const sessionPhase = ref('intro')
   const sending = ref(false)
@@ -85,6 +85,7 @@ export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval,
           message,
           session_id: sid,
           use_knowledge_retrieval: unref(useKnowledgeRetrieval),
+          use_web_search: unref(useWebSearch),
           attachment_ids: attachmentIds,
           regenerate,
         }),

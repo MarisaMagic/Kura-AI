@@ -29,6 +29,7 @@
                 @update:advanced-open="advancedOpen = $event"
                 @avatar-change="onAvatarFileChange"
               />
+              <AgentMcpServersPanel v-if="agentId" v-show="!pageLoading" :agent-id="agentId" />
             </n-spin>
           </div>
         </div>
@@ -57,6 +58,7 @@ import { NButton, NSpin } from 'naive-ui'
 import AppPage from '@/components/page/AppPage.vue'
 import AgentFormFields from '@/views/agents/components/AgentFormFields.vue'
 import AgentEditorPreviewPanel from '@/views/agents/components/AgentEditorPreviewPanel.vue'
+import AgentMcpServersPanel from '@/views/agents/components/AgentMcpServersPanel.vue'
 import { useUserStore } from '@/store'
 import api from '@/api'
 import {
@@ -133,7 +135,6 @@ async function loadAgent(id) {
       api_key: '',
       description: d.description || '',
       system_prompt: d.system_prompt || '',
-      enable_web: !!d.enable_web,
       supports_vision: !!d.supports_vision,
       is_published: !!d.is_published,
       opening_message: d.opening_message || '',

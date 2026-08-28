@@ -6,6 +6,7 @@
             {{ $t('views.agents.chat_error_load_agent') }}
           </div>
           <template v-else>
+            <div class="agent-chat-main">
             <div ref="bodyScrollRef" class="agent-chat-body" @scroll.passive="onBodyScroll">
             <transition name="agent-chat-fade">
               <div v-if="sessionPhase === 'intro'" key="intro" class="agent-chat-intro">
@@ -188,7 +189,17 @@
                           }}</span>
                           <template v-for="src in m.sources" :key="`src-${src.chunk_id || src.index}`">
                             <a
-                              v-if="src.image_url"
+                              v-if="src.url"
+                              :href="src.url"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              class="agent-chat-source-chip"
+                              :data-kcite-chip="src.index"
+                            >
+                              [{{ src.index }}] {{ src.title || src.url }}
+                            </a>
+                            <a
+                              v-else-if="src.image_url"
                               :href="src.image_url"
                               target="_blank"
                               rel="noopener noreferrer"
@@ -288,43 +299,37 @@
               </div>
             </div>
           </div>
+          <div class="agent-chat-toolbar">
+            <div class="agent-chat-toolbar-fade"></div>
+            <div class="agent-chat-toolbar-inner">
+              <n-button size="small" round quaternary @click="restartChat">
+                <template #icon>
+                  <TheIcon icon="mdi:plus-circle-outline" :size="18" />
+                </template>
+                {{ $t('views.agents.chat_button_restart') }}
+              </n-button>
+              <span v-if="showGoBottomButton" class="agent-chat-toolbar-go">
+                <n-tooltip :show-arrow="false" placement="top-end">
+                  <template #trigger>
+                    <n-button
+                      quaternary
+                      circle
+                      size="small"
+                      :aria-label="$t('views.agents.chat_go_bottom')"
+                      @click="() => scrollBodyToBottom(true)"
+                    >
+                      <TheIcon icon="mdi:chevron-double-down" :size="20" />
+                    </n-button>
+                  </template>
+                  {{ $t('views.agents.chat_go_bottom') }}
+                </n-tooltip>
+              </span>
+            </div>
+          </div>
+          </div>
 
           <footer class="agent-chat-footer">
             <div class="agent-chat-footer-inner">
-              <div class="agent-chat-toolbar">
-                <n-button size="small" round quaternary @click="restartChat">
-                  <template #icon>
-                    <TheIcon icon="mdi:plus-circle-outline" :size="18" />
-                  </template>
-                  {{ $t('views.agents.chat_button_restart') }}
-                </n-button>
-                <div class="agent-chat-kb-toggle">
-                  <n-switch
-                    :value="useKnowledgeRetrieval"
-                    :disabled="sending"
-                    size="small"
-                    @update:value="onKbToggle"
-                  />
-                  <span class="agent-chat-kb-toggle-label">{{ $t('views.agents.chat_kb_retrieval') }}</span>
-                </div>
-                <span v-if="showGoBottomButton" class="agent-chat-toolbar-go">
-                  <n-tooltip :show-arrow="false" placement="top-end">
-                    <template #trigger>
-                      <n-button
-                        quaternary
-                        circle
-                        size="small"
-                        :aria-label="$t('views.agents.chat_go_bottom')"
-                        @click="() => scrollBodyToBottom(true)"
-                      >
-                        <TheIcon icon="mdi:chevron-double-down" :size="20" />
-                      </n-button>
-                    </template>
-                    {{ $t('views.agents.chat_go_bottom') }}
-                  </n-tooltip>
-                </span>
-              </div>
-
               <div class="agent-chat-composer">
                 <div v-if="pendingFiles.length" class="agent-chat-pending-attachments">
                   <div
@@ -375,6 +380,24 @@
                       <TheIcon icon="mdi:paperclip" :size="22" />
                     </n-button>
                   </n-upload>
+                  <div class="agent-chat-kb-toggle">
+                    <n-switch
+                      :value="useKnowledgeRetrieval"
+                      :disabled="sending"
+                      size="small"
+                      @update:value="onKbToggle"
+                    />
+                    <span class="agent-chat-kb-toggle-label">{{ $t('views.agents.chat_kb_retrieval') }}</span>
+                  </div>
+                  <div class="agent-chat-kb-toggle">
+                    <n-switch
+                      :value="useWebSearch"
+                      :disabled="sending"
+                      size="small"
+                      @update:value="onWebToggle"
+                    />
+                    <span class="agent-chat-kb-toggle-label">{{ $t('views.agents.chat_web_search') }}</span>
+                  </div>
                   <n-button
                     :type="sending ? 'warning' : 'primary'"
                     circle
@@ -383,7 +406,7 @@
                     :title="sending ? $t('views.agents.chat_button_stop') : $t('views.agents.chat_button_send')"
                     @click="sending ? stopActiveChatGeneration() : submitMessage()"
                   >
-                    <TheIcon :icon="sending ? 'mdi:stop' : 'mdi:send'" :size="20" />
+                    <TheIcon :icon="sending ? 'mdi:stop' : 'mdi:arrow-up'" :size="20" />
                   </n-button>
                 </div>
               </div>
@@ -434,6 +457,8 @@ const activeAssistantIdx = ref(-1)
 const streamStoppedByUser = ref(false)
 /** 开启时允许后端注册知识库检索工具；关闭则仅通用知识（按会话持久化，新会话默认关） */
 const useKnowledgeRetrieval = ref(false)
+/** 开启时允许后端注册联网搜索工具（与知识库检索互斥；按会话持久化，新会话默认关） */
+const useWebSearch = ref(false)
 /** 新建对话 intro 内本地流式展示的开场白（不入库） */
 const introOpeningDisplayed = ref('')
 const introOpeningRunning = ref(false)
@@ -574,9 +599,15 @@ function clearStoredSessionId(agentId) {
 
 /** 按 agentId + sessionId 记忆知识库开关，刷新后保持；新 session 无记录时默认关 */
 const KB_TOGGLE_PREFIX = 'kura_ai_kb_'
+/** 联网搜索开关持久化前缀（与知识库开关同一套模式） */
+const WEB_TOGGLE_PREFIX = 'kura_ai_web_'
 
 function kbToggleStorageKey(agentId, sid) {
   return `${KB_TOGGLE_PREFIX}${agentId}_${sid}`
+}
+
+function webToggleStorageKey(agentId, sid) {
+  return `${WEB_TOGGLE_PREFIX}${agentId}_${sid}`
 }
 
 function readKbPreference(agentId, sid) {
@@ -598,16 +629,52 @@ function writeKbPreference(agentId, sid, val) {
   }
 }
 
+function readWebPreference(agentId, sid) {
+  if (!agentId || !sid) return false
+  try {
+    const v = sessionStorage.getItem(webToggleStorageKey(agentId, sid))
+    if (v === null) return false
+    return v === 'true'
+  } catch {
+    return false
+  }
+}
+
+function writeWebPreference(agentId, sid, val) {
+  try {
+    if (agentId && sid) sessionStorage.setItem(webToggleStorageKey(agentId, sid), val ? 'true' : 'false')
+  } catch {
+    /* ignore */
+  }
+}
+
 function applyKbPreferenceForCurrentSession() {
   const aid = agent.value?.id
   if (!aid) return
   useKnowledgeRetrieval.value = readKbPreference(aid, sessionId.value)
+  useWebSearch.value = readWebPreference(aid, sessionId.value)
 }
 
 function onKbToggle(val) {
   useKnowledgeRetrieval.value = val
   const aid = agent.value?.id
   if (aid && sessionId.value) writeKbPreference(aid, sessionId.value, val)
+  // 知识库检索与联网搜索互斥：开启知识库时强制关闭联网
+  if (val && useWebSearch.value) {
+    useWebSearch.value = false
+    if (aid && sessionId.value) writeWebPreference(aid, sessionId.value, false)
+  }
+}
+
+function onWebToggle(val) {
+  useWebSearch.value = val
+  const aid = agent.value?.id
+  if (aid && sessionId.value) writeWebPreference(aid, sessionId.value, val)
+  // 联网搜索与知识库检索互斥：开启联网时强制关闭知识库
+  if (val && useKnowledgeRetrieval.value) {
+    useKnowledgeRetrieval.value = false
+    if (aid && sessionId.value) writeKbPreference(aid, sessionId.value, false)
+  }
 }
 
 const PENDING_JOB_PREFIX = 'kura_ai_chat_job_'
@@ -841,6 +908,7 @@ async function postChatJobAndConsumeStream({
         message,
         session_id: sessionId.value,
         use_knowledge_retrieval: useKnowledgeRetrieval.value,
+        use_web_search: useWebSearch.value,
         attachment_ids: attachmentIds,
         regenerate,
       }),
@@ -1705,7 +1773,7 @@ html.dark .agent-chat-spin :deep(.n-spin-body) {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 24px 20px 16px;
+  padding: 24px 20px 76px;
   box-sizing: border-box;
   background: #ffffff;
   scrollbar-width: thin;
@@ -2192,13 +2260,9 @@ html.dark .agent-chat-user-text {
 
 .agent-chat-footer {
   flex-shrink: 0;
-  padding: 12px 20px 20px;
-  border-top: 1px solid var(--n-divider-color);
-  background: #ffffff;
-}
-
-html.dark .agent-chat-footer {
-  background: #18181c;
+  padding: 4px 20px 20px;
+  border-top: none;
+  background: transparent;
 }
 
 .agent-chat-footer-inner {
@@ -2208,12 +2272,46 @@ html.dark .agent-chat-footer {
   box-sizing: border-box;
 }
 
-.agent-chat-toolbar {
+.agent-chat-main {
+  position: relative;
+  flex: 1;
+  min-height: 0;
   display: flex;
-  justify-content: flex-start;
+  flex-direction: column;
+}
+
+.agent-chat-toolbar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  padding: 28px 20px 4px;
+  pointer-events: none;
+}
+
+.agent-chat-toolbar-fade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.85) 45%, #ffffff 75%);
+}
+
+html.dark .agent-chat-toolbar-fade {
+  background: linear-gradient(to bottom, rgba(24, 24, 28, 0) 0%, rgba(24, 24, 28, 0.85) 45%, #18181c 75%);
+}
+
+.agent-chat-toolbar-inner {
+  position: relative;
+  max-width: var(--agent-chat-column-max);
+  margin: 0 auto;
+  display: flex;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
+  justify-content: space-between;
+  pointer-events: none;
+}
+
+.agent-chat-toolbar-inner > * {
+  pointer-events: auto;
 }
 
 .agent-chat-kb-toggle {
@@ -2229,7 +2327,6 @@ html.dark .agent-chat-footer {
 }
 
 .agent-chat-toolbar-go {
-  margin-left: auto;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
@@ -2248,6 +2345,15 @@ html.dark .agent-chat-composer {
   background: #18181c;
 }
 
+.agent-chat-input,
+.agent-chat-input.n-input {
+  --n-border: transparent !important;
+  --n-border-hover: transparent !important;
+  --n-border-focus: transparent !important;
+  --n-box-shadow-focus: none !important;
+  --n-caret-color: currentColor;
+}
+
 .agent-chat-input :deep(.n-input-wrapper) {
   --n-border: transparent !important;
   --n-border-hover: transparent !important;
@@ -2256,9 +2362,14 @@ html.dark .agent-chat-composer {
   background: transparent !important;
 }
 
+.agent-chat-input :deep(.n-input__border),
 .agent-chat-input :deep(.n-input__state-border) {
   border: none !important;
   box-shadow: none !important;
+}
+
+.agent-chat-input :deep(textarea:focus) {
+  outline: none;
 }
 
 .agent-chat-input :deep(textarea) {
@@ -2287,8 +2398,14 @@ html.dark .agent-chat-input :deep(.n-input__placeholder) {
 .agent-chat-composer-bar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 4px;
+}
+
+.agent-chat-composer-bar :deep(.n-upload) {
+  width: auto;
+  flex: 0 0 auto;
 }
 
 .agent-chat-send {

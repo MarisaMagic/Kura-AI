@@ -7,6 +7,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import re
+import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,10 +97,48 @@ def session_upload_dir(user_id: int, agent_id: int, session_id: str) -> str:
     :param session_id: 会话ID
     :return: 会话上传目录
     """
-    seg = _safe_segment(session_id)
-    p = os.path.join(settings.USER_AGENT_CHAT_UPLOAD_ROOT, f"user_{user_id}", f"agent_{agent_id}", seg)
+    p = _session_upload_dir_path(user_id, agent_id, session_id)
     os.makedirs(p, exist_ok=True)
     return p
+
+
+def _agent_upload_root(user_id: int, agent_id: int) -> str:
+    return os.path.join(
+        settings.USER_AGENT_CHAT_UPLOAD_ROOT, f"user_{user_id}", f"agent_{agent_id}"
+    )
+
+
+def _session_upload_dir_path(user_id: int, agent_id: int, session_id: str) -> str:
+    return os.path.join(_agent_upload_root(user_id, agent_id), _safe_segment(session_id))
+
+
+def purge_attachments_for_session(user_id: int, agent_id: int, session_id: str) -> None:
+    """删除某会话的附件库记录与磁盘目录。"""
+    db = SessionLocal()
+    try:
+        db.query(ChatAttachmentRow).filter(
+            ChatAttachmentRow.user_id == user_id,
+            ChatAttachmentRow.agent_id == agent_id,
+            ChatAttachmentRow.session_id == session_id,
+        ).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+    shutil.rmtree(_session_upload_dir_path(user_id, agent_id, session_id), ignore_errors=True)
+
+
+def purge_attachments_for_agent(user_id: int, agent_id: int) -> None:
+    """删除某智能体下全部会话附件记录与磁盘目录。"""
+    db = SessionLocal()
+    try:
+        db.query(ChatAttachmentRow).filter(
+            ChatAttachmentRow.user_id == user_id,
+            ChatAttachmentRow.agent_id == agent_id,
+        ).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+    shutil.rmtree(_agent_upload_root(user_id, agent_id), ignore_errors=True)
 
 
 def get_attachment_row(

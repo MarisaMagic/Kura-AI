@@ -1,6 +1,10 @@
+import asyncio
+import logging
+
 from fastapi import APIRouter, File, Query, UploadFile
 from tortoise.expressions import Q
 
+from app.chat.storage import storage
 from app.controllers.user import user_controller
 from app.controllers.user_agent import user_agent_controller
 from app.core.ctx import CTX_USER_ID
@@ -15,6 +19,8 @@ from app.utils.user_agent_avatar import (
     remove_agent_avatar_file,
     save_uploaded_agent_avatar,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -120,6 +126,10 @@ async def delete_user_agent(agent_id: int = Query(..., description="智能体 ID
         return Fail(code=404, msg="智能体不存在或无权限访问")
     fn = obj.avatar_filename
     aid = obj.id
+    try:
+        await asyncio.to_thread(storage.purge_chat_data_for_agent, user_id, aid)
+    except Exception:
+        logger.exception("purge_chat_data_for_agent user_id=%s agent_id=%s", user_id, aid)
     await obj.delete()
     remove_agent_avatar_file(user_obj.username, fn)
     try:

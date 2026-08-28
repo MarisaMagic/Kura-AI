@@ -14,7 +14,6 @@ export function emptyForm() {
     api_key: '',
     description: '',
     system_prompt: '',
-    enable_web: false,
     opening_message: '',
     temperature: 0.1,
     supports_vision: false,

@@ -11,7 +11,8 @@ class UserAgent(BaseModel, TimestampMixin):
     api_key_ciphertext = fields.TextField(null=True, description="加密存储的 API Key")
     description = fields.TextField(null=True, description="简介")
     system_prompt = fields.TextField(null=True, description="提示词")
-    enable_web = fields.BooleanField(default=False, description="联网能力")
+    # 已弃用：联网能力改为对话页「联网搜索」开关（use_web_search）控制；字段保留仅为兼容历史数据
+    enable_web = fields.BooleanField(default=False, description="联网能力（已弃用）")
     opening_message = fields.TextField(null=True, description="开场白")
     temperature = fields.FloatField(default=0.1, description="温度")
     avatar_filename = fields.CharField(max_length=255, null=True, description="自定义头像文件名")

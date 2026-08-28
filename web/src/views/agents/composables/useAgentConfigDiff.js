@@ -6,7 +6,6 @@ export const PREVIEW_CONFIG_FIELDS = [
   'base_url',
   'description',
   'system_prompt',
-  'enable_web',
   'supports_vision',
   'opening_message',
   'temperature',
@@ -57,9 +56,6 @@ export function composeSystemPromptPreview(form) {
     parts.push(base)
   } else {
     parts.push('You are a helpful assistant.')
-  }
-  if (form?.enable_web) {
-    parts.push('用户已开启「联网」能力说明：当前未接入真实联网工具，请勿编造实时网页内容。')
   }
   return parts.join('\n\n')
 }

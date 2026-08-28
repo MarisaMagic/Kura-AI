@@ -86,6 +86,7 @@ async def create_chat_job(
     session_id: str,
     message: str,
     use_knowledge_retrieval: bool,
+    use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
     regenerate: bool = False,
 ) -> tuple[str, bool]:
@@ -130,6 +131,7 @@ async def create_chat_job(
             session_id=session_id,
             message=message,
             use_knowledge_retrieval=use_knowledge_retrieval,
+            use_web_search=use_web_search,
             attachment_ids=aids,
             regenerate=regenerate,
         )
@@ -145,6 +147,7 @@ async def _run_chat_job(
     session_id: str,
     message: str,
     use_knowledge_retrieval: bool,
+    use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
     regenerate: bool = False,
 ) -> None:
@@ -171,6 +174,7 @@ async def _run_chat_job(
             agent_id,
             session_id,
             use_knowledge_retrieval=use_knowledge_retrieval,
+            use_web_search=use_web_search,
             attachment_ids=attachment_ids or [],
             regenerate=regenerate,
             cancel_check=lambda jid=job_id: is_job_cancel_requested(jid),
