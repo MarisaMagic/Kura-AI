@@ -208,6 +208,7 @@ class ChatMessage(Base):
     rag_trace: 检索增强生成跟踪 (可选)
     rag_steps: 流式检索步骤列表 (可选，用于历史回放)
     error_text: 本条助手消息生成失败时的错误文案 (可选)
+    thinking_text: 工具调用前的过渡文本 (可选，用于历史回放思考区)
     通过 session 属性回关到 ChatSession
     """
     __tablename__ = "mg_chat_messages"
@@ -225,6 +226,7 @@ class ChatMessage(Base):
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_references: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 图片引用列表
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 知识库来源列表（与回答中 [来源N] 编号对应）
+    thinking_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # 工具调用前的过渡文本（思考区内容）
 
     session = relationship("ChatSession", back_populates="messages")
 

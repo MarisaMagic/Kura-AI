@@ -11,7 +11,7 @@ import os
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import dashscope
 from dashscope import MultiModalEmbedding
@@ -46,10 +46,11 @@ class MultimodalEmbeddingService:
         self._total_docs = 0
         self._avg_doc_len = 1.0
 
-    def get_text_embeddings(self, texts: list[str]) -> list[list[float]]:
+    def get_text_embeddings(self, texts: list[str], request_timeout: int | None = None) -> list[list[float]]:
         """
         获取文本的密集向量
         :param texts: 文本列表
+        :param request_timeout: 单次 HTTP 调用超时（秒，None 用 SDK 默认）；SDK 经 request_timeout kwarg 透传到 requests
         :return: 密集向量列表
         """
         if not self.api_key:
@@ -61,12 +62,17 @@ class MultimodalEmbeddingService:
         try:
             # 准备输入数据
             input_data = [{"text": text} for text in texts]
-            
+
+            call_kwargs: dict[str, Any] = {}
+            if request_timeout is not None:
+                call_kwargs["request_timeout"] = int(request_timeout)
+
             # 调用 DashScope API
             resp = MultiModalEmbedding.call(
                 model=self.model,
                 input=input_data,
                 dimension=self.embedding_dim,
+                **call_kwargs,
             )
             
             # 检查响应状态
@@ -86,10 +92,17 @@ class MultimodalEmbeddingService:
             logger.error(f"Failed to generate text embeddings: {e}")
             raise
 
-    def get_image_embeddings(self, image_paths: list[str]) -> list[list[float]]:
+    def get_image_embeddings(
+        self,
+        image_paths: list[str],
+        request_timeout: int | None = None,
+        tick_cb: Callable[[], None] | None = None,
+    ) -> list[list[float]]:
         """
-        获取图片的密集向量
+        获取图片的密集向量（DashScope 一次只能处理一张图片，逐张串行）
         :param image_paths: 图片路径列表（支持本地路径或URL）
+        :param request_timeout: 单次 HTTP 调用超时（秒，None 用 SDK 默认）；SDK 经 request_timeout kwarg 透传到 requests
+        :param tick_cb: 每张图片处理前调用（用于协作式取消/超时检查，抛异常即中止）
         :return: 密集向量列表
         """
         if not self.api_key:
@@ -103,6 +116,8 @@ class MultimodalEmbeddingService:
         try:
             # 为每张图片生成向量（DashScope 一次只能处理一张图片）
             for image_path in image_paths:
+                if tick_cb is not None:
+                    tick_cb()
                 try:
                     # 准备输入数据
                     input_data = []
@@ -119,12 +134,17 @@ class MultimodalEmbeddingService:
                     else:
                         # 尝试作为本地路径
                         input_data.append({"image": image_path})
-                    
+
+                    call_kwargs: dict[str, Any] = {}
+                    if request_timeout is not None:
+                        call_kwargs["request_timeout"] = int(request_timeout)
+
                     # 调用 DashScope API
                     resp = MultiModalEmbedding.call(
                         model=self.model,
                         input=input_data,
                         dimension=self.embedding_dim,
+                        **call_kwargs,
                     )
                     
                     # 检查响应状态

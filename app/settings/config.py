@@ -166,6 +166,19 @@ class Settings(BaseSettings):
     # 归档在对话落库后后台执行，不阻塞响应
     CHAT_MEMORY_ARCHIVE_ASYNC: bool = True
 
+    # 知识库文档上传任务：后台线程处理，上传接口立即返回 task_id，前端轮询进度
+    KB_UPLOAD_JOB_TTL_SECONDS: int = 86400
+    # 单个文档处理的整体时长上限（秒）；超过判超时中止，旧文档保留、须重传
+    KB_UPLOAD_TASK_TIMEOUT_SECONDS: int = 900
+    # 单次嵌入 API 调用（文本批/单张图片）的 HTTP 超时（秒），防止单调用悬死 300 秒
+    KB_UPLOAD_EMBEDDING_HTTP_TIMEOUT_SECONDS: int = 90
+    # 上传文件大小上限（字节）；超过直接 400 拒绝
+    KB_UPLOAD_MAX_BYTES: int = 50 * 1024 * 1024
+    # 同时并行处理的文档数上限；超出在队列等待（status=queued）
+    KB_UPLOAD_MAX_PARALLEL: int = 8
+    # 同名文档「替换落库」阶段的 Redis 互斥锁 TTL（秒）
+    KB_UPLOAD_SWAP_LOCK_TTL_SECONDS: int = 600
+
     # 智能体知识库文档根目录：data/user_agent_docs/user_{id}/{agent_id}/
     USER_AGENT_KB_DOCS_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_docs")
     # 智能体知识库图片根目录：data/user_agent_images/user_{id}/{agent_id}/

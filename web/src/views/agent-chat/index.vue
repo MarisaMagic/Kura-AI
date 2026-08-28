@@ -114,7 +114,22 @@
                               }}</span>
                             </div>
                           </div>
-                          <p v-else class="agent-chat-thinking-placeholder">
+                          <div
+                            v-if="(m.thinkingText || '').trim()"
+                            class="agent-chat-thinking-text"
+                          >
+                            <div class="agent-chat-thinking-text-label">
+                              {{ $t('views.agents.chat_thinking_text_label') }}
+                            </div>
+                            <div
+                              class="agent-chat-thinking-text-body"
+                              v-html="renderAgentChatMarkdown(m.thinkingText)"
+                            ></div>
+                          </div>
+                          <p
+                            v-if="!m.ragSteps?.length && !(m.thinkingText || '').trim()"
+                            class="agent-chat-thinking-placeholder"
+                          >
                             {{ $t('views.agents.chat_feed_thinking_placeholder') }}
                           </p>
                           <details v-if="m.ragTrace && Object.keys(m.ragTrace).length" class="agent-chat-rag-trace">
@@ -642,6 +657,28 @@ function applyChatSsePayload(data, idx) {
       ragSteps: row.ragSteps || [],
       ragTrace: row.ragTrace ?? null,
     }
+  } else if (data.type === 'thinking_move') {
+    const cur = messages.value[idx]
+    const text = data.text || ''
+    const curContent = cur.content || ''
+    messages.value[idx] = {
+      ...cur,
+      content:
+        text && curContent.endsWith(text)
+          ? curContent.slice(0, curContent.length - text.length)
+          : curContent,
+      thinkingText: (cur.thinkingText || '') + text,
+      thinkingOpen: true,
+      pending: true,
+    }
+  } else if (data.type === 'thinking_text') {
+    const cur = messages.value[idx]
+    messages.value[idx] = {
+      ...cur,
+      thinkingText: (cur.thinkingText || '') + (data.content || ''),
+      thinkingOpen: true,
+      pending: cur.pending,
+    }
   } else if (data.type === 'rag_step') {
     const cur = messages.value[idx]
     const nextSteps = [...(cur.ragSteps || []), data.step || {}]
@@ -916,6 +953,7 @@ async function maybeResumePendingChatJob() {
       ragSteps: [],
       ragTrace: null,
       sources: [],
+      thinkingText: '',
     })
     idx = messages.value.length - 1
     sessionPhase.value = 'chat'
@@ -972,6 +1010,7 @@ async function loadMessagesForSession(agentId, sid) {
       ragTrace: row.rag_trace || null,
       errorText: row.error_text || undefined,
       sources: Array.isArray(row.sources) ? row.sources : [],
+      thinkingText: row.thinking_text || '',
     }
     if (role === 'user') {
       const att = attachmentsFromHistoryRow(row)
@@ -1378,6 +1417,7 @@ async function submitMessage() {
     ragSteps: [],
     ragTrace: null,
     sources: [],
+    thinkingText: '',
   })
   scrollBodyToBottom()
 
@@ -1454,6 +1494,7 @@ async function regenerateAssistant(assistantMsg) {
     ragSteps: [],
     ragTrace: null,
     sources: [],
+    thinkingText: '',
   }
   scrollBodyToBottom()
 
@@ -2005,6 +2046,41 @@ html.dark .agent-chat-thinking-panel {
 
 html.dark .agent-chat-thinking-placeholder {
   color: rgba(255, 255, 255, 0.4);
+}
+
+.agent-chat-thinking-text {
+  margin-bottom: 8px;
+}
+
+.agent-chat-thinking-text-label {
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #94a3b8;
+}
+
+.agent-chat-thinking-text-body {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #475569;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agent-chat-thinking-text-body :deep(p) {
+  margin: 0 0 6px;
+}
+
+.agent-chat-thinking-text-body :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+html.dark .agent-chat-thinking-text-label {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+html.dark .agent-chat-thinking-text-body {
+  color: rgba(255, 255, 255, 0.65);
 }
 
 .agent-chat-thinking-steps {

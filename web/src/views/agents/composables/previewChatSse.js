@@ -48,6 +48,28 @@ export function applyPreviewChatSsePayload(data, messagesRef, idx) {
       ragSteps: row.ragSteps || [],
       ragTrace: row.ragTrace ?? null,
     }
+  } else if (data.type === 'thinking_move') {
+    const cur = list[idx]
+    const text = data.text || ''
+    const curContent = cur.content || ''
+    list[idx] = {
+      ...cur,
+      content:
+        text && curContent.endsWith(text)
+          ? curContent.slice(0, curContent.length - text.length)
+          : curContent,
+      thinkingText: (cur.thinkingText || '') + text,
+      thinkingOpen: true,
+      pending: true,
+    }
+  } else if (data.type === 'thinking_text') {
+    const cur = list[idx]
+    list[idx] = {
+      ...cur,
+      thinkingText: (cur.thinkingText || '') + (data.content || ''),
+      thinkingOpen: true,
+      pending: cur.pending,
+    }
   } else if (data.type === 'rag_step') {
     const cur = list[idx]
     list[idx] = {

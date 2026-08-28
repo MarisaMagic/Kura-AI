@@ -1,3 +1,4 @@
+import asyncio
 import os
 from contextlib import asynccontextmanager
 
@@ -29,6 +30,14 @@ async def lifespan(app: FastAPI):
         from app.log import logger
 
         logger.error("PostgreSQL 聊天库初始化失败（智能体对话将不可用）: %s", e)
+    try:
+        from app.log import logger
+        from app.kb.milvus_client import MilvusManager
+
+        # 预热知识库 Milvus 集合：首次连接较慢，提前到启动期避免首个上传任务等待
+        await asyncio.to_thread(MilvusManager().init_collection)
+    except Exception as e:
+        logger.warning("Milvus 集合预热失败（首次上传时自动重试）: %s", e)
     yield
     await Tortoise.close_connections()
 

@@ -85,6 +85,7 @@ class MessageInfo(BaseModel):
     :param rag_trace: RAG 追踪信息
     :param rag_steps: 检索步骤（与 SSE rag_step 一致，用于历史回放）
     :param error_text: 助手消息生成失败时的错误说明（可选，用于历史展示）
+    :param thinking_text: 工具调用前的过渡文本（可选，用于历史回放思考区）
     """
     type: str
     content: Any = ""
@@ -94,6 +95,7 @@ class MessageInfo(BaseModel):
     rag_steps: Optional[list[dict[str, Any]]] = None
     error_text: Optional[str] = None
     sources: Optional[list[dict[str, Any]]] = None
+    thinking_text: Optional[str] = None
 
 
 class SessionMessagesResponse(BaseModel):

@@ -188,6 +188,7 @@ export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval,
       thinkingOpen: false,
       ragSteps: [],
       ragTrace: null,
+      thinkingText: '',
     })
 
     const idx = messages.value.findIndex((m) => m.id === assistantId)

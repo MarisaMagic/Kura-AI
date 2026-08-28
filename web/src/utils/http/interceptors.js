@@ -26,18 +26,24 @@ export function resResolve(response) {
     const code = data?.code ?? status
     /** 根据code处理对应的操作，并返回处理后的message */
     const message = resolveResError(code, data?.msg ?? statusText)
-    window.$message?.error(message, { keepAliveOnHover: true })
+    /** noErrorMessage：调用方自行处理错误展示（如进度轮询），拦截器不弹全局提示 */
+    if (!response?.config?.noErrorMessage) {
+      window.$message?.error(message, { keepAliveOnHover: true })
+    }
     return Promise.reject({ code, message, error: data || response })
   }
   return Promise.resolve(data)
 }
 
 export async function resReject(error) {
+  const silent = Boolean(error?.config?.noErrorMessage)
   if (!error || !error.response) {
     const code = error?.code
     /** 根据code处理对应的操作，并返回处理后的message */
     const message = resolveResError(code, error.message)
-    window.$message?.error(message)
+    if (!silent) {
+      window.$message?.error(message)
+    }
     return Promise.reject({ code, message, error })
   }
   const { data, status } = error.response
@@ -54,6 +60,8 @@ export async function resReject(error) {
   // 后端返回的response数据
   const code = data?.code ?? status
   const message = resolveResError(code, data?.msg ?? error.message)
-  window.$message?.error(message, { keepAliveOnHover: true })
+  if (!silent) {
+    window.$message?.error(message, { keepAliveOnHover: true })
+  }
   return Promise.reject({ code, message, error: error.response?.data || error.response })
 }

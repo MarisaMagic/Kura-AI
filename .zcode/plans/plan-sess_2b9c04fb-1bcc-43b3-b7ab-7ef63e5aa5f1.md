@@ -1,83 +1,44 @@
-# Agentic RAG 改造方案（不含查询重写部分）
+# 修复：上传报「无法获取处理进度」但文档其实已入库
 
-范围：分块与参数、向量存储（BM25 迁移）、检索质量门控、生成出口轻量防幻觉、知识库更新。**不改动**：查询重写四法、Agent 循环/迭代策略（第 4 大点）。
+## 诊断结论（已证实）
 
----
+该报错是前端 `startPolling` 的兜底文案，触发条件唯一：上传 POST 成功拿到 task_id 后，`GET /kb/upload/status` **连续失败 4 次**。它不是「文档处理失败」。
 
-## 1. 分块：参数校正 + Excel 表格专项
+现场证据 + 你的确认：库里2011-2012赛季报告.pdf 的 Redis 任务记录是 `completed`（文件 13:55 已落盘、已出现在列表）——所以这是一次**进度跟踪层故障**，处理层完全正常。促成这次误报的机制有四个：
 
-**1a. 块大小与 merge 阈值校正（`app/kb/multimodal_document_loader.py` + `app/settings/config.py`）**
-- `MultimodalDocumentLoader` 构造函数默认值 `chunk_size: 500 → 900`、`chunk_overlap: 50 → 90`，推导结果：L1=1800 / L2=900 / L3=450 / L4 图片不变。三级分隔符列表保持不变。
-- `AUTO_MERGE_THRESHOLD` 默认 `2 → 3`（config.py:191）。
-- 显式说明：参数只对新上传文档生效，旧文档需重新上传后才按新粒度重建。
+1. **9999 双实例抢端口**：两个 `python run.py` 同时监听 0.0.0.0:9999（172788=我上次会话遗留、174368=你自己起的）。你在 13:54:51 启动自己实例的窗口期恰好压在第一份文档的轮询上，连接抖动导致轮询连环失败。
+2. **轮询层把瞬时抖动当终局**：任何一种失败（404/超时/网络错）混在一起计数，4 连败就宣告任务失效并停轮询，而后端照常跑完。文案还误导用户以为文档处理失败。
+3. **Redis 失败全静默**：`cache.py` 的 get/set 全部 `except: return`，不写任何日志——meta 写入失败时接口照样返回 200+task_id（幽灵任务），前后端零痕迹，正合「各处均无报错」。
+4. **真 bug（我上轮引入）**：`kb_job._update_meta` 在 `get_json` 读到 None 时会用 `{"task_id"}` 重建快照，**丢掉 user_id 等身份字段** → 状态接口此后对该任务**永久 404**。
 
-**1b. Excel 表格专项（`app/kb/multimodal_document_loader.py` load_document）**
-- .xlsx/.xls 分支不再把 `UnstructuredExcelLoader` 的原始输出直接喂给文本切分器，改为：逐 sheet 读取 → 每 sheet 转成 Markdown 表格文本（含表头行），sheet 序号作为 `page_number`；表头过大时并入后续行对。整表作为该"页"的内容进入现有 L1/L2/L3 切分——分离符优先级里 `\n` 使表格按行边界切分，行不会被拦腰截断（表格"整块保留"以行为单位）。
-- 图片提取逻辑不变（Excel 无图片）。
+## 修复内容
 
-## 2. 向量存储：迁移到 Milvus 服务端 BM25
+### 后端
+1. **`app/kb/kb_job.py`**
+   - `_update_meta` 增加 `identity` 参数（task_id/user_id/agent_id/kb_scope/display_filename）；`get_json` 失败重建快照时用 identity 完整恢复，并用 loguru 记 warning。根治「永久 404」bug。
+   - `create_kb_upload_job` 初始 meta 写入做 2 次重试；仍失败 → 记 ERROR 日志并返回 `None`，**不再**创建幽灵任务。
+2. **`app/api/v1/user_agents/kb.py`**：`create_kb_upload_job` 返回 None 时返回 `Fail(code=503, msg="任务状态初始化失败（Redis 暂不可用），请稍后重试")`——用户立刻得到真实原因，而不是 3.5 秒后的误导文案。
+3. **`app/chat/cache.py`**：加 loguru 日志，`get_json/set_json/set_nx/delete` 的 except 分支各记一行 warning（带异常文本），消灭「前端后端日志全空」的诊断死角。
 
-**2a. 集合 schema 增加 BM25 Function（`app/kb/milvus_client.py` init_collection）**
-- 新增 `Function(function_type=FunctionType.BM25, input_field_names=["text"], output_field_names=["bm25_sparse"], params={"analyzer_params": {"type": "chinese"}})`（pymilvus 2.6 / Milvus 2.5.14 均支持）。
-- 新建集合改为 `auto_id=False` 以便迁移复制原 id。
+### 前端
+4. **`web/src/views/agents/knowledge-base/index.vue`** 轮询 catch 按错误类型分流：
+   - **HTTP 404**（任务确定不存在）→ 立即终局（不等 4 连败），显示新文案 kb_upload_gone「上传任务不存在或已过期——后台可能仍在处理，请查看下方文件列表确认文档是否已入库」；`finishTask` 会自动 `fetchList()` 刷新列表，用户能立刻看到文档其实已入库。
+   - **401/403** → 静默停轮询（交给拦截器的登出流程），不误报「处理失败」。
+   - **网络错/超时/其他** → 维持重试，但第 2 次连续失败时就额外 `fetchList()` 一次兜底对账；最终放弃文案改为「进度跟踪中断（网络或服务异常）——文档可能已处理完成，请查看文件列表」。
+5. **`web/src/api/index.js`**：`uploadKbDocument` 增加可选 config 透传；`onUploadChange` 传 `noErrorMessage: true`，修复上传失败时全局+局部双弹窗问题。
+6. **`web/i18n/messages/cn.json` + `en.json`**：新增 kb_upload_gone；kb_upload_status_lost 文案补上「请查看文件列表确认」指引。
 
-**2b. 检索改造（`app/kb/milvus_client.py` hybrid_retrieve）**
-- 签名从 `sparse_embedding: dict` 改为 `query_text: str`；稀疏腿改为 `AnnSearchRequest(data=[query_text], anns_field="bm25_sparse", function_name="bm25_fn")`，与 dense 腿同样 RRF(k=60) 融合；`expr` 前置过滤保持不变。
-- dense fallback 保留（hybrid 失败时仍可退纯 dense）。
+### 环境治理
+7. 先核实命令行归属后 `taskkill //F //T //PID 172788`（我遗留的实例），保留你的 174368；确认 9999 仅剩单一监听。
+8. 清理 Redis 中我自检遗留的测试键（`kura_ai:kb_upload_job:*` 且 meta.user_id=977，现剩 1 个）。
 
-**2c. 调用侧清理（`app/kb/rag_utils.py` + `app/kb/multimodal_milvus_writer.py`）**
-- `retrieve_documents` 不再调 `fit_corpus` / `get_sparse_embedding`，直接传 query 文本。
-- writer 不再生成 sparse：插入只带 dense + 标量字段（sparse 由服务端 Function 自动计算）。图片块 text="" 生成的空稀疏向量不影响检索。
-- `multimodal_embedding.py` 的 BM25 方法保留不变（先核对 `app/chat/memory_*` 会话记忆路径是否引用 fit_corpus；若引用则保留，否则可后续清理，本方案不动会话记忆）。
+## 验证
+9. 全部改动文件 `py_compile`；`npm run build` 通过。
+10. 隔离实例（9998 + DB 拷贝 + 文档目录重定向）冒烟两条关键路径：
+    - 正常上传 → 状态轮询到 completed（回归确认轮询链路没改坏）；
+    - 用 `REDIS_URL=redis://127.0.0.1:6399/0`（死端口）起实例 → 上传必须返回 **503 + 后端日志 ERROR**（此前是静默 200 幽灵任务）；
+    - 临时脚本模拟 `get_json` 返回 None → 确认 identity 重建后 user_id 不再丢失。
+11. 杀掉遗留进程后用 curl 验证 9999 单实例健康（registration_enabled 200 + status 接口 401/422 行为正常）。
+12. 你的后端是 reload=True，改完 .py 自动生效；前端若是 dev 模式自动热更，若跑的构建产物需重新 `npm run build`。
 
-**2d. 一键迁移脚本（新文件 `app/kb/migrate_bm25.py`，`python -m app.kb.migrate_bm25`）**
-- 检测 `kura_ai_kb` 是否已含 bm25 Function → 已迁移则跳过（幂等）。
-- 迁移流程：建 `kura_ai_kb_v2`（含 Function、auto_id=False）→ 用 query_iterator 分页读旧集合全部行（output_fields 含 `dense_embedding` 与全部标量，**直读复制、不重调 embedding API、零 API 费用**）→ 批量插入 v2 → drop 旧集合 → `rename_collection` 为 `kura_ai_kb` → 打印迁移统计。
-- 备份提示：脚本执行前输出旧集合行数与提示；一次 5 分钟内完成（数据量级）。
-
-## 3. 检索质量门控（`app/kb/rag_pipeline.py` + `app/kb/search_tool.py`）
-
-**3a. 逐块打分替换整段打分**
-- `grade_documents_node`：新增结构化输出 schema `ChunkGrades(ratings: list[{chunk_index, binary_score}])`，一次 LLM 调用对格式化后的 top-5 逐块打分；通过条件为"任一 chunk yes"（不再是整段 yes/no）。新增设置 `KB_GRADE_RATINGS_MODEL` 复用现有 `RAG_GRADE_MODEL` 缺省回退逻辑。
-- 保留原有 `grade_route` 上报字段（rag_trace 兼容前端）。
-
-**3b. 扩展检索后的二次门控 + 拒答路径**
-- 新增节点 `grade_expanded`（复用同一个逐块 grader）：`retrieve_expanded` 之后打分；全部 no 或 docs 为空 → route 到 `no_answer`（END），state 置 `no_answer: True` 并记录 trace。
-- `search_tool.py` 收到 `no_answer=True` 时返回固定文案："知识库经两次检索与相关性评估，未找到相关资料。请如实告知用户：知识库中没有相关资料，可建议其补充资料；禁止编造任何知识库结论。"（配合 §4 提示词纪律）。
-- 新设置：`KB_GRADE_REFUSAL_ENABLED=True`（可关，关时保持旧行为直接生成）。
-
-**3c. rerank 分数阈值（可选，默认关闭）**
-- `rag_utils._rerank_documents` 之后若 max(rerank_score) < `RERANK_MIN_SCORE`（新设置，默认 None=禁用）则将 meta 标记为不达标，图中走 no_answer。当前环境未配置 rerank，此开关为前瞻预留。
-
-## 4. 生成出口：轻量防幻觉组合
-
-**4a. 提示词作答纪律（`app/chat/agent_service.py` `_compose_system_prompt`）**
-- `use_knowledge_retrieval` 分支追加：回答必须仅依据检索结果与多轮上下文；凡引用检索内容须以 `[来源N]` 标注（N 与工具输出编号一致）；检索未命中或工具明确提示无相关资料时，必须如实告知"知识库中未找到相关资料"并说明可补充，不得编造；区分知识库结论与一般常识推断。
-- `search_tool.py` 工具 description 同步加一句"引用时必须使用 [来源N] 编号"。
-
-**4b. 来源数据贯通（kb_sources）**
-- `kb_tool_formatting.format_knowledge_retrieval_tool_output` 增加第三返回值 `kb_sources: list[{index, filename, page_number, chunk_id, score, content_type, image_url?}]`（index 与 [i] 对齐）；`search_tool.py` 与 `image_search_tool.py` 写入 `_set_last_rag_context({"kb_sources": ...})`。
-
-**4c. 输出与落库（`agent_service.py` 同步/流式两处 + `storage.py` + `db_models.py`）**
-- sync：返回值加 `"sources"`；stream：在 `trace` 事件后新增 `{"type":"sources","sources":[...]}` 事件；两处 `extra_message_data` 加 `sources`。
-- `ChatMessage` 加 `sources JSON` 列（照 image_references 先例：`db_models.py` + `database.py` 的 `ALTER TABLE ADD COLUMN IF NOT EXISTS sources JSON`）。
-- `storage.save` 提取/写入 sources；`storage.get_session_messages` 回填 sources（顺带修复 `image_references` 同样的读回缺口）。
-- `schemas/agent_chat.py` 的 `ChatResponse`、`MessageInfo` 加 `sources`；`api/v1/user_agents/chat.py` 历史接口 MessageInfo 构造处带上。
-
-**4d. 前端来源列表（`web/src/views/agent-chat/index.vue`）**
-- `applyChatSsePayload` 加 `sources` 事件分支；助手气泡下方渲染来源小列表（"来源：[1] 文件名 · P页码"）；历史加载映射 `row.sources`；i18n 加"来源/Sources"文案。编辑器试聊面板（`previewChatSse.js`）同步事件解析（可不渲染，仅存状态）。
-
-## 5. 知识库更新：内容 hash 抠查（`kb_service.py` + `db_models.py`）
-
-- `KbDocument` 加 `content_hash String(64)` 列（`database.py` 同步 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`）。
-- `ingest_upload`：读文件字节后先 `sha256`；查询同 (kb_scope, display_filename) 旧行，hash 相同 → **直接返回现有元数据（unchanged=True），不删不重建**；不同或无旧行 → 走现有"先删后增"流程并在插入时写 content_hash。
-- 响应结构可加 `unchanged` 标记（schema `KbUploadResponse` 加可选字段），其余接口不变。
-
-## 6. 实施顺序与验证
-
-1. **门控 + 提示词纪律**（§3+§4a，纯逻辑无迁移）→ 用现有 UI 测试账号 + test 智能体跑通：检查 rag_steps 出现逐块评分、无相关文档时返回拒答文案。
-2. **BM25 迁移**（§2）→ `python -m app.kb.migrate_bm25` 迁移 > 检索 smoke test（英文型号词、产品名精确匹配对照迁移前）。
-3. **sources 链路 + 前端**（§4b-d）→ SSE 事件、落库、历史回放逐级验证。
-4. **分块参数 + Excel + hash**（§1+§5）→ 上传 PDF/Excel 验证 chunk_count 变化、Excel 表格 Markdown 块；同内容重传返回 unchanged。
-
-已知边界：分块参数仅对新上传文档生效（旧文档需重传）；BM25 迁移存在一次性短窗口（脚本幂等、可重跑）；chinese analyzer 与现单字切词行为略有差异，以 smoke test 结果为准。
+不做的事：不动上传/处理管线本身（已证明工作正常）；不提交 git。

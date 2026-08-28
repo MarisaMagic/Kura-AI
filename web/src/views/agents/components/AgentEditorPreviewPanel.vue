@@ -111,7 +111,13 @@
                         <span v-if="step.detail" class="agent-chat-thinking-step-detail">{{ step.detail }}</span>
                       </div>
                     </div>
-                    <p v-else class="agent-chat-thinking-placeholder">
+                    <div v-if="(m.thinkingText || '').trim()" class="agent-chat-thinking-text">
+                      <div class="agent-chat-thinking-text-label">
+                        {{ $t('views.agents.chat_thinking_text_label') }}
+                      </div>
+                      <div class="agent-chat-thinking-text-body" v-html="renderAgentChatMarkdown(m.thinkingText)"></div>
+                    </div>
+                    <p v-if="!m.ragSteps?.length && !(m.thinkingText || '').trim()" class="agent-chat-thinking-placeholder">
                       {{ $t('views.agents.chat_feed_thinking_placeholder') }}
                     </p>
                     <details v-if="m.ragTrace && Object.keys(m.ragTrace).length" class="agent-chat-rag-trace">

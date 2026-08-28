@@ -519,6 +519,7 @@ async def get_chat_session_messages(
             rag_steps=m.get("rag_steps"),
             error_text=m.get("error_text"),
             sources=m.get("sources"),
+            thinking_text=m.get("thinking_text"),
         )
         for m in raw
     ]

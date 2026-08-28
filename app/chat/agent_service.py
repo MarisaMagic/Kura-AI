@@ -628,12 +628,17 @@ async def iter_chat_stream_events(
 
     # 初始化响应内容
     full_response = ""
+    thinking_text_parts: list[str] = []
     stream_error: str | None = None
     cancelled_externally = False
 
     # 创建异步任务, 调用智能体
     async def _agent_worker() -> None:
         nonlocal full_response, stream_error, cancelled_externally
+        # 当前 AI 消息的流式分类状态：工具调用前的过渡文本需迁移到思考区
+        current_msg_id: str | None = None
+        msg_text_emitted = ""  # 当前消息已按 content 发出的文本
+        msg_moved = False  # 当前消息已被判定为工具调用，剩余文本直发 thinking_text
         try:
             # 异步流式调用智能体
             async for msg, _metadata in agent.astream(
@@ -646,8 +651,6 @@ async def iter_chat_stream_events(
                     break
                 if not isinstance(msg, AIMessageChunk):
                     continue
-                if getattr(msg, "tool_call_chunks", None):
-                    continue
 
                 content = ""
                 if isinstance(msg.content, str):
@@ -659,9 +662,35 @@ async def iter_chat_stream_events(
                         elif isinstance(block, dict) and block.get("type") == "text":
                             content += block.get("text", "")
 
+                has_tool_call = bool(getattr(msg, "tool_call_chunks", None))
+                if msg.id is not None and msg.id != current_msg_id:
+                    current_msg_id = msg.id
+                    msg_text_emitted = ""
+                    msg_moved = False
+
+                if has_tool_call:
+                    if msg_text_emitted:
+                        # 本消息此前作为正文流出的文本实为工具调用前导句, 移交前端迁入思考区
+                        thinking_text_parts.append(msg_text_emitted)
+                        if full_response.endswith(msg_text_emitted):
+                            full_response = full_response[: -len(msg_text_emitted)]
+                        else:
+                            pos = full_response.rfind(msg_text_emitted)
+                            full_response = full_response[:pos] if pos >= 0 else full_response
+                        await output_queue.put({"type": "thinking_move", "text": msg_text_emitted})
+                        msg_text_emitted = ""
+                    if msg.id is not None:
+                        msg_moved = True
+
                 if content:
-                    full_response += content
-                    await output_queue.put({"type": "content", "content": content})
+                    if msg_moved:
+                        thinking_text_parts.append(content)
+                        await output_queue.put({"type": "thinking_text", "content": content})
+                    else:
+                        full_response += content
+                        if msg.id is not None:
+                            msg_text_emitted += content
+                        await output_queue.put({"type": "content", "content": content})
         except asyncio.CancelledError:
             cancelled_externally = True
             raise
@@ -726,6 +755,7 @@ async def iter_chat_stream_events(
             "image_references": image_references,  # 添加图片引用
             "sources": kb_sources,  # 添加知识库来源
             "kb_preselect": kb_preselect_meta or None,
+            "thinking_text": "".join(thinking_text_parts) or None,  # 工具调用前的过渡文本, 历史回放
         }
     ]
     # 保存会话消息，保存最新一轮对话消息到数据库对应会话并更新 Redis 缓存

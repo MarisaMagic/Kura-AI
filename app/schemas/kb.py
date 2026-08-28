@@ -44,6 +44,14 @@ class KbUploadResponse(BaseModel):
     unchanged: Optional[bool] = None
 
 
+class KbUploadTaskResponse(BaseModel):
+    """
+    知识库上传受理响应：处理在后台执行，返回任务 ID 供前端轮询进度
+    :param task_id: 上传任务 ID
+    """
+    task_id: str
+
+
 class KbDeleteResponse(BaseModel):
     """
     知识库文档删除响应

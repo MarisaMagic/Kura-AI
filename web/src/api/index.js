@@ -101,10 +101,23 @@ export default {
     request.post('/user-agent/recent_agents/touch', null, { params }),
   /** 知识库（DependAuth） */
   getKbDocuments: (params = {}) => request.get('/user-agent/kb/documents', { params }),
-  uploadKbDocument: (agentId, data) =>
+  /**
+   * 上传知识库文档：立即返回 data.task_id（后台线程处理），进度用 getKbUploadStatus 轮询。
+   * timeout: 0 关闭 12s 全局超时（大文件传输不受限）；onUploadProgress 用于上传传输进度。
+   */
+  uploadKbDocument: (agentId, data, onUploadProgress, config = {}) =>
     request.post(`/user-agent/kb/upload?agent_id=${agentId}`, data, {
       headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 0,
+      onUploadProgress,
+      ...config,
     }),
+  /** 查询知识库上传任务进度 */
+  getKbUploadStatus: (params = {}, config = {}) =>
+    request.get('/user-agent/kb/upload/status', { params, ...config }),
+  /** 取消知识库上传任务 */
+  cancelKbUploadTask: (params = {}, config = {}) =>
+    request.post('/user-agent/kb/upload/cancel', null, { params, ...config }),
   deleteKbDocument: ({ agent_id, filename }) =>
     request.delete('/user-agent/kb/document', { params: { agent_id, filename } }),
 }
