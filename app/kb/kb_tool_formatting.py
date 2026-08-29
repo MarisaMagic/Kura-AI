@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.settings import settings
+from app.utils.content_guard import guard_untrusted_content
 from app.utils.signed_media import KIND_KB_IMAGE, sign_media_url
 
 
@@ -136,4 +137,6 @@ def format_knowledge_retrieval_tool_output(
         formatted.insert(0, f"检索结果：{len(docs)} 个文档\n")
 
     out = "Retrieved Chunks:\n" + "\n\n---\n\n".join(formatted)
+    # 知识库原文属非可信外部内容：隔离包裹 + 长度上限，缓解间接提示注入
+    out = guard_untrusted_content(out)
     return out, image_references, kb_sources

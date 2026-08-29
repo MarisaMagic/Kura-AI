@@ -32,8 +32,20 @@ from app.schemas.agent_chat import (
     SessionMessagesResponse,
 )
 from app.schemas.base import Success
+from app.settings import settings
+from app.utils.rate_limit import check_user_rate_limit
 
 router = APIRouter()
+
+
+def _check_chat_rate_limit(user_id: int) -> None:
+    """对话生成入口统一限流（按用户计，覆盖 /chat、/chat/stream、/chat/jobs）。"""
+    check_user_rate_limit(
+        user_id,
+        action="agent_chat",
+        limit=int(getattr(settings, "CHAT_RATE_LIMIT_PER_MINUTE", 20)),
+        window_seconds=60,
+    )
 
 
 @router.post("/chat/attachments/upload", summary="上传会话附件（先上传再发消息）", tags=["智能体模块"])
@@ -146,6 +158,7 @@ def _upstream_http_exception(exc: Exception) -> HTTPException | None:
 @router.post("/chat", summary="智能体对话（非流式）", tags=["智能体模块"])
 async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(AuthControl.is_authed)):
     user_id = current_user.id
+    _check_chat_rate_limit(user_id)
     ua = await user_agent_controller.get_accessible(request.agent_id, user_id)
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
@@ -187,6 +200,7 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
     """
     # 获取当前用户ID
     user_id = current_user.id
+    _check_chat_rate_limit(user_id)
     # 获取用户配置的智能体信息
     ua = await user_agent_controller.get_accessible(request.agent_id, user_id)
     # 如果智能体不存在或无权限访问，则返回404错误
@@ -241,6 +255,7 @@ async def create_chat_job_endpoint(request: ChatRequest, current_user: User = De
     """
     # 获取当前用户ID
     user_id = current_user.id
+    _check_chat_rate_limit(user_id)
     # 获取用户配置的智能体信息
     ua = await user_agent_controller.get_accessible(request.agent_id, user_id)
     # 如果智能体不存在或无权限访问，则返回404错误

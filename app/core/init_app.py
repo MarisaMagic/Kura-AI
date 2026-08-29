@@ -3,7 +3,6 @@ from fastapi import FastAPI
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from tortoise import Tortoise
-from tortoise.expressions import Q
 
 from app.api import api_router
 from app.controllers.api import api_controller
@@ -379,9 +378,27 @@ async def init_roles():
         await admin_role.menus.add(*all_menus)
         await user_role.menus.add(*all_menus)
 
-        # 为普通用户分配基本API
-        basic_apis = await Api.filter(Q(method__in=["GET"]) | Q(tags="基础模块"))
+        # 为普通用户分配基本API（仅基础模块；智能体模块由 ensure_user_agent_apis_for_roles 补齐。
+        # 不得按 GET 方法批量下放，否则 auditlog/user/role 等管理接口会泄露给普通用户）
+        basic_apis = await Api.filter(tags="基础模块")
         await user_role.apis.add(*basic_apis)
+
+
+async def restrict_normal_role_api_grants():
+    """收回「普通用户」角色越权持有的系统管理类 API。
+
+    历史版本曾按 GET 方法批量下放全部查询接口（含审计日志、用户列表等管理接口），
+    此处对存量数据库做启动期清理；新装库由 init_roles 按标签授予，无需清理。
+    采用黑名单方式（仅收回明确的管理模块），避免 tags 异常时误伤业务接口。
+    """
+    user_role = await Role.filter(name="普通用户").first()
+    if not user_role:
+        return
+    admin_only_tags = {"审计日志模块", "API模块", "部门模块", "菜单模块", "角色模块", "用户模块"}
+    excessive = [a for a in await user_role.apis if (a.tags or "") in admin_only_tags]
+    if excessive:
+        await user_role.apis.remove(*excessive)
+        logger.warning("安全收紧：已收回「普通用户」角色的 %d 个管理类 API 授权", len(excessive))
 
 
 async def init_data():
@@ -393,3 +410,4 @@ async def init_data():
     await init_apis()
     await init_roles()
     await ensure_user_agent_apis_for_roles()
+    await restrict_normal_role_api_grants()

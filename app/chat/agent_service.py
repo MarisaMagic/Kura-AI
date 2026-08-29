@@ -102,6 +102,18 @@ def _agent_invoke_config() -> dict[str, Any]:
     return {"recursion_limit": 30, "callbacks": [_KbPromptDebugCallback()]}
 
 
+def _mcp_tools_allowed_for(ua: UserAgent, user_id: int) -> bool:
+    """仅智能体属主会话允许加载其 MCP 工具。
+
+    MCP 工具携带属主凭据（如预置的敏感请求头）且由模型自主调用、无用户确认；
+    共享（非属主）会话加载后可被对话内容或注入文本驱动，以属主身份执行操作，故默认禁止。
+    可通过 SHARE_CHAT_ALLOW_OWNER_MCP_TOOLS=true 恢复旧行为（不推荐）。
+    """
+    if int(getattr(ua, "user_id", 0) or 0) == int(user_id):
+        return True
+    return bool(getattr(settings, "SHARE_CHAT_ALLOW_OWNER_MCP_TOOLS", False))
+
+
 def _wrap_async_tool_for_sync(tool: Any) -> Any:
     """
     将 async-only 工具（MCP 适配器产出）包装为同步可调用，供 chat_with_agent_sync 路径使用。
@@ -455,14 +467,16 @@ def chat_with_agent_sync(
 
     # 加载该智能体已启用的 MCP 工具（本函数在无线事件循环的线程中运行，asyncio.run 安全）；
     # MCP 工具为 async-only，包装为同步调用；单服务失败仅记录到 rag_steps，不中断对话。
+    # 共享（非属主）会话跳过加载，避免属主凭据被共享用户对话驱动。
     mcp_tools: list[Any] = []
     mcp_errors: list[dict] = []
-    try:
-        raw_mcp_tools, mcp_errors = asyncio.run(load_agent_mcp_tools(agent_id))
-        mcp_tools = [_wrap_async_tool_for_sync(t) for t in raw_mcp_tools]
-    except RuntimeError:
-        # 兜底：若意外处于运行中的事件循环（不应发生），跳过 MCP 不阻断对话
-        mcp_tools, mcp_errors = [], [{"name": "(loader)", "error": "sync 路径处于活动事件循环，已跳过 MCP 加载"}]
+    if _mcp_tools_allowed_for(ua, user_id):
+        try:
+            raw_mcp_tools, mcp_errors = asyncio.run(load_agent_mcp_tools(agent_id))
+            mcp_tools = [_wrap_async_tool_for_sync(t) for t in raw_mcp_tools]
+        except RuntimeError:
+            # 兜底：若意外处于运行中的事件循环（不应发生），跳过 MCP 不阻断对话
+            mcp_tools, mcp_errors = [], [{"name": "(loader)", "error": "sync 路径处于活动事件循环，已跳过 MCP 加载"}]
 
     # 构建智能体和大模型（含会话附件工具）
     agent, model = build_model_and_agent(
@@ -650,8 +664,12 @@ async def iter_chat_stream_events(
         )
     kb_ext = _format_kb_system_extension(retrieval_filter) if use_knowledge_retrieval else None
 
-    # 加载该智能体已启用的 MCP 工具（单服务失败仅记录，不中断对话）
-    mcp_tools, mcp_errors = await load_agent_mcp_tools(agent_id)
+    # 加载该智能体已启用的 MCP 工具（单服务失败仅记录，不中断对话）；
+    # 共享（非属主）会话跳过加载，避免属主凭据被共享用户对话驱动。
+    if _mcp_tools_allowed_for(ua, user_id):
+        mcp_tools, mcp_errors = await load_agent_mcp_tools(agent_id)
+    else:
+        mcp_tools, mcp_errors = [], []
 
     agent, model = build_model_and_agent(
         ua,

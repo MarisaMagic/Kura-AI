@@ -78,6 +78,30 @@ async def test_mcp_server_connection(
     }
 
 
+def _guard_mcp_tool_output(tool: Any) -> Any:
+    """包装 MCP 工具：字符串输出按非可信内容隔离并截断，缓解间接提示注入与上下文膨胀。"""
+    from langchain_core.tools import StructuredTool
+
+    from app.utils.content_guard import guard_untrusted_content
+
+    async def _guarded_coroutine(*args: Any, _tool: Any = tool, **kwargs: Any) -> Any:
+        result = await _tool.ainvoke(kwargs if kwargs else (args[0] if args else {}))
+        if isinstance(result, str):
+            from app.settings import settings
+
+            return guard_untrusted_content(
+                result, max_chars=int(getattr(settings, "MCP_TOOL_RESULT_MAX_CHARS", 8000))
+            )
+        return result
+
+    return StructuredTool.from_function(
+        coroutine=_guarded_coroutine,
+        name=getattr(tool, "name", None) or "mcp_tool",
+        description=getattr(tool, "description", "") or "",
+        args_schema=getattr(tool, "args_schema", None),
+    )
+
+
 async def load_agent_mcp_tools(agent_id: int) -> tuple[list, list[dict]]:
     """
     加载指定智能体全部已启用 MCP 服务的 LangChain 工具。
@@ -108,5 +132,5 @@ async def load_agent_mcp_tools(agent_id: int) -> tuple[list, list[dict]]:
                 )
                 continue
             seen_names.add(tname)
-            all_tools.append(t)
+            all_tools.append(_guard_mcp_tool_output(t))
     return all_tools, errors

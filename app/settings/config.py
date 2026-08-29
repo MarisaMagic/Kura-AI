@@ -146,6 +146,18 @@ class Settings(BaseSettings):
     REDIS_CACHE_TTL_SECONDS: int = 300
     # 智能体对话异步 Job（刷新后可重连 SSE）在 Redis 中的 TTL（秒）
     CHAT_JOB_TTL_SECONDS: int = 86400
+    # 对话生成接口（/chat、/chat/stream、/chat/jobs）按用户限流：每分钟最多次数，0=关闭
+    CHAT_RATE_LIMIT_PER_MINUTE: int = 20
+    # 单条用户消息字符上限（防超长输入刷 token 成本）
+    CHAT_MESSAGE_MAX_LENGTH: int = 8000
+    # 会话 ID 字符上限
+    CHAT_SESSION_ID_MAX_LENGTH: int = 64
+    # 共享（非属主）会话是否允许加载属主 MCP 工具；true 会使共享用户可驱动属主凭据，务必保持 false
+    SHARE_CHAT_ALLOW_OWNER_MCP_TOOLS: bool = False
+    # 注入模型前的非可信外部内容（知识库/网页检索结果）字符上限，0=不截断
+    TOOL_UNTRUSTED_CONTENT_MAX_CHARS: int = 16000
+    # 单个 MCP 工具返回内容的字符上限，0=不截断
+    MCP_TOOL_RESULT_MAX_CHARS: int = 8000
 
     # 全局嵌入（DashScope 兼容 OpenAI /embeddings）- 多模态嵌入模型
     EMBEDDING_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"

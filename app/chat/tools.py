@@ -1,56 +1,89 @@
-"""Agent 工具共享状态（知识库/记忆/联网检索由各自工具模块动态绑定）。"""
+"""Agent 工具共享状态（知识库/记忆/联网检索由各自工具模块动态绑定）。
+
+并发安全：全部状态挂在按请求创建的 _RequestState 上，经 ContextVar 分发。
+asyncio.create_task / asyncio.to_thread / LangChain run_in_executor 均会复制当前
+contextvars 上下文（携带同一状态对象引用），同步路径整体运行于单线程内，
+因此并发请求互不可见，杜绝跨请求（跨用户）RAG 上下文与检索步骤串扰。
+"""
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 from typing import Any, Optional
 
-_LAST_RAG_CONTEXT: dict | None = None
-_KNOWLEDGE_TOOL_CALLS_THIS_TURN = 0
-_MEMORY_TOOL_CALLS_THIS_TURN = 0
-_IMAGE_KB_TOOL_CALLS_THIS_TURN = 0
-_WEB_SEARCH_TOOL_CALLS_THIS_TURN = 0
-_RAG_STEP_QUEUE: Any = None
-_RAG_STEP_LOOP: asyncio.AbstractEventLoop | None = None
+
+class _RequestState:
+    """单次对话请求内的工具共享状态（每请求一个实例，随上下文隔离）。"""
+
+    __slots__ = (
+        "last_rag_context",
+        "knowledge_calls",
+        "memory_calls",
+        "image_kb_calls",
+        "web_search_calls",
+        "rag_step_queue",
+        "rag_step_loop",
+    )
+
+    def __init__(self) -> None:
+        self.last_rag_context: dict | None = None
+        self.knowledge_calls = 0
+        self.memory_calls = 0
+        self.image_kb_calls = 0
+        self.web_search_calls = 0
+        self.rag_step_queue: Any = None
+        self.rag_step_loop: asyncio.AbstractEventLoop | None = None
+
+
+_REQUEST_STATE: contextvars.ContextVar[_RequestState | None] = contextvars.ContextVar(
+    "kura_agent_tool_request_state", default=None
+)
+
+
+def _state() -> _RequestState:
+    state = _REQUEST_STATE.get()
+    if state is None:
+        state = _RequestState()
+        _REQUEST_STATE.set(state)
+    return state
 
 
 def _set_last_rag_context(context: dict) -> None:
-    global _LAST_RAG_CONTEXT
-    _LAST_RAG_CONTEXT = context
+    _state().last_rag_context = context
 
 
 def get_last_rag_context(clear: bool = True) -> Optional[dict]:
-    global _LAST_RAG_CONTEXT
-    context = _LAST_RAG_CONTEXT
+    state = _state()
+    context = state.last_rag_context
     if clear:
-        _LAST_RAG_CONTEXT = None
+        state.last_rag_context = None
     return context
 
 
 def reset_tool_call_guards() -> None:
-    global _KNOWLEDGE_TOOL_CALLS_THIS_TURN, _MEMORY_TOOL_CALLS_THIS_TURN, _IMAGE_KB_TOOL_CALLS_THIS_TURN
-    global _WEB_SEARCH_TOOL_CALLS_THIS_TURN
-    _KNOWLEDGE_TOOL_CALLS_THIS_TURN = 0
-    _MEMORY_TOOL_CALLS_THIS_TURN = 0
-    _IMAGE_KB_TOOL_CALLS_THIS_TURN = 0
-    _WEB_SEARCH_TOOL_CALLS_THIS_TURN = 0
+    state = _state()
+    state.knowledge_calls = 0
+    state.memory_calls = 0
+    state.image_kb_calls = 0
+    state.web_search_calls = 0
 
 
 def try_acquire_knowledge_tool_slot() -> bool:
     """同一轮对话仅允许一次知识库检索；成功占用返回 True。"""
-    global _KNOWLEDGE_TOOL_CALLS_THIS_TURN
-    if _KNOWLEDGE_TOOL_CALLS_THIS_TURN >= 1:
+    state = _state()
+    if state.knowledge_calls >= 1:
         return False
-    _KNOWLEDGE_TOOL_CALLS_THIS_TURN += 1
+    state.knowledge_calls += 1
     return True
 
 
 def try_acquire_memory_tool_slot() -> bool:
     """同一轮对话仅允许一次会话记忆检索；成功占用返回 True。"""
-    global _MEMORY_TOOL_CALLS_THIS_TURN
-    if _MEMORY_TOOL_CALLS_THIS_TURN >= 1:
+    state = _state()
+    if state.memory_calls >= 1:
         return False
-    _MEMORY_TOOL_CALLS_THIS_TURN += 1
+    state.memory_calls += 1
     return True
 
 
@@ -61,13 +94,13 @@ def try_acquire_image_kb_tool_slot(user_id: int, agent_id: int, session_id: str)
     """
     from app.chat.attachment_service import count_session_image_attachments
 
-    global _IMAGE_KB_TOOL_CALLS_THIS_TURN
+    state = _state()
     max_n = count_session_image_attachments(user_id, agent_id, session_id)
     if max_n <= 0:
         return False
-    if _IMAGE_KB_TOOL_CALLS_THIS_TURN >= max_n:
+    if state.image_kb_calls >= max_n:
         return False
-    _IMAGE_KB_TOOL_CALLS_THIS_TURN += 1
+    state.image_kb_calls += 1
     return True
 
 
@@ -75,26 +108,26 @@ def try_acquire_web_search_tool_slot() -> bool:
     """同一轮对话限制联网搜索次数（防 ReAct 循环刷限流）；成功占用返回 True。"""
     from app.settings import settings
 
-    global _WEB_SEARCH_TOOL_CALLS_THIS_TURN
+    state = _state()
     max_n = max(1, int(getattr(settings, "WEB_SEARCH_MAX_CALLS_PER_TURN", 2)))
-    if _WEB_SEARCH_TOOL_CALLS_THIS_TURN >= max_n:
+    if state.web_search_calls >= max_n:
         return False
-    _WEB_SEARCH_TOOL_CALLS_THIS_TURN += 1
+    state.web_search_calls += 1
     return True
 
 
 def set_rag_step_queue(queue: Any, *, sync: bool = False) -> None:
-    global _RAG_STEP_QUEUE, _RAG_STEP_LOOP
-    _RAG_STEP_QUEUE = queue
+    state = _state()
+    state.rag_step_queue = queue
     if queue is None:
-        _RAG_STEP_LOOP = None
+        state.rag_step_loop = None
     elif sync:
-        _RAG_STEP_LOOP = None
+        state.rag_step_loop = None
     else:
         try:
-            _RAG_STEP_LOOP = asyncio.get_running_loop()
+            state.rag_step_loop = asyncio.get_running_loop()
         except RuntimeError:
-            _RAG_STEP_LOOP = asyncio.get_event_loop()
+            state.rag_step_loop = asyncio.get_event_loop()
 
 
 def log_kb_tool_return_to_terminal(text: str, *, tool_label: str = "search_knowledge_base") -> None:
@@ -111,18 +144,20 @@ def log_kb_tool_return_to_terminal(text: str, *, tool_label: str = "search_knowl
 
 
 def emit_rag_step(icon: str, label: str, detail: str = "") -> None:
-    global _RAG_STEP_QUEUE, _RAG_STEP_LOOP
-    if _RAG_STEP_QUEUE is None:
+    state = _state()
+    queue = state.rag_step_queue
+    if queue is None:
         return
     step = {"icon": icon, "label": label, "detail": detail}
-    if _RAG_STEP_LOOP is not None:
+    loop = state.rag_step_loop
+    if loop is not None:
         try:
-            if not _RAG_STEP_LOOP.is_closed():
-                _RAG_STEP_LOOP.call_soon_threadsafe(_RAG_STEP_QUEUE.put_nowait, step)
+            if not loop.is_closed():
+                loop.call_soon_threadsafe(queue.put_nowait, step)
         except Exception:
             pass
     else:
         try:
-            _RAG_STEP_QUEUE.put_nowait(step)
+            queue.put_nowait(step)
         except Exception:
             pass

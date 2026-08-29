@@ -31,6 +31,28 @@ class ChatRequest(BaseModel):
         description="为 True 时重新生成最后一轮助手回复（不新增用户消息；附件以存储中的最后一条用户消息为准）",
     )
 
+    @field_validator("message")
+    @classmethod
+    def _limit_message_length(cls, v: str) -> str:
+        from app.settings import settings
+
+        mx = int(getattr(settings, "CHAT_MESSAGE_MAX_LENGTH", 8000))
+        if v and len(v) > mx:
+            raise ValueError(f"消息长度不能超过 {mx} 字符")
+        return v
+
+    @field_validator("session_id")
+    @classmethod
+    def _limit_session_id_length(cls, v: Optional[str]) -> Optional[str]:
+        from app.settings import settings
+
+        if v is None:
+            return v
+        mx = int(getattr(settings, "CHAT_SESSION_ID_MAX_LENGTH", 64))
+        if len(v.strip()) > mx:
+            raise ValueError(f"会话 ID 长度不能超过 {mx} 字符")
+        return v
+
     @field_validator("attachment_ids")
     @classmethod
     def _limit_attachment_ids(cls, v: list[str]) -> list[str]:

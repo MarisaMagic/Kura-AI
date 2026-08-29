@@ -22,6 +22,7 @@ from app.chat.tools import (
     try_acquire_web_search_tool_slot,
 )
 from app.settings import settings
+from app.utils.content_guard import guard_untrusted_content
 
 logger = logging.getLogger(__name__)
 
@@ -418,6 +419,8 @@ def make_web_search_tool() -> StructuredTool:
             "以下为联网搜索结果摘要，回答时凡引用必须以 [来源N] 标注（N 与编号一致），"
             "并可在结尾附上对应 URL：\n\n" + "\n\n".join(blocks)
         )
+        # 网页摘要属非可信外部内容：隔离包裹 + 长度上限，缓解间接提示注入
+        out = guard_untrusted_content(out)
         emit_rag_step("📑", "联网搜索完成", f"命中 {len(results)} 条结果（{provider_used}）")
         log_kb_tool_return_to_terminal(out, tool_label="web_search")
         _set_last_rag_context({"web_sources": web_sources})
