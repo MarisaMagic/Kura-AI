@@ -8,7 +8,7 @@
 
 ## 项目简介
 
-基于 FastAPI + Vue 3 + LangChain + LangGraph 的多模态智能体中心项目。支持用户自定义智能体配置、多轮对话、长短期记忆、RAG 多模态知识库检索、附件内容对话等功能。智能体能够基于 ReAct 模式自主思考、调用 Agent Tools、知识库检索、多模态内容理解解决用户问题。
+基于 FastAPI + Vue 3 + LangChain + LangGraph 的多模态智能体中心。支持自定义智能体（模型、提示词、知识库、MCP 工具）、多轮对话、长短期记忆、多模态知识库与会话附件理解。智能体基于 ReAct 自主规划，按需调用知识库检索、联网搜索、会话记忆、附件读写及 MCP 外部工具完成任务。
 
 使用项目模板: [vue-fastapi-admin](https://github.com/mizhexiaoxiao/vue-fastapi-admin)
 
@@ -24,35 +24,39 @@
 
 ![](/deploy/sample-picture/agent-chat-1.png)
 
-可进行多轮对话：
-
-![](/deploy/sample-picture/agent-chat-2.png)
-
-支持 latex、代码块渲染：
-
 ![](/deploy/sample-picture/agent-chat-3.png)
 
 ![](/deploy/sample-picture/agent-chat-4.png)
-
-### 附件内容对话
-
-![](/deploy/sample-picture/agent-attach-1.png)
-
-可支持多模态大模型读取图片附件：
-
-![](/deploy/sample-picture/agent-attach-2.png)
 
 ### 知识库检索
 
 ![](/deploy/sample-picture/agent-kb-1.png)
 
-知识库配置：
-
 ![](/deploy/sample-picture/agent-kb-2.png)
+
+![](/deploy/sample-picture/agent-kb-3.png)
 
 ### 历史对话列表
 
 ![](/deploy/sample-picture/agent-list.png)
+
+### 联网搜索
+
+![](/deploy/sample-picture/agent-web-search.png)
+
+![](/deploy/sample-picture/agent-web-search-2.png)
+
+### MCP 外部工具
+
+![](/deploy/sample-picture/agent-mcp-1.png)
+
+![](/deploy/sample-picture/agent-mcp-2.png)
+
+### 附件内容对话
+
+![](/deploy/sample-picture/agent-attach-1.png)
+
+![](/deploy/sample-picture/agent-attach-2.png)
 
 ---
 
@@ -193,29 +197,24 @@ docker compose stop
 
 建议在项目根目录下创建 `.env` 环境变量配置（需根据自身情况更改）:
 
-```
-# ===== App security =====
-# JWT 与（未单独设置 API_KEY_ENCRYPTION_KEY 时）智能体 API Key 字段加密派生用；勿提交仓库
-# 生成: openssl rand -hex 32
-SECRET_KEY=
+```bash
+# 复制为 .env 后填写。SECRET_KEY 等敏感项勿提交仓库。
 
-# 本地调试可设 true（仅 DEBUG=true 时 Header token=dev 可跳过 JWT，勿用于公网）
+# ===== App security =====
+SECRET_KEY=
+# 本地开发可设为 true；生产务必 false。仅 DEBUG=true 时允许 Header token=dev 免 JWT
 DEBUG=false
 DEBUG_AGENT_KB_PROMPT=false
-
-# 首次启动且数据库无用户时创建的管理员（密码至少 8 位且含字母与数字，勿提交仓库）
+# 首次启动且库中无用户时创建的管理员（密码勿提交仓库；至少 8 位且含字母与数字）
 INITIAL_ADMIN_USERNAME=admin
 INITIAL_ADMIN_EMAIL=admin@localhost
 INITIAL_ADMIN_PASSWORD=
-
 # 是否开放邮箱自助注册（公网部署建议 false）
 ALLOW_PUBLIC_REGISTRATION=true
-
-# 浏览器来源白名单（JSON 数组）；默认含 localhost Vite 端口，部署到域名时请改为你的前端地址
-# CORS_ORIGINS=["https://your-frontend.example.com"]
+# CORS_ORIGINS=["http://localhost:3100","http://127.0.0.1:3100"]
 
 # ===== Embedding Model (多模态) =====
-EMBEDDING_API_KEY=[你的多模态向量嵌入模型 API Key]
+EMBEDDING_API_KEY=
 EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_MODEL=qwen3-vl-embedding
 EMBEDDING_DIM=1536
@@ -230,6 +229,23 @@ MILVUS_COLLECTION=kura_ai_kb
 DATABASE_URL=postgresql+psycopg2://postgres:postgres@127.0.0.1:5433/langchain_app
 REDIS_URL=redis://127.0.0.1:6379/0
 
-# ===== KnowledgeBase Imgs URL Base =====
+CHAT_MEMORY_MILVUS_RECREATE_ON_INIT=false
+
 PUBLIC_API_BASE=http://127.0.0.1:9999
+
+# ===== Web Search（联网搜索）=====
+# provider: auto / ddgs / bocha / bing_html
+# auto：无代理且已配博查 Key 时 bocha → bing_html；有代理时 ddgs → bocha → bing_html
+WEB_SEARCH_PROVIDER=auto
+WEB_SEARCH_MAX_RESULTS=5
+# ddgs 格式 {country}-{language}；旧值 zh-cn 会自动归一为 cn-zh
+WEB_SEARCH_REGION=cn-zh
+WEB_SEARCH_TIMEOUT_SECONDS=15
+# 可选：ddgs / 博查 / bing_html 均使用，如 http://127.0.0.1:7890
+# WEB_SEARCH_PROXY=
+# 空=自动（无代理 bing / 有代理 auto）；也可强制指定，如 bing 或 google,brave,bing
+# WEB_SEARCH_DDGS_BACKEND=
+# 博查 Web Search（国内无代理主路径）。申请: https://open.bochaai.com/ → API KEY 管理
+WEB_SEARCH_BOCHA_API_KEY=
+WEB_SEARCH_BOCHA_ENDPOINT=https://api.bochaai.com/v1/web-search
 ```
