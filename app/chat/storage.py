@@ -8,6 +8,7 @@ from datetime import datetime
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from sqlalchemy import desc
+from sqlalchemy.exc import IntegrityError
 
 from app.chat.cache import cache
 from app.chat.database import SessionLocal
@@ -98,129 +99,193 @@ class ConversationStorage:
                 messages.append(SystemMessage(content=content))
         return messages
 
-    def save(
+    @staticmethod
+    def _row_to_record(row: ChatMessageRow) -> dict:
+        """将消息 ORM 行转为 API / Redis 使用的字典。"""
+        env = row.content_json if isinstance(row.content_json, dict) else None
+        item = {
+            "type": row.message_type,
+            "content": row.content,
+            "timestamp": row.timestamp.isoformat(),
+            "rag_trace": row.rag_trace,
+            "rag_steps": row.rag_steps,
+            "error_text": row.error_text,
+            "image_references": row.image_references,
+            "sources": row.sources,
+            "thinking_text": row.thinking_text,
+        }
+        if env:
+            item["content_json"] = env
+        return item
+
+    @staticmethod
+    def _parse_extra(extra: dict | None) -> dict:
+        """从 extra_message_data 项提取可落库字段（kb_preselect 无对应列，与旧 save 一样不入库）。"""
+        extra = extra or {}
+        error_text = None
+        raw_err = extra.get("error_text")
+        if raw_err is not None:
+            error_text = str(raw_err).strip() or None
+        return {
+            "rag_trace": extra.get("rag_trace"),
+            "rag_steps": extra.get("rag_steps"),
+            "error_text": error_text,
+            "image_references": extra.get("image_references"),
+            "sources": extra.get("sources"),
+            "thinking_text": extra.get("thinking_text"),
+        }
+
+    def _session_query(self, db, user_id: int, agent_id: int, session_id: str):
+        return db.query(ChatSessionRow).filter(
+            ChatSessionRow.user_id == user_id,
+            ChatSessionRow.agent_id == agent_id,
+            ChatSessionRow.session_id == session_id,
+        )
+
+    def _get_or_create_session(
+        self,
+        db,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        metadata: dict | None = None,
+    ) -> ChatSessionRow:
+        """
+        取会话行并加行锁；不存在则创建。
+        并发首条消息撞唯一约束时回滚本事务起点后重查（此时尚未插入消息行）。
+        """
+        session = self._session_query(db, user_id, agent_id, session_id).with_for_update().first()
+        if session:
+            if metadata is not None:
+                session.metadata_json = metadata
+            return session
+        session = ChatSessionRow(
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            metadata_json=metadata if metadata is not None else {},
+        )
+        db.add(session)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            session = self._session_query(db, user_id, agent_id, session_id).with_for_update().first()
+            if session is None:
+                raise
+            if metadata is not None:
+                session.metadata_json = metadata
+        return session
+
+    def _insert_message_row(self, db, session: ChatSessionRow, msg, extra: dict | None, now: datetime) -> None:
+        fields = self._parse_extra(extra)
+        envelope = serialize_message_envelope(msg)
+        preview = msg_content_to_str(getattr(msg, "content", ""))
+        if len(preview) > 65500:
+            preview = preview[:65500] + "…"
+        db.add(
+            ChatMessageRow(
+                session_ref_id=session.id,
+                message_type=msg.type,
+                content=preview,
+                content_json=envelope,
+                timestamp=now,
+                rag_trace=fields["rag_trace"],
+                rag_steps=fields["rag_steps"],
+                error_text=fields["error_text"],
+                image_references=fields["image_references"],
+                sources=fields["sources"],
+                thinking_text=fields["thinking_text"],
+            )
+        )
+
+    def _load_message_records(self, db, session: ChatSessionRow) -> list[dict]:
+        rows = (
+            db.query(ChatMessageRow)
+            .filter(ChatMessageRow.session_ref_id == session.id)
+            .order_by(ChatMessageRow.id.asc())
+            .all()
+        )
+        return [self._row_to_record(row) for row in rows]
+
+    def _commit_and_refresh_caches(
+        self,
+        db,
+        session: ChatSessionRow,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+    ) -> None:
+        """提交消息变更后按库回填消息缓存，并失效会话列表缓存。"""
+        session.updated_at = datetime.utcnow()
+        session_pk = session.id
+        db.commit()
+        db.expire_all()
+        session = db.query(ChatSessionRow).filter(ChatSessionRow.id == session_pk).first()
+        records = self._load_message_records(db, session) if session else []
+        cache.set_json(self._messages_cache_key(user_id, agent_id, session_id), records)
+        cache.delete(self._sessions_cache_key(user_id, agent_id))
+        cache.delete(self._sessions_all_cache_key(user_id))
+
+    def append_messages(
         self,
         user_id: int,
         agent_id: int,
         session_id: str,
-        messages: list,
-        metadata: dict | None = None,
+        new_messages: list,
         extra_message_data: list | None = None,
+        metadata: dict | None = None,
     ) -> None:
         """
-        保存对话会话和消息到 PostgreSQL 数据库并更新 Redis 缓存
-        用于用户在对话过程中, 保存最新一轮对话消息到数据库并更新 Redis 缓存
-        :param user_id: 用户 ID
-        :param agent_id: 智能体 ID
-        :param session_id: 会话 ID
-        :param messages: 消息列表
-        :param metadata: 元数据
-        :param extra_message_data: 额外消息数据
+        增量追加消息行，不改写已有行（含 rag_steps / thinking_text 等 extras）。
+        :param new_messages: 本轮新增的 LangChain 消息（不是全量历史）
+        :param extra_message_data: 与 new_messages 等长的 extras 列表，缺省视为空
         """
-        # 1. 创建 PostgreSQL 数据库连接
+        if not new_messages:
+            return
         db = SessionLocal()
         try:
-            # 2. 查询会话是否存在
-            session = (
-                db.query(ChatSessionRow)
-                .filter(
-                    ChatSessionRow.user_id == user_id,
-                    ChatSessionRow.agent_id == agent_id,
-                    ChatSessionRow.session_id == session_id,
-                )
-                .first()
+            session = self._get_or_create_session(db, user_id, agent_id, session_id, metadata)
+            now = datetime.utcnow()
+            extras = extra_message_data or []
+            for idx, msg in enumerate(new_messages):
+                extra = extras[idx] if idx < len(extras) else None
+                self._insert_message_row(db, session, msg, extra, now)
+            self._commit_and_refresh_caches(db, session, user_id, agent_id, session_id)
+        finally:
+            db.close()
+
+    def replace_trailing_assistant(
+        self,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        ai_message,
+        extra: dict | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        """
+        重新生成：删除末尾连续的 ai 行后插入新的助手消息（带新 extras），更早轮次不动。
+        """
+        db = SessionLocal()
+        try:
+            session = self._get_or_create_session(db, user_id, agent_id, session_id, metadata)
+            rows = (
+                db.query(ChatMessageRow)
+                .filter(ChatMessageRow.session_ref_id == session.id)
+                .order_by(ChatMessageRow.id.desc())
+                .all()
             )
-            if not session:
-                # 如果会话不存在，创建新的 ChatSessionRow 对象
-                # 并设置 metadata (元数据, 默认为空字典)
-                # 添加到数据库, 并通过 flush() 立即获取 id (插入后立即获取主键)
-                session = ChatSessionRow(
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    session_id=session_id,
-                    metadata_json=metadata or {},
-                )
-                db.add(session)
-                db.flush()
-            else:
-                # 如果会话存在，更新 metadata
-                session.metadata_json = metadata or {}
-
-            # 3. 删除会话关联的旧消息
-            db.query(ChatMessageRow).filter(ChatMessageRow.session_ref_id == session.id).delete(
-                synchronize_session=False
-            )
-
-            # 4. 将新消息添加到数据库并更新 Redis 缓存
-            serialized = [] # 序列化后的消息列表
-            now = datetime.utcnow() # 当前时间
-            # 遍历新消息列表, 创建 ChatMessageRow 对象并添加新消息到数据库
-            for idx, msg in enumerate(messages):
-                rag_trace = None
-                rag_steps = None
-                error_text = None
-                image_references = None
-                sources = None
-                thinking_text = None
-                # 检查额外消息数据, 如果有 RAG 追踪信息, 则添加到消息中
-                if extra_message_data and idx < len(extra_message_data):
-                    extra = extra_message_data[idx] or {}
-                    rag_trace = extra.get("rag_trace")
-                    rag_steps = extra.get("rag_steps")
-                    image_references = extra.get("image_references")  # 获取图片引用
-                    sources = extra.get("sources")  # 获取知识库来源列表
-                    thinking_text = extra.get("thinking_text")  # 获取工具调用前过渡文本
-                    raw_err = extra.get("error_text")
-                    if raw_err is not None:
-                        error_text = str(raw_err).strip() or None
-
-                envelope = serialize_message_envelope(msg)
-                preview = msg_content_to_str(getattr(msg, "content", ""))
-                if len(preview) > 65500:
-                    preview = preview[:65500] + "…"
-
-                # 创建 ChatMessageRow 对象并添加新消息到数据库
-                db.add(
-                    ChatMessageRow(
-                        session_ref_id=session.id,
-                        message_type=msg.type,
-                        content=preview,
-                        content_json=envelope,
-                        timestamp=now,
-                        rag_trace=rag_trace,
-                        rag_steps=rag_steps,
-                        error_text=error_text,
-                        image_references=image_references,  # 添加图片引用
-                        sources=sources,  # 添加知识库来源
-                        thinking_text=thinking_text,  # 工具调用前过渡文本
-                    )
-                )
-                # 将新消息添加到序列化列表
-                serialized.append(
-                    {
-                        "type": msg.type,
-                        "content": preview,
-                        "content_json": envelope,
-                        "timestamp": now.isoformat(),
-                        "rag_trace": rag_trace,
-                        "rag_steps": rag_steps,
-                        "error_text": error_text,
-                        "image_references": image_references,  # 添加图片引用
-                        "sources": sources,  # 添加知识库来源
-                        "thinking_text": thinking_text,  # 工具调用前过渡文本
-                    }
-                )
-
-            # 5. 更新会话的更新时间
-            session.updated_at = now
-            # 6. 提交事务到数据库
-            db.commit()
-
-            # 7. 更新 Redis 缓存 (使用 _messages_cache_key)
-            cache.set_json(self._messages_cache_key(user_id, agent_id, session_id), serialized)
-            # 8. 删除会话缓存 (使用 _sessions_cache_key)
-            cache.delete(self._sessions_cache_key(user_id, agent_id))
-            cache.delete(self._sessions_all_cache_key(user_id))
+            trailing: list[ChatMessageRow] = []
+            for row in rows:
+                if row.message_type == "ai":
+                    trailing.append(row)
+                else:
+                    break
+            for row in trailing:
+                db.delete(row)
+            self._insert_message_row(db, session, ai_message, extra, datetime.utcnow())
+            self._commit_and_refresh_caches(db, session, user_id, agent_id, session_id)
         finally:
             db.close()
 
@@ -380,33 +445,7 @@ class ConversationStorage:
             if not session: 
                 return []
 
-            # 查询符合 user_id 和 agent_id 和 session_id 的会话的消息记录, 并按 id 升序排序
-            rows = (
-                db.query(ChatMessageRow)
-                .filter(ChatMessageRow.session_ref_id == session.id)
-                .order_by(ChatMessageRow.id.asc())
-                .all()
-            )
-            # 将消息记录转换为字典列表
-            result = []
-            for row in rows:
-                env = row.content_json if isinstance(row.content_json, dict) else None
-                item = {
-                    "type": row.message_type,
-                    "content": row.content,
-                    "timestamp": row.timestamp.isoformat(),
-                    "rag_trace": row.rag_trace,
-                    "rag_steps": row.rag_steps,
-                    "error_text": row.error_text,
-                    "image_references": row.image_references,
-                    "sources": row.sources,
-                    "thinking_text": row.thinking_text,
-                }
-                if env:
-                    item["content_json"] = env
-                result.append(item)
-            # 3. 更新 Redis 缓存 (使用 _messages_cache_key)
-            # 将消息列表添加到 Redis 缓存
+            result = self._load_message_records(db, session)
             cache.set_json(self._messages_cache_key(user_id, agent_id, session_id), result)
             # 返回消息列表
             return result

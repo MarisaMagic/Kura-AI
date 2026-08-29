@@ -479,8 +479,9 @@ def chat_with_agent_sync(
         supports_vision=bool(getattr(ua, "supports_vision", False)),
     )
     # 将用户消息添加到会话消息中（存库为 image_ref + 文本块 JSON）
-    messages.append(HumanMessage(content=human_content))
-    storage.save(user_id, agent_id, session_id, messages, None)
+    human_msg = HumanMessage(content=human_content)
+    messages.append(human_msg)
+    storage.append_messages(user_id, agent_id, session_id, [human_msg])
 
     class _SyncRagStepCollector:
         def __init__(self) -> None:
@@ -531,20 +532,24 @@ def chat_with_agent_sync(
     error_text = str(caught_exc) if caught_exc else None
 
     # 助手落库仅用纯文本；image_references 放 extra，避免多模态块写入历史导致下游 API（如智谱 1210）再次请求失败
-    messages.append(AIMessage(content=response_content))
-    # 构建额外消息数据（含失败时的 error_text 供历史展示）
-    extra_message_data = [None] * (len(messages) - 1) + [
-        {
-            "rag_trace": rag_trace,
-            "rag_steps": rag_collector.steps or None,
-            "error_text": error_text,
-            "image_references": image_references,  # 添加图片引用
-            "sources": merged_sources,  # 添加来源（知识库或联网搜索）
-            "kb_preselect": kb_preselect_meta or None,
-        }
-    ]
-    # 保存会话消息，保存最新一轮对话消息到数据库对应会话并更新 Redis 缓存
-    storage.save(user_id, agent_id, session_id, messages, extra_message_data=extra_message_data)
+    ai_msg = AIMessage(content=response_content)
+    messages.append(ai_msg)
+    storage.append_messages(
+        user_id,
+        agent_id,
+        session_id,
+        [ai_msg],
+        extra_message_data=[
+            {
+                "rag_trace": rag_trace,
+                "rag_steps": rag_collector.steps or None,
+                "error_text": error_text,
+                "image_references": image_references,
+                "sources": merged_sources,
+                "kb_preselect": kb_preselect_meta or None,
+            }
+        ],
+    )
 
     # 归档会话记忆，按配置同步或后台线程归档。
     schedule_archive_session_memory(user_id, agent_id, session_id) 
@@ -681,10 +686,11 @@ async def iter_chat_stream_events(
             session_id=session_id,
             supports_vision=bool(getattr(ua, "supports_vision", False)),
         )
-        messages.append(HumanMessage(content=human_content))
+        human_msg = HumanMessage(content=human_content)
+        messages.append(human_msg)
 
         # 生成完成前即落库用户消息，刷新后仍可从历史会话看到提问（助手在结束时再写入）
-        await asyncio.to_thread(storage.save, user_id, agent_id, session_id, messages, None)
+        await asyncio.to_thread(storage.append_messages, user_id, agent_id, session_id, [human_msg])
 
     memory_query = (user_text or "").strip()
     if regenerate:
@@ -821,21 +827,23 @@ async def iter_chat_stream_events(
         yield {"type": "sources", "sources": merged_sources}
 
     # 助手落库仅用纯文本；见 chat_with_agent_sync
-    messages.append(AIMessage(content=full_response))
-    # 构建额外消息数据（含流式失败时的 error_text 供历史展示）
-    extra_message_data = [None] * (len(messages) - 1) + [
-        {
-            "rag_trace": rag_trace,
-            "rag_steps": rag_steps_collected or None,
-            "error_text": stream_error,
-            "image_references": image_references,  # 添加图片引用
-            "sources": merged_sources,  # 添加来源（知识库或联网搜索）
-            "kb_preselect": kb_preselect_meta or None,
-            "thinking_text": "".join(thinking_text_parts) or None,  # 工具调用前的过渡文本, 历史回放
-        }
-    ]
-    # 保存会话消息，保存最新一轮对话消息到数据库对应会话并更新 Redis 缓存
-    storage.save(user_id, agent_id, session_id, messages, extra_message_data=extra_message_data)
+    ai_msg = AIMessage(content=full_response)
+    messages.append(ai_msg)
+    ai_extra = {
+        "rag_trace": rag_trace,
+        "rag_steps": rag_steps_collected or None,
+        "error_text": stream_error,
+        "image_references": image_references,
+        "sources": merged_sources,
+        "kb_preselect": kb_preselect_meta or None,
+        "thinking_text": "".join(thinking_text_parts) or None,
+    }
+    if regenerate:
+        storage.replace_trailing_assistant(user_id, agent_id, session_id, ai_msg, extra=ai_extra)
+    else:
+        storage.append_messages(
+            user_id, agent_id, session_id, [ai_msg], extra_message_data=[ai_extra]
+        )
 
     # 归档会话记忆，按配置同步或后台线程归档。
     schedule_archive_session_memory(user_id, agent_id, session_id) 
