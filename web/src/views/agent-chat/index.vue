@@ -30,7 +30,7 @@
                   <n-spin v-if="introOpeningRunning && !introOpeningDisplayed" size="small" />
                   <div
                     v-else-if="introOpeningDisplayed"
-                    class="agent-chat-intro-opening-md"
+                    class="agent-chat-intro-opening-md agent-chat-md"
                     v-html="renderAgentChatMarkdown(introOpeningDisplayed)"
                   />
                 </div>
@@ -123,7 +123,7 @@
                               {{ $t('views.agents.chat_thinking_text_label') }}
                             </div>
                             <div
-                              class="agent-chat-thinking-text-body"
+                              class="agent-chat-thinking-text-body agent-chat-md"
                               v-html="renderAgentChatMarkdown(m.thinkingText)"
                             ></div>
                           </div>
@@ -316,7 +316,7 @@
                       circle
                       size="small"
                       :aria-label="$t('views.agents.chat_go_bottom')"
-                      @click="() => scrollBodyToBottom(true)"
+                      @click="() => scrollBodyToBottom(true, { force: true })"
                     >
                       <TheIcon icon="mdi:chevron-double-down" :size="20" />
                     </n-button>
@@ -427,6 +427,7 @@ import { NAvatar, NButton, NInput, NSpin, NSwitch, NTooltip, NUpload } from 'nai
 import AppPage from '@/components/page/AppPage.vue'
 import TheIcon from '@/components/icon/TheIcon.vue'
 import ChatAttachmentItem from './ChatAttachmentItem.vue'
+import { useChatStickToBottom } from './useChatStickToBottom.js'
 import api from '@/api'
 import { getToken } from '@/utils'
 import { renderAgentChatMarkdown } from '@/utils/agentChatMarkdown'
@@ -469,8 +470,8 @@ const INTRO_OPENING_CHAR_DELAY_MS = 72
 
 const pendingFiles = ref([])
 const bodyScrollRef = ref(null)
-/** 是否在滚动容器底部附近（用于隐藏「回到底部」） */
-const scrollAtBottom = ref(true)
+const { scrollAtBottom, onBodyScroll, scrollBodyToBottom, updateScrollBottomState } =
+  useChatStickToBottom(bodyScrollRef)
 
 const showGoBottomButton = computed(() => {
   if (pageLoading.value || loadError.value) return false
@@ -478,21 +479,6 @@ const showGoBottomButton = computed(() => {
   if (!messages.value.length) return false
   return !scrollAtBottom.value
 })
-
-function updateScrollBottomState() {
-  const el = bodyScrollRef.value
-  if (!el) {
-    scrollAtBottom.value = true
-    return
-  }
-  const threshold = 8
-  const gap = el.scrollHeight - el.scrollTop - el.clientHeight
-  scrollAtBottom.value = gap <= threshold
-}
-
-function onBodyScroll() {
-  updateScrollBottomState()
-}
 const uploadResetKey = ref(0)
 const sessionId = ref(`session_${Date.now()}`)
 let fileIdSeq = 0
@@ -1058,7 +1044,7 @@ async function maybeResumePendingChatJob() {
     activeJobId.value = null
     activeAssistantIdx.value = -1
     sending.value = false
-    scrollBodyToBottom()
+    scrollBodyToBottom(false, { force: true })
     agentSidebarStore.bumpRefresh()
   }
 }
@@ -1090,7 +1076,7 @@ async function loadMessagesForSession(agentId, sid) {
   sessionId.value = sid
   sessionPhase.value = list.length > 0 ? 'chat' : 'intro'
   await nextTick()
-  scrollBodyToBottom()
+  scrollBodyToBottom(false, { force: true })
 }
 
 const hasIntroOpeningText = computed(() => {
@@ -1337,24 +1323,6 @@ function removePendingFile(index) {
   pendingFiles.value.splice(index, 1)
 }
 
-function scrollBodyToBottom(smooth = false) {
-  nextTick(() => {
-    const el = bodyScrollRef.value
-    if (!el) {
-      nextTick(() => updateScrollBottomState())
-      return
-    }
-    const top = el.scrollHeight
-    if (smooth) {
-      el.scrollTo({ top, behavior: 'smooth' })
-      window.setTimeout(() => updateScrollBottomState(), 500)
-    } else {
-      el.scrollTop = top
-      nextTick(() => updateScrollBottomState())
-    }
-  })
-}
-
 async function loadAgent() {
   const id = Number(route.params.agentId)
   if (!Number.isFinite(id)) {
@@ -1470,7 +1438,7 @@ async function submitMessage() {
   inputText.value = ''
   pendingFiles.value = []
   uploadResetKey.value += 1
-  scrollBodyToBottom()
+  scrollBodyToBottom(false, { force: true })
   // 立即持久化 session_id，避免刷新后 pending job 的 session 与 sessionStorage 不一致
   persistSessionId(agentId, sessionId.value)
 
@@ -1487,7 +1455,7 @@ async function submitMessage() {
     sources: [],
     thinkingText: '',
   })
-  scrollBodyToBottom()
+  scrollBodyToBottom(false, { force: true })
 
   const idx = messages.value.findIndex((m) => m.id === assistantId)
 
@@ -1564,7 +1532,7 @@ async function regenerateAssistant(assistantMsg) {
     sources: [],
     thinkingText: '',
   }
-  scrollBodyToBottom()
+  scrollBodyToBottom(false, { force: true })
 
   sending.value = true
   try {
@@ -2699,12 +2667,7 @@ html.dark .agent-chat-md :deep(a) {
   padding: 12px;
   overflow-x: auto;
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.06);
   font-size: 13px;
-}
-
-html.dark .agent-chat-md :deep(pre) {
-  background: rgba(0, 0, 0, 0.35);
 }
 
 .agent-chat-md :deep(code) {

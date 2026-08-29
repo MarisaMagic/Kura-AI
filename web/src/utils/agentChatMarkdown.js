@@ -3,7 +3,6 @@ import texmath from 'markdown-it-texmath'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
 import hljs from 'highlight.js'
-import 'highlight.js/styles/github.css'
 import DOMPurify from 'dompurify'
 import './agentChatMarkdown.css'
 

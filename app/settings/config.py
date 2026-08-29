@@ -225,14 +225,21 @@ class Settings(BaseSettings):
     # 「当前用户问题」段最大字符数（与「前序对话」分开截断）
     KB_PRESELECT_MAX_CURRENT_QUESTION_CHARS: int = 8000
 
-    # 联网搜索（免费、无需 API Key；provider: auto=ddgs 优先失败回退 bing_html / ddgs=DuckDuckGo / bing_html=Bing 国内版解析）
+    # 联网搜索。provider: auto / ddgs / bocha / bing_html
+    # auto：无代理且已配博查 Key 时 bocha → bing_html；有 WEB_SEARCH_PROXY 时 ddgs → bocha → bing_html
     WEB_SEARCH_ENABLED: bool = True
     WEB_SEARCH_PROVIDER: str = "auto"
     WEB_SEARCH_MAX_RESULTS: int = 5
-    WEB_SEARCH_REGION: str = "zh-cn"
+    # ddgs 格式 {country}-{language}；旧值 zh-cn 会自动归一为 cn-zh
+    WEB_SEARCH_REGION: str = "cn-zh"
     WEB_SEARCH_TIMEOUT_SECONDS: int = 15
-    # 可选代理（仅 ddgs provider 使用），如 http://127.0.0.1:7890
+    # 可选代理（ddgs / 博查 / bing_html 均使用），如 http://127.0.0.1:7890
     WEB_SEARCH_PROXY: str = ""
+    # 空=自动（无代理 bing / 有代理 auto）；也可强制如 bing 或 google,brave,bing
+    WEB_SEARCH_DDGS_BACKEND: str = ""
+    # 博查 Web Search（国内无代理主路径）；空则 auto 不走博查。申请: https://open.bochaai.com/
+    WEB_SEARCH_BOCHA_API_KEY: str = ""
+    WEB_SEARCH_BOCHA_ENDPOINT: str = "https://api.bochaai.com/v1/web-search"
     # 单轮对话内 web_search 工具最大调用次数（防 ReAct 循环触发限流）
     WEB_SEARCH_MAX_CALLS_PER_TURN: int = 2
 

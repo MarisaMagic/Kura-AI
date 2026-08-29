@@ -43,7 +43,7 @@
             <n-spin v-if="introOpeningRunning && !introOpeningDisplayed" size="small" />
             <div
               v-else-if="introOpeningDisplayed"
-              class="agent-chat-intro-opening-md"
+              class="agent-chat-intro-opening-md agent-chat-md"
               v-html="renderAgentChatMarkdown(introOpeningDisplayed)"
             />
           </div>
@@ -116,7 +116,7 @@
                       <div class="agent-chat-thinking-text-label">
                         {{ $t('views.agents.chat_thinking_text_label') }}
                       </div>
-                      <div class="agent-chat-thinking-text-body" v-html="renderAgentChatMarkdown(m.thinkingText)"></div>
+                      <div class="agent-chat-thinking-text-body agent-chat-md" v-html="renderAgentChatMarkdown(m.thinkingText)"></div>
                     </div>
                     <p v-if="!m.ragSteps?.length && !(m.thinkingText || '').trim()" class="agent-chat-thinking-placeholder">
                       {{ $t('views.agents.chat_feed_thinking_placeholder') }}
@@ -237,11 +237,12 @@
 </template>
 
 <script setup>
-import { computed, nextTick, ref, toRef, watch } from 'vue'
+import { computed, ref, toRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NAlert, NAvatar, NButton, NInput, NSpin, NSwitch } from 'naive-ui'
 import TheIcon from '@/components/icon/TheIcon.vue'
 import { renderAgentChatMarkdown } from '@/utils/agentChatMarkdown'
+import { useChatStickToBottom } from '@/views/agent-chat/useChatStickToBottom.js'
 import { DEFAULT_AVATAR } from '@/views/agents/composables/agentFormCommon.js'
 import { editorPreviewSessionId } from '@/views/agents/composables/useAgentConfigDiff.js'
 import { useAgentPreviewChat } from '@/views/agents/composables/useAgentPreviewChat.js'
@@ -261,6 +262,7 @@ defineEmits(['request-save'])
 const { t } = useI18n()
 const inputText = ref('')
 const bodyScrollRef = ref(null)
+const { onBodyScroll, scrollBodyToBottom } = useChatStickToBottom(bodyScrollRef)
 const useKnowledgeRetrieval = ref(false)
 const useWebSearch = ref(false)
 
@@ -338,23 +340,11 @@ const inputPlaceholder = computed(() => {
 
 const sendDisabled = computed(() => !String(inputText.value || '').trim())
 
-function scrollBodyToBottom() {
-  nextTick(() => {
-    const el = bodyScrollRef.value
-    if (!el) return
-    el.scrollTop = el.scrollHeight
-  })
-}
-
-function onBodyScroll() {
-  /* reserved */
-}
-
 function handleRestartChat() {
   stop()
   resetChat()
   if (hasIntroOpeningText.value) start()
-  scrollBodyToBottom()
+  scrollBodyToBottom(false, { force: true })
 }
 
 function onSendClick() {
@@ -368,6 +358,7 @@ function onSendClick() {
   if (sessionPhase.value === 'intro') stop()
   inputText.value = ''
   sendMessage(text)
+  scrollBodyToBottom(false, { force: true })
 }
 
 function onInputKeydown(e) {

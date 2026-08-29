@@ -69,7 +69,55 @@ html.dark .agent-editor-shell__bar {
 .agent-editor-shell__scroll {
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  -webkit-overflow-scrolling: touch;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.agent-editor-shell__scroll :deep(> *) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+@media (max-width: 1023px) {
+  .agent-editor-shell__scroll {
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+.agent-editor-shell__scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(15, 23, 42, 0.14) transparent;
+}
+html.dark .agent-editor-shell__scroll {
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+.agent-editor-shell__scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.agent-editor-shell__scroll::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+.agent-editor-shell__scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.agent-editor-shell__scroll::-webkit-scrollbar-thumb {
+  background-color: rgba(15, 23, 42, 0.14);
+  border-radius: 100px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.agent-editor-shell__scroll::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(15, 23, 42, 0.22);
+}
+html.dark .agent-editor-shell__scroll::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+html.dark .agent-editor-shell__scroll::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.2);
 }
 </style>

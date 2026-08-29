@@ -3,20 +3,61 @@
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   align-items: stretch;
   width: 100%;
-  min-height: calc(100dvh - 57px);
+  flex: 1;
+  min-height: 0;
+  height: 100%;
 }
 
 .agent-editor-split__left {
   min-width: 0;
-  overflow: hidden;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(15, 23, 42, 0.14) transparent;
+}
+
+html.dark .agent-editor-split__left {
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+
+.agent-editor-split__left::-webkit-scrollbar {
+  width: 8px;
+}
+
+.agent-editor-split__left::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.agent-editor-split__left::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.agent-editor-split__left::-webkit-scrollbar-thumb {
+  background-color: rgba(15, 23, 42, 0.14);
+  border-radius: 100px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.agent-editor-split__left::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(15, 23, 42, 0.22);
+}
+
+html.dark .agent-editor-split__left::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+html.dark .agent-editor-split__left::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.2);
 }
 
 .agent-editor-split__right {
-  position: sticky;
-  top: 0;
-  align-self: start;
-  height: calc(100dvh - 57px);
   min-width: 0;
+  min-height: 0;
+  height: 100%;
   border-left: 1px solid var(--n-divider-color);
   overflow: hidden;
 }
@@ -84,10 +125,16 @@
 @media (max-width: 1023px) {
   .agent-editor-split {
     grid-template-columns: 1fr;
+    height: auto;
+    flex: none;
+    min-height: 100%;
+  }
+
+  .agent-editor-split__left {
+    overflow: visible;
   }
 
   .agent-editor-split__right {
-    position: static;
     height: min(72vh, 640px);
     border-left: none;
     border-top: 1px solid var(--n-divider-color);

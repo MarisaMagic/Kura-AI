@@ -920,12 +920,7 @@ html.dark .agent-chat-md a {
   padding: 12px;
   overflow-x: auto;
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.06);
   font-size: 13px;
-}
-
-html.dark .agent-chat-md pre {
-  background: rgba(0, 0, 0, 0.35);
 }
 
 .agent-chat-md code {

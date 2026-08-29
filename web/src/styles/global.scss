@@ -9,6 +9,10 @@ html {
   font-size: 4px; // * 1rem = 4px  方便unocss计算：在unocss中 1字体单位 = 0.25rem，相当于 1等份 = 1px
 }
 
+html.dark {
+  color-scheme: dark;
+}
+
 body {
   font-size: 16px;
   font-family:
