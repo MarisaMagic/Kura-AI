@@ -34,6 +34,31 @@ body {
   font-family: inherit;
 }
 
+/* 圆形头像：避免 overflow+radius 在 Windows/Chrome 上被栅格化发糊。
+ * Naive 2.34 的 round 只设 --n-border-radius，没有 n-avatar--round；
+ * css-render 后注入，需用 #app 提高优先级盖过 .n-avatar { overflow: hidden }。 */
+#app .n-avatar {
+  flex-shrink: 0;
+  overflow: visible;
+  clip-path: circle(50% at 50% 50%);
+}
+
+#app .n-avatar img,
+.layout-sider-user-avatar {
+  display: block;
+  backface-visibility: hidden;
+  transform: translateZ(0);
+  image-rendering: -webkit-optimize-contrast;
+}
+
+#app .n-avatar img {
+  border-radius: 50%;
+}
+
+.layout-sider-user-avatar {
+  clip-path: circle(50% at 50% 50%);
+}
+
 /* transition fade-slide */
 .fade-slide-leave-active,
 .fade-slide-enter-active {

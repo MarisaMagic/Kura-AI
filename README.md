@@ -58,6 +58,12 @@
 
 ![](/deploy/sample-picture/agent-attach-2.png)
 
+### 智能体共享
+
+![](/deploy/sample-picture/agent-share-1.png)
+
+![](/deploy/sample-picture/agent-share-2.png)
+
 ---
 
 

@@ -3,6 +3,8 @@ import { onMounted, ref } from 'vue'
 import { NButton, NForm, NFormItem, NInput, NTabPane, NTabs, NImage, NUpload } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import CommonPage from '@/components/page/CommonPage.vue'
+import TheIcon from '@/components/icon/TheIcon.vue'
+import AgentAvatarCropModal from '@/views/agents/components/AgentAvatarCropModal.vue'
 import { useUserStore } from '@/store'
 import api from '@/api'
 import { is } from '~/src/utils'
@@ -47,9 +49,34 @@ async function updateProfile() {
   })
 }
 
-function handleAvatarUpload({ file, onFinish, onError }) {
+const avatarUploadKey = ref(0)
+const cropModalShow = ref(false)
+const cropSourceFile = ref(null)
+
+function onAvatarUploadChange(options) {
+  const f = options.fileList?.[0]?.file
+  const list = options.fileList || []
+  if (!f && list.length === 0) return
+  if (f) {
+    cropSourceFile.value = f
+    cropModalShow.value = true
+  }
+}
+
+function onCropModalShowUpdate(val) {
+  const wasOpen = cropModalShow.value
+  cropModalShow.value = val
+  if (wasOpen && !val && cropSourceFile.value) {
+    avatarUploadKey.value += 1
+    cropSourceFile.value = null
+  }
+}
+
+function onAvatarCropConfirm(croppedFile) {
+  cropSourceFile.value = null
+  avatarUploadKey.value += 1
   const formData = new FormData()
-  formData.append('file', file.file)
+  formData.append('file', croppedFile)
   api
     .uploadAvatar(formData)
     .then((res) => {
@@ -58,12 +85,9 @@ function handleAvatarUpload({ file, onFinish, onError }) {
         userStore.setUserInfo({ avatar: url })
         infoForm.value.avatar = url
       }
-      onFinish()
       $message.success(t('views.profile.text_avatar_upload_success'))
     })
-    .catch(() => {
-      onError()
-    })
+    .catch(() => {})
 }
 const infoFormRules = {
   username: [
@@ -165,15 +189,36 @@ function validatePasswordSame(rule, value) {
             class="w-400"
           >
             <NFormItem :label="$t('views.profile.label_avatar')" path="avatar">
-              <div class="flex flex-col gap-3">
-                <NImage width="100" height="100" :src="infoForm.avatar" object-fit="cover" />
+              <div class="profile-avatar-box">
+                <div class="profile-avatar-circle">
+                  <NImage
+                    v-if="infoForm.avatar"
+                    :src="infoForm.avatar"
+                    width="88"
+                    height="88"
+                    object-fit="cover"
+                    preview-disabled
+                    class="profile-avatar-img"
+                  />
+                </div>
                 <NUpload
+                  :key="avatarUploadKey"
+                  accept="image/png,image/jpeg,image/gif,image/webp"
                   :max="1"
                   :show-file-list="false"
-                  accept="image/png,image/jpeg,image/gif,image/webp"
-                  :custom-request="handleAvatarUpload"
+                  :default-upload="false"
+                  @change="onAvatarUploadChange"
                 >
-                  <NButton size="small">{{ $t('views.profile.button_upload_avatar') }}</NButton>
+                  <NButton
+                    class="profile-avatar-edit-btn"
+                    type="primary"
+                    size="small"
+                    circle
+                    secondary
+                    :title="$t('views.agents.title_edit_avatar')"
+                  >
+                    <TheIcon icon="material-symbols:edit-outline" :size="18" />
+                  </NButton>
                 </NUpload>
               </div>
             </NFormItem>
@@ -239,5 +284,36 @@ function validatePasswordSame(rule, value) {
         </NForm>
       </NTabPane>
     </NTabs>
+    <AgentAvatarCropModal
+      :show="cropModalShow"
+      :file="cropSourceFile"
+      @update:show="onCropModalShowUpdate"
+      @confirm="onAvatarCropConfirm"
+    />
   </CommonPage>
 </template>
+
+<style scoped>
+.profile-avatar-box {
+  position: relative;
+  display: inline-block;
+  width: 88px;
+  height: 88px;
+}
+.profile-avatar-circle {
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  overflow: hidden;
+}
+.profile-avatar-img {
+  display: block;
+}
+.profile-avatar-edit-btn {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  z-index: 1;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+</style>

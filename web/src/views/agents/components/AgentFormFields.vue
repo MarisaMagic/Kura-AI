@@ -406,8 +406,6 @@ html.dark .section-header {
   overflow: hidden;
 }
 .agent-avatar-img {
-  border-radius: 50%;
-  overflow: hidden;
   display: block;
 }
 

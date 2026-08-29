@@ -78,7 +78,11 @@ const acting = ref(false)
 const shareUsers = ref([])
 
 const avatarOptions = computed(() =>
-  shareUsers.value.map((u) => ({ src: u.avatar, name: u.alias || u.username }))
+  shareUsers.value.map((u) => ({
+    src: u.avatar,
+    name: u.alias || u.username,
+    objectFit: 'cover',
+  }))
 )
 
 async function loadShares() {

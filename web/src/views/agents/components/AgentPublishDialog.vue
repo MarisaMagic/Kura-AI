@@ -35,7 +35,7 @@
             @click="toggleUser(u)"
             @keydown.enter.prevent="toggleUser(u)"
           >
-            <n-avatar round :size="34" :src="u.avatar" object-fit="cover" class="publish-user-avatar" />
+            <n-avatar round :size="32" :src="u.avatar" object-fit="cover" class="publish-user-avatar" />
             <div class="publish-user-text">
               <span class="publish-user-name">{{ displayName(u) }}</span>
               <span class="publish-user-email">{{ u.email }}</span>
