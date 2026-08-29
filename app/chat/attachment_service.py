@@ -307,6 +307,10 @@ def save_uploaded_file(
     if not allowed_extension(name):
         raise ValueError(f"不支持的文件类型：{Path(name).suffix or '（无扩展名）'}")
 
+    from app.utils.upload_sniff import assert_upload_magic
+
+    assert_upload_magic(name, raw)
+
     size = len(raw)
     if size <= 0:
         raise ValueError("空文件")

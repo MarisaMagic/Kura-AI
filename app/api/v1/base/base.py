@@ -88,6 +88,12 @@ async def upload_avatar(file: UploadFile = File(...)):
     max_bytes = 2 * 1024 * 1024
     if len(contents) > max_bytes:
         return Fail(msg="文件大小不能超过 2MB")
+    try:
+        from app.utils.upload_sniff import assert_upload_magic
+
+        assert_upload_magic(file.filename or f"avatar{ext}", contents)
+    except ValueError as e:
+        return Fail(msg=str(e))
     new_name = f"{uuid.uuid4().hex}{ext}"
     root = settings.USER_AVATAR_ROOT
     if user_obj.avatar:

@@ -5,6 +5,12 @@ from pydantic import BaseModel, Field, field_validator
 MCP_TRANSPORTS = ("streamable_http", "sse")
 
 
+def _validate_mcp_url(v: str) -> str:
+    from app.utils.ssrf import assert_public_http_url
+
+    return assert_public_http_url((v or "").strip())
+
+
 class UserAgentMcpServerCreate(BaseModel):
     """
     新增智能体 MCP 服务配置
@@ -26,10 +32,7 @@ class UserAgentMcpServerCreate(BaseModel):
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
-        s = (v or "").strip()
-        if not s.lower().startswith(("http://", "https://")):
-            raise ValueError("URL 仅支持 http/https 协议")
-        return s
+        return _validate_mcp_url(v)
 
 
 class UserAgentMcpServerUpdate(BaseModel):
@@ -50,10 +53,7 @@ class UserAgentMcpServerUpdate(BaseModel):
     def validate_url(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return None
-        s = (v or "").strip()
-        if not s.lower().startswith(("http://", "https://")):
-            raise ValueError("URL 仅支持 http/https 协议")
-        return s
+        return _validate_mcp_url(v)
 
 
 class UserAgentMcpServerItem(BaseModel):
@@ -93,10 +93,7 @@ class UserAgentMcpServerTestRequest(BaseModel):
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
-        s = (v or "").strip()
-        if not s.lower().startswith(("http://", "https://")):
-            raise ValueError("URL 仅支持 http/https 协议")
-        return s
+        return _validate_mcp_url(v)
 
 
 class UserAgentMcpServerTestResponse(BaseModel):

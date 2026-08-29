@@ -3,16 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.settings import settings
+from app.utils.signed_media import KIND_USER_AVATAR, sign_media_url
 
-DEFAULT_AVATAR_URL = f"{settings.USER_AVATAR_URL_PREFIX}/alice.jpg"
 ALLOWED_AVATAR_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 
 def avatar_url_from_filename(filename: str | None) -> str:
-    if not filename:
-        return DEFAULT_AVATAR_URL
-    prefix = settings.USER_AVATAR_URL_PREFIX.rstrip("/")
-    return f"{prefix}/{filename}"
+    name = (filename or "").strip() or "alice.jpg"
+    return sign_media_url(KIND_USER_AVATAR, name)
 
 
 def enrich_user_avatar(data: dict) -> dict:

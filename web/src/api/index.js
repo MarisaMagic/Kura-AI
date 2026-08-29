@@ -44,13 +44,20 @@ export default {
   getAuditLogList: (params = {}) => request.get('/auditlog/list', { params }),
   // user agents
   getUserAgentList: (params = {}) => request.get('/user-agent/list', { params }),
-  getPublicAgentList: (params = {}) => request.get('/user-agent/public', { params }),
+  getSharedAgentList: (params = {}) => request.get('/user-agent/shared', { params }),
   getUserAgent: (params = {}) => request.get('/user-agent/get', { params }),
   createUserAgent: (data = {}) => request.post('/user-agent/create', data),
   updateUserAgent: (data = {}) => request.post('/user-agent/update', data),
   deleteUserAgent: (params = {}) => request.delete('/user-agent/delete', { params }),
   uploadUserAgentAvatar: (agentId, data) =>
     request.post(`/user-agent/upload_avatar?agent_id=${agentId}`, data),
+  /** 智能体发布（定向共享） */
+  publishUserAgent: (data = {}) => request.post('/user-agent/publish', data),
+  offlineUserAgent: (data = {}) => request.post('/user-agent/offline', data),
+  getAgentShareList: (params = {}) => request.get('/user-agent/share/list', { params }),
+  addAgentShareUsers: (data = {}) => request.post('/user-agent/share/add', data),
+  removeAgentShareUsers: (data = {}) => request.post('/user-agent/share/remove', data),
+  searchShareUsers: (params = {}) => request.get('/user-agent/share/search_users', { params }),
   /** 智能体对话（DependAuth，不走菜单权限） */
   getAgentChatSessions: (params = {}) => request.get('/user-agent/chat/sessions', { params }),
   /** 当前用户全部智能体下的会话（按最近时间） */

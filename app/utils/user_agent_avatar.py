@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import UploadFile
 
 from app.settings import settings
+from app.utils.signed_media import KIND_AGENT_AVATAR, sign_media_url
 
 # 与前端 public/logo.svg 一致，由页面同源加载
 DEFAULT_AGENT_AVATAR_URL = "/logo.svg"
@@ -17,8 +18,8 @@ ALLOWED_AGENT_AVATAR_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 def agent_avatar_url(username: str, avatar_filename: str | None) -> str:
     if not avatar_filename:
         return DEFAULT_AGENT_AVATAR_URL
-    prefix = settings.USER_AGENT_AVATAR_URL_PREFIX.rstrip("/")
-    return f"{prefix}/user_{username}/{avatar_filename}"
+    safe_user = re.sub(r"[^\w\-.]", "_", username)[:80]
+    return sign_media_url(KIND_AGENT_AVATAR, f"user_{safe_user}/{avatar_filename}")
 
 
 def safe_agent_avatar_extension(filename: str | None) -> str | None:
@@ -40,6 +41,12 @@ async def save_uploaded_agent_avatar(username: str, file: UploadFile) -> tuple[s
     max_bytes = 2 * 1024 * 1024
     if len(contents) > max_bytes:
         return None, "文件大小不能超过 2MB"
+    try:
+        from app.utils.upload_sniff import assert_upload_magic
+
+        assert_upload_magic(file.filename or f"avatar{ext}", contents)
+    except ValueError as e:
+        return None, str(e)
     new_name = f"{uuid.uuid4().hex}{ext}"
     root = user_agent_avatar_dir(username)
     os.makedirs(root, exist_ok=True)

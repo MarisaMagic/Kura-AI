@@ -515,7 +515,8 @@ async def get_chat_session_messages(
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     # 获取会话消息，通过 PostgreSQL 和 Redis 缓存获取
     raw = storage.get_session_messages(user_id, agent_id, session_id)
-    # 转换为消息信息
+    from app.utils.signed_media import resign_message_payload
+
     messages = [
         MessageInfo(
             type=m["type"],
@@ -528,7 +529,7 @@ async def get_chat_session_messages(
             sources=m.get("sources"),
             thinking_text=m.get("thinking_text"),
         )
-        for m in raw
+        for m in (resign_message_payload(x) for x in raw)
     ]
     return Success(data=SessionMessagesResponse(messages=messages).model_dump())
 

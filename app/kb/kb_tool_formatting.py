@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from app.settings import settings
+from app.utils.signed_media import KIND_KB_IMAGE, sign_media_url
 
 
 def _kb_image_public_url(stored_relpath: str) -> str:
@@ -17,12 +18,7 @@ def _kb_image_public_url(stored_relpath: str) -> str:
     relpath = (stored_relpath or "").strip().replace("\\", "/")
     if not relpath:
         return ""
-    prefix = (settings.USER_AGENT_KB_IMAGES_URL_PREFIX or "").strip().rstrip("/")
-    path_part = f"{prefix}/{relpath.lstrip('/')}"
-    base = (getattr(settings, "PUBLIC_API_BASE", None) or "").strip().rstrip("/")
-    if base:
-        return f"{base}{path_part}"
-    return path_part
+    return sign_media_url(KIND_KB_IMAGE, relpath, absolute=True)
 
 
 def _kb_image_absolute_fs_path(stored_relpath: str) -> Path:

@@ -10,9 +10,10 @@ from app.settings import settings
 
 
 def client_ip(request: Request) -> str:
-    forwarded = (request.headers.get("X-Forwarded-For") or "").strip()
-    if forwarded:
-        return forwarded.split(",")[0].strip()
+    if getattr(settings, "AUTH_TRUST_X_FORWARDED_FOR", False):
+        forwarded = (request.headers.get("X-Forwarded-For") or "").strip()
+        if forwarded:
+            return forwarded.split(",")[0].strip()
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
@@ -33,4 +34,8 @@ def check_auth_rate_limit(request: Request, *, action: str, limit: int, window_s
     except HTTPException:
         raise
     except Exception as exc:
-        logger.warning("auth rate limit skipped (redis unavailable): %s", exc)
+        if settings.DEBUG:
+            logger.warning("auth rate limit skipped (redis unavailable): %s", exc)
+            return
+        logger.warning("auth rate limit fail-closed (redis unavailable): %s", exc)
+        raise HTTPException(status_code=503, detail="认证服务暂时不可用") from exc

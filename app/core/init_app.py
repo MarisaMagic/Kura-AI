@@ -25,11 +25,12 @@ from app.models.admin import Api, Menu, Role
 from app.schemas.menus import MenuType
 from app.settings.config import settings
 
-from .middlewares import BackGroundTaskMiddleware, HttpAuditLogMiddleware
+from .middlewares import BackGroundTaskMiddleware, HttpAuditLogMiddleware, SecurityHeadersMiddleware
 
 
 def make_middlewares():
     middleware = [
+        Middleware(SecurityHeadersMiddleware),
         Middleware(
             CORSMiddleware,
             allow_origins=settings.CORS_ORIGINS,
@@ -46,6 +47,7 @@ def make_middlewares():
                 "/api/v1/base/register",
                 "/api/v1/base/registration_enabled",
                 "/api/v1/base/upload_avatar",
+                "/api/v1/base/update_password",
                 "/api/v1/user/reset_password",
                 "/api/v1/user-agent/upload_avatar",
                 r".*user-agent/chat/stream$",  # POST 直连 SSE，勿缓冲整包写入审计
@@ -210,6 +212,7 @@ async def init_db():
     await ensure_user_agent_base_url_column()
     await ensure_user_agent_supports_vision_column()
     await ensure_user_agent_is_published_column()
+    await ensure_user_agent_share_table()
 
 
 async def ensure_user_avatar_column() -> None:
@@ -278,6 +281,35 @@ async def ensure_user_agent_is_published_column() -> None:
         if "duplicate column" in msg or "already exists" in msg:
             return
         logger.warning('ensure_user_agent_is_published_column: %s', e)
+
+
+async def ensure_user_agent_share_table() -> None:
+    """旧库可能缺少 user_agent_share 表；aerich 未覆盖时补齐（SQLite）。"""
+    try:
+        conn = Tortoise.get_connection("sqlite")
+    except Exception:
+        return
+    try:
+        await conn.execute_query(
+            '''CREATE TABLE IF NOT EXISTS "user_agent_share" (
+    "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    "created_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP,
+    "agent_id" BIGINT NOT NULL REFERENCES "user_agent" ("id") ON DELETE CASCADE,
+    "user_id" BIGINT NOT NULL REFERENCES "user" ("id") ON DELETE CASCADE
+)'''
+        )
+        await conn.execute_query(
+            'CREATE INDEX IF NOT EXISTS "idx_user_agent_share_agent" ON "user_agent_share" ("agent_id")'
+        )
+        await conn.execute_query(
+            'CREATE INDEX IF NOT EXISTS "idx_user_agent_share_user" ON "user_agent_share" ("user_id")'
+        )
+        await conn.execute_query(
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uid_user_agent_share_agent_user" ON "user_agent_share" ("agent_id", "user_id")'
+        )
+    except Exception as e:
+        logger.warning("ensure_user_agent_share_table: %s", e)
 
 
 async def ensure_agent_menus():

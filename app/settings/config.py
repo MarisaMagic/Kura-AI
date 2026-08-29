@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     LOGS_ROOT: str = os.path.join(BASE_DIR, "app/logs")
     # 用户头像本地目录（可通过环境变量 USER_AVATAR_ROOT 覆盖，例如 Linux 上 /data/user_avatar）
     USER_AVATAR_ROOT: str = os.path.join(BASE_DIR, "data", "user_avatar")
-    # 浏览器访问路径前缀（与 app 中 StaticFiles 挂载一致）
+    # 浏览器访问路径前缀（与签名媒体路由一致）
     USER_AVATAR_URL_PREFIX: str = "/api/v1/media/user_avatar"
     # 智能体头像：本地目录（可通过环境变量 USER_AGENT_AVATAR_ROOT 覆盖，例如 /data/user_agents_avatar）
     USER_AGENT_AVATAR_ROOT: str = os.path.join(BASE_DIR, "data", "user_agents_avatar")
@@ -48,10 +48,20 @@ class Settings(BaseSettings):
     INITIAL_ADMIN_USERNAME: str = "admin"
     INITIAL_ADMIN_EMAIL: str = "admin@localhost"
     INITIAL_ADMIN_PASSWORD: typing.Optional[str] = None
-    # 是否开放邮箱自助注册（公网部署建议 false）
-    ALLOW_PUBLIC_REGISTRATION: bool = True
-    # 登录 / 注册限流（依赖 Redis；Redis 不可用时跳过限流并写日志）
+    # 是否开放邮箱自助注册（公网务必 false；本机开发可在 .env 设 true）
+    ALLOW_PUBLIC_REGISTRATION: bool = False
+    # 为 True 时允许智能体 base_url / MCP url 指向内网或本机（仅本地调试 MCP）
+    ALLOW_PRIVATE_UPSTREAM_URLS: bool = False
+    # uvicorn 监听地址；公网请放在反代后并保持 127.0.0.1
+    UVICORN_HOST: str = "127.0.0.1"
+    # 为 False 时关闭 /docs /redoc /openapi.json（公网建议 false）
+    DOCS_ENABLED: bool = True
+    # 媒体签名 URL 有效期（秒）；历史会话返回时会重签
+    MEDIA_SIGNED_URL_TTL_SECONDS: int = 86400
+    # 登录 / 注册限流（依赖 Redis）
     AUTH_RATE_LIMIT_ENABLED: bool = True
+    # 仅在可信反向代理之后设 true；否则忽略 X-Forwarded-For，防伪造 IP 绕过限流
+    AUTH_TRUST_X_FORWARDED_FOR: bool = False
     AUTH_LOGIN_RATE_LIMIT: int = 20
     AUTH_LOGIN_RATE_WINDOW_SECONDS: int = 60
     AUTH_REGISTER_RATE_LIMIT: int = 5

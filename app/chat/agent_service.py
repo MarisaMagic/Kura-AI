@@ -128,6 +128,10 @@ def _llm_config_from_ua(ua: UserAgent) -> dict[str, Any]:
     """
     plain = decrypt_api_key_safe(ua.api_key_ciphertext)
     base_url = (ua.base_url or "").strip() or None
+    if base_url:
+        from app.utils.ssrf import assert_public_http_url
+
+        assert_public_http_url(base_url)
     return {
         "api_key": (plain or "").strip(),
         "base_url": base_url,
@@ -330,6 +334,10 @@ def build_model_and_agent(
 
     # 获取基础 URL, 用户在创建智能体时配置的 OpenAI 兼容 API Base URL
     base_url = (ua.base_url or "").strip() or None
+    if base_url:
+        from app.utils.ssrf import assert_public_http_url
+
+        assert_public_http_url(base_url)
     # 构建大模型, 使用 OpenAI 兼容 API Base URL
     model = init_chat_model(
         model=ua.model_name,

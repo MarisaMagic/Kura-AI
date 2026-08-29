@@ -84,20 +84,13 @@
       </div>
     </section>
 
-    <section class="agent-section">
-      <header class="section-header">{{ $t('views.agents.section_publish') }}</header>
-      <div class="section-body">
-        <n-form-item :show-label="false" class="agent-enable-row-item">
-          <div class="agent-enable-row">
-            <div class="agent-enable-pair">
-              <span class="agent-enable-label">{{ $t('views.agents.label_publish') }}</span>
-              <n-switch v-model:value="form.is_published" />
-            </div>
-            <span class="agent-enable-hint">{{ $t('views.agents.publish_hint') }}</span>
-          </div>
-        </n-form-item>
-      </div>
-    </section>
+    <AgentPublishPanel
+      v-if="agentId"
+      :agent-id="agentId"
+      :is-published="isPublished"
+      :shared-count="sharedCount"
+      @changed="emit('publish-changed')"
+    />
 
     <section class="agent-section">
       <header
@@ -170,6 +163,7 @@ import { ref } from 'vue'
 import { NButton, NForm, NFormItem, NImage, NInput, NSlider, NSwitch, NUpload } from 'naive-ui'
 import TheIcon from '@/components/icon/TheIcon.vue'
 import AgentAvatarCropModal from '@/views/agents/components/AgentAvatarCropModal.vue'
+import AgentPublishPanel from '@/views/agents/components/AgentPublishPanel.vue'
 
 const props = defineProps({
   form: { type: Object, required: true },
@@ -180,9 +174,12 @@ const props = defineProps({
   avatarPreview: { type: String, default: '' },
   avatarUploadKey: { type: Number, default: 0 },
   temperatureSliderLabel: { type: String, default: '0.10' },
+  agentId: { type: Number, default: null },
+  isPublished: { type: Boolean, default: false },
+  sharedCount: { type: Number, default: 0 },
 })
 
-const emit = defineEmits(['avatar-change', 'update:dialogueOpen', 'update:advancedOpen'])
+const emit = defineEmits(['avatar-change', 'update:dialogueOpen', 'update:advancedOpen', 'publish-changed'])
 
 const formInnerRef = ref(null)
 const innerUploadKey = ref(0)

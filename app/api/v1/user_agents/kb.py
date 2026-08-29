@@ -55,6 +55,12 @@ async def kb_upload(
     if not (settings.EMBEDDING_API_KEY or "").strip():
         return Fail(code=400, msg="未配置 EMBEDDING_API_KEY，无法生成向量")
     content = await file.read()
+    try:
+        from app.utils.upload_sniff import assert_upload_magic
+
+        assert_upload_magic(display, content)
+    except ValueError as e:
+        return Fail(code=400, msg=str(e))
     max_bytes = max(1, int(settings.KB_UPLOAD_MAX_BYTES or 50 * 1024 * 1024))
     if len(content) > max_bytes:
         return Fail(code=400, msg=f"文件超过大小上限 {max_bytes // (1024 * 1024)}MB，请拆分后重试")

@@ -20,7 +20,7 @@ class UserAgent(BaseModel, TimestampMixin):
         default=False,
         description="启用后允许会话中的图片附件以多模态方式理解（需模型支持视觉）",
     )
-    is_published = fields.BooleanField(default=False, description="发布到广场（所有用户可查看并对话）")
+    is_published = fields.BooleanField(default=False, description="已发布（仅共享名单内用户可查看并对话）")
 
     class Meta:
         table = "user_agent"

@@ -13,19 +13,17 @@ class SettingNotFound(Exception):
 
 
 async def DoesNotExistHandle(req: Request, exc: DoesNotExist) -> JSONResponse:
-    content = dict(
-        code=404,
-        msg=f"Object has not found, exc: {exc}, query_params: {req.query_params}",
+    return JSONResponse(
+        content=dict(code=404, msg="资源不存在"),
+        status_code=404,
     )
-    return JSONResponse(content=content, status_code=404)
 
 
 async def IntegrityHandle(_: Request, exc: IntegrityError) -> JSONResponse:
-    content = dict(
-        code=500,
-        msg=f"IntegrityError，{exc}",
+    return JSONResponse(
+        content=dict(code=500, msg="请求无法完成"),
+        status_code=500,
     )
-    return JSONResponse(content=content, status_code=500)
 
 
 async def HttpExcHandle(_: Request, exc: HTTPException) -> JSONResponse:
@@ -34,10 +32,23 @@ async def HttpExcHandle(_: Request, exc: HTTPException) -> JSONResponse:
 
 
 async def RequestValidationHandle(_: Request, exc: RequestValidationError) -> JSONResponse:
-    content = dict(code=422, msg=f"RequestValidationError, {exc}")
-    return JSONResponse(content=content, status_code=422)
+    errors = []
+    for item in exc.errors():
+        errors.append(
+            {
+                "loc": item.get("loc"),
+                "msg": item.get("msg"),
+                "type": item.get("type"),
+            }
+        )
+    return JSONResponse(
+        content=dict(code=422, msg="请求参数无效", data=errors),
+        status_code=422,
+    )
 
 
 async def ResponseValidationHandle(_: Request, exc: ResponseValidationError) -> JSONResponse:
-    content = dict(code=500, msg=f"ResponseValidationError, {exc}")
-    return JSONResponse(content=content, status_code=500)
+    return JSONResponse(
+        content=dict(code=500, msg="请求无法完成"),
+        status_code=500,
+    )

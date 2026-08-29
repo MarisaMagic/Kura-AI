@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
@@ -19,7 +19,6 @@ class UserAgentCommon(BaseModel):
         default=False,
         description="启用后允许本会话图片附件以多模态理解（需模型支持视觉）；关闭时上传图片将被拒绝",
     )
-    is_published: bool = Field(default=False, description="发布到广场：开启后所有用户可查看并对话")
 
     @field_validator("base_url", mode="before")
     @classmethod
@@ -37,7 +36,9 @@ class UserAgentCommon(BaseModel):
         if v is None:
             return None
         HttpUrl(v)
-        return v
+        from app.utils.ssrf import assert_public_http_url
+
+        return assert_public_http_url(v)
 
 
 class UserAgentCreate(UserAgentCommon):
@@ -51,3 +52,17 @@ class UserAgentUpdate(UserAgentCommon):
         max_length=4096,
         description="留空或不传则保留原 Key；传入新值则覆盖",
     )
+
+
+class UserAgentPublishIn(BaseModel):
+    agent_id: int = Field(..., description="智能体 ID")
+    user_ids: List[int] = Field(..., min_length=1, description="指定共享的用户 ID 列表（至少 1 人）")
+
+
+class UserAgentOfflineIn(BaseModel):
+    agent_id: int = Field(..., description="智能体 ID")
+
+
+class UserAgentShareIn(BaseModel):
+    agent_id: int = Field(..., description="智能体 ID")
+    user_ids: List[int] = Field(..., min_length=1, description="要添加/移除的共享用户 ID 列表")

@@ -15,6 +15,59 @@ from app.models.admin import AuditLog, User
 
 from .bgtask import BgTasks
 
+_SENSITIVE_KEYS = frozenset(
+    {
+        "password",
+        "old_password",
+        "new_password",
+        "api_key",
+        "headers",
+        "token",
+        "authorization",
+        "secret",
+        "access_token",
+        "ciphertext",
+        "headers_ciphertext",
+        "api_key_ciphertext",
+        "refresh_token",
+    }
+)
+
+
+def _redact_sensitive(value: Any) -> Any:
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            key = str(k).lower()
+            if key in _SENSITIVE_KEYS or "password" in key or key.endswith("_secret"):
+                if isinstance(v, dict):
+                    out[k] = {str(hk): "***" for hk in v}
+                else:
+                    out[k] = "***"
+            else:
+                out[k] = _redact_sensitive(v)
+        return out
+    if isinstance(value, list):
+        return [_redact_sensitive(x) for x in value]
+    return value
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """API 响应安全头（与 SPA 的 index.html CSP 互补）。"""
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        path = request.url.path
+        if path not in ("/docs", "/redoc", "/openapi.json") and not path.startswith("/docs"):
+            response.headers.setdefault(
+                "Content-Security-Policy",
+                "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+            )
+        return response
+
 
 class SimpleBaseMiddleware:
     def __init__(self, app: ASGIApp) -> None:
@@ -64,6 +117,7 @@ class HttpAuditLogMiddleware(BaseHTTPMiddleware):
                     args[k] = [file.filename for file in v]
                 else:
                     args[k] = v
+            args.update(_redact_sensitive(args))
         except Exception:
             pass
 
@@ -74,30 +128,27 @@ class HttpAuditLogMiddleware(BaseHTTPMiddleware):
             args[key] = value
 
         if request.method not in ["POST", "PUT", "PATCH"]:
-            return args
+            return _redact_sensitive(args)
 
         content_type = (request.headers.get("content-type") or "").lower()
         # multipart：不要在中间件里 await request.form()，否则会与 BaseHTTPMiddleware
         # 叠加消费 body，导致路由里 UploadFile/File(...) 报缺少 file 字段（422）。
         if "multipart/form-data" in content_type:
             args["_multipart"] = "skipped"
-            return args
+            return _redact_sensitive(args)
         # application/x-www-form-urlencoded：可安全解析，无文件流
         if "application/x-www-form-urlencoded" in content_type:
             await self._append_form_body_args(request, args)
-            return args
+            return _redact_sensitive(args)
 
         try:
             body = await request.json()
             if isinstance(body, dict):
-                safe = dict(body)
-                if "api_key" in safe:
-                    safe["api_key"] = "***"
-                args.update(safe)
+                args.update(_redact_sensitive(dict(body)))
         except (json.JSONDecodeError, UnicodeDecodeError):
             await self._append_form_body_args(request, args)
 
-        return args
+        return _redact_sensitive(args)
 
     async def get_response_body(self, request: Request, response: Response) -> Any:
         # 检查Content-Length
@@ -187,8 +238,8 @@ class HttpAuditLogMiddleware(BaseHTTPMiddleware):
             data: dict = await self.get_request_log(request=request, response=response)
             data["response_time"] = process_time
 
-            data["request_args"] = request.state.request_args
-            data["response_body"] = await self.get_response_body(request, response)
+            data["request_args"] = _redact_sensitive(request.state.request_args)
+            data["response_body"] = _redact_sensitive(await self.get_response_body(request, response))
             await AuditLog.create(**data)
 
         return response

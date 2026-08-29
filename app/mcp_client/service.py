@@ -58,6 +58,10 @@ def _connection_dict(transport: str, url: str, headers: dict[str, str] | None) -
 async def _list_tools(transport: str, url: str, headers: dict[str, str] | None) -> list:
     from langchain_mcp_adapters.client import MultiServerMCPClient
 
+    from app.utils.ssrf import assert_public_http_url
+
+    # 连接前再检一次，降低 DNS 重绑定窗口
+    assert_public_http_url(url)
     client = MultiServerMCPClient({"server": _connection_dict(transport, url, headers)})
     return await asyncio.wait_for(client.get_tools(), timeout=MCP_CONNECT_TIMEOUT_SECONDS)
 

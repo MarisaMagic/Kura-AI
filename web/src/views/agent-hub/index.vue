@@ -6,7 +6,7 @@
       </header>
       <n-tabs v-model:value="activeTab" type="segment" size="large" class="agent-hub-tabs">
         <n-tab name="mine">{{ $t('views.agents.tab_mine') }}</n-tab>
-        <n-tab name="public">{{ $t('views.agents.tab_public') }}</n-tab>
+        <n-tab name="shared">{{ $t('views.agents.tab_shared') }}</n-tab>
       </n-tabs>
 
       <n-spin v-if="activeTab === 'mine'" :show="loading">
@@ -102,7 +102,7 @@
                       :bordered="false"
                       class="agent-card-published-tag"
                     >
-                      {{ $t('views.agents.published_badge') }}
+                      {{ $t('views.agents.shared_count', { n: item.shared_count || 0 }) }}
                     </n-tag>
                   </div>
                   <div class="agent-card-desc">
@@ -115,13 +115,13 @@
         </div>
       </n-spin>
 
-      <n-spin v-else :show="publicLoading">
-        <div v-if="!publicList.length && !publicLoading" class="empty-tip">
-          {{ $t('views.agents.public_empty') }}
+      <n-spin v-else :show="sharedLoading">
+        <div v-if="!sharedList.length && !sharedLoading" class="empty-tip">
+          {{ $t('views.agents.shared_empty') }}
         </div>
         <div class="agent-grid">
           <n-card
-            v-for="item in publicList"
+            v-for="item in sharedList"
             :key="item.id"
             size="small"
             class="agent-card"
@@ -177,8 +177,8 @@ const router = useRouter()
 const activeTab = ref('mine')
 const loading = ref(false)
 const list = ref([])
-const publicLoading = ref(false)
-const publicList = ref([])
+const sharedLoading = ref(false)
+const sharedList = ref([])
 
 async function fetchList() {
   loading.value = true
@@ -190,13 +190,13 @@ async function fetchList() {
   }
 }
 
-async function fetchPublicList() {
-  publicLoading.value = true
+async function fetchSharedList() {
+  sharedLoading.value = true
   try {
-    const res = await api.getPublicAgentList({ page: 1, page_size: 100 })
-    publicList.value = res.data || []
+    const res = await api.getSharedAgentList({ page: 1, page_size: 100 })
+    sharedList.value = res.data || []
   } finally {
-    publicLoading.value = false
+    sharedLoading.value = false
   }
 }
 
@@ -223,7 +223,7 @@ async function handleDelete(id) {
 }
 
 watch(activeTab, (tab) => {
-  if (tab === 'public') fetchPublicList()
+  if (tab === 'shared') fetchSharedList()
 })
 
 onMounted(fetchList)

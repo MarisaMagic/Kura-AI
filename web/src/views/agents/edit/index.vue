@@ -25,9 +25,13 @@
                 :avatar-preview="avatarPreview"
                 :avatar-upload-key="avatarUploadKey"
                 :temperature-slider-label="temperatureSliderLabel"
+                :agent-id="agentId"
+                :is-published="isPublished"
+                :shared-count="sharedCount"
                 @update:dialogue-open="dialogueOpen = $event"
                 @update:advanced-open="advancedOpen = $event"
                 @avatar-change="onAvatarFileChange"
+                @publish-changed="loadAgent(agentId)"
               />
               <AgentMcpServersPanel v-if="agentId" v-show="!pageLoading" :agent-id="agentId" />
             </n-spin>
@@ -85,6 +89,8 @@ const avatarUploadKey = ref(0)
 const dialogueOpen = ref(false)
 const advancedOpen = ref(false)
 const hasSavedApiKey = ref(false)
+const isPublished = ref(false)
+const sharedCount = ref(0)
 const savedSnapshot = ref(null)
 const pendingAvatarChanged = ref(false)
 
@@ -128,6 +134,8 @@ async function loadAgent(id) {
     const d = res.data
     agentId.value = d.id
     hasSavedApiKey.value = !!d.has_api_key
+    isPublished.value = !!d.is_published
+    sharedCount.value = d.shared_count || 0
     form.value = {
       name: d.name,
       model_name: d.model_name,
@@ -136,7 +144,6 @@ async function loadAgent(id) {
       description: d.description || '',
       system_prompt: d.system_prompt || '',
       supports_vision: !!d.supports_vision,
-      is_published: !!d.is_published,
       opening_message: d.opening_message || '',
       temperature: d.temperature ?? 0.1,
     }
@@ -148,6 +155,8 @@ async function loadAgent(id) {
   } catch {
     agentId.value = null
     hasSavedApiKey.value = false
+    isPublished.value = false
+    sharedCount.value = 0
     form.value = emptyForm()
     savedSnapshot.value = null
     serverAvatarUrl.value = ''
