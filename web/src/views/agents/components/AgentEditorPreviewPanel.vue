@@ -154,6 +154,35 @@
                   >
                     {{ $t('views.agents.chat_msg_aborted') }}
                   </div>
+                  <div v-if="m.mcpConfirmations?.length" class="agent-chat-mcp-confirm">
+                    <div
+                      v-for="item in m.mcpConfirmations"
+                      :key="item.pending_id"
+                      class="agent-chat-mcp-confirm-item"
+                    >
+                      <div class="agent-chat-mcp-confirm-title">高危 MCP 工具调用确认</div>
+                      <div class="agent-chat-mcp-confirm-text">{{ item.server_name }} / {{ item.tool_name }}</div>
+                      <pre class="agent-chat-mcp-confirm-args">{{ item.args_preview }}</pre>
+                      <div class="agent-chat-mcp-confirm-actions">
+                        <n-button
+                          size="tiny"
+                          type="primary"
+                          :disabled="sending || confirmingMcpIds.has(item.pending_id)"
+                          @click="approveMcpConfirmation(m, item, true)"
+                        >
+                          允许一次
+                        </n-button>
+                        <n-button
+                          size="tiny"
+                          quaternary
+                          :disabled="sending || confirmingMcpIds.has(item.pending_id)"
+                          @click="approveMcpConfirmation(m, item, false)"
+                        >
+                          拒绝
+                        </n-button>
+                      </div>
+                    </div>
+                  </div>
                   <div
                     v-if="!m.pending && (m.content || '').trim()"
                     class="agent-chat-md"
@@ -308,6 +337,8 @@ const {
   sendMessage,
   stopGeneration,
   toggleThinking,
+  approveMcpConfirmation,
+  confirmingMcpIds,
 } = useAgentPreviewChat({
   agentId: resolvedAgentId,
   sessionId,
@@ -411,6 +442,48 @@ watch(introOpeningDisplayed, () => scrollBodyToBottom())
 
 .agent-editor-preview :deep(.agent-chat-intro-name) {
   color: var(--primary-color, #f4511e);
+}
+
+.agent-chat-mcp-confirm {
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-chat-mcp-confirm-item {
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.08);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-sizing: border-box;
+}
+
+.agent-chat-mcp-confirm-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--n-warning-color);
+  margin-bottom: 4px;
+}
+
+.agent-chat-mcp-confirm-text {
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.agent-chat-mcp-confirm-args {
+  margin: 0 0 8px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: var(--n-text-color-3);
+}
+
+.agent-chat-mcp-confirm-actions {
+  display: flex;
+  gap: 8px;
 }
 </style>
 <style src="@/views/agent-chat/agent-chat-ui.css"></style>

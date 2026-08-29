@@ -89,6 +89,7 @@ async def create_chat_job(
     use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
     regenerate: bool = False,
+    mcp_approved_pending_id: str | None = None,
 ) -> tuple[str, bool]:
     """
     创建 Job：若同会话已有 running 任务则返回 (existing_job_id, True)。
@@ -134,6 +135,7 @@ async def create_chat_job(
             use_web_search=use_web_search,
             attachment_ids=aids,
             regenerate=regenerate,
+            mcp_approved_pending_id=mcp_approved_pending_id,
         )
     )
     return job_id, False
@@ -150,6 +152,7 @@ async def _run_chat_job(
     use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
     regenerate: bool = False,
+    mcp_approved_pending_id: str | None = None,
 ) -> None:
     from app.controllers.user_agent_recent import touch_recent_agent
 
@@ -178,6 +181,7 @@ async def _run_chat_job(
             attachment_ids=attachment_ids or [],
             regenerate=regenerate,
             cancel_check=lambda jid=job_id: is_job_cancel_requested(jid),
+            mcp_approved_pending_id=mcp_approved_pending_id,
         ):
             # 追加事件
             await _append_event(job_id, seq, ev)

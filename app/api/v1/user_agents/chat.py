@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from datetime import datetime
 
@@ -20,12 +21,14 @@ from app.controllers.user_agent_recent import list_recent_agents_public, touch_r
 from app.models.user_agent import UserAgent
 from app.core.dependency import AuthControl
 from app.models import User
+from app.mcp_client.tool_policy import approve_mcp_confirmation
 from app.schemas.agent_chat import (
     ChatAttachmentUploadResponse,
     ChatJobCreateResponse,
     ChatRequest,
     ChatResponse,
     MessageInfo,
+    McpConfirmRequest,
     SessionDeleteResponse,
     SessionInfo,
     SessionListResponse,
@@ -34,6 +37,8 @@ from app.schemas.agent_chat import (
 from app.schemas.base import Success
 from app.settings import settings
 from app.utils.rate_limit import check_user_rate_limit
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -138,22 +143,16 @@ def _session_updated_at_display(iso_ts: str) -> str:
 
 def _upstream_http_exception(exc: Exception) -> HTTPException | None:
     message = str(exc)
-    match = re.search(r"Error code:\s*(\d{3})", message)
+    match = re.search(r"Error code:\s*([0-9][0-9][0-9])", message)
     if not match:
         return None
     code = int(match.group(1))
-    if code == 429:
-        return HTTPException(
-            status_code=429,
-            detail=(
-                "上游模型服务触发限流或额度限制（429）。请检查账号额度与模型状态。\n"
-                f"原始错误：{message}"
-            ),
-        )
+    logger.warning("upstream model service error code=%s: %s", code, message[:1000])
+    if code == 400 + 29:
+        return HTTPException(status_code=400 + 29, detail="Upstream model service rate limit or quota exceeded")
     if code in (401, 403):
-        return HTTPException(status_code=code, detail=message)
-    return HTTPException(status_code=502, detail=message)
-
+        return HTTPException(status_code=code, detail="Upstream model service authentication or permission failed")
+    return HTTPException(status_code=502, detail="Upstream model service unavailable")
 
 @router.post("/chat", summary="智能体对话（非流式）", tags=["智能体模块"])
 async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(AuthControl.is_authed)):
@@ -176,6 +175,7 @@ async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(
             use_knowledge_retrieval=request.use_knowledge_retrieval,
             use_web_search=request.use_web_search,
             attachment_ids=request.attachment_ids or None,
+            mcp_approved_pending_id=request.mcp_approved_pending_id,
         )
         if not is_editor_preview_session(session_id):
             await touch_recent_agent(user_id, request.agent_id)
@@ -223,6 +223,7 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
                 use_web_search=request.use_web_search,
                 attachment_ids=request.attachment_ids or None,
                 regenerate=request.regenerate,
+                mcp_approved_pending_id=request.mcp_approved_pending_id,
             ):
                 yield chunk
             # 更新最近使用智能体（编辑器试聊会话不置顶）
@@ -273,6 +274,7 @@ async def create_chat_job_endpoint(request: ChatRequest, current_user: User = De
         use_web_search=request.use_web_search,
         attachment_ids=request.attachment_ids or None,
         regenerate=request.regenerate,
+        mcp_approved_pending_id=request.mcp_approved_pending_id,
     )
     if is_dup:
         # 如果已有进行中的生成任务，则返回409错误
@@ -321,9 +323,17 @@ async def cancel_chat_job_endpoint(job_id: str, current_user: User = Depends(Aut
     return Success(data={"ok": True})
 
 
+@router.post("/chat/mcp/confirm", summary="确认或拒绝高危 MCP 工具调用", tags=["智能体模块"])
+async def confirm_mcp_tool(request: McpConfirmRequest, current_user: User = Depends(AuthControl.is_authed)):
+    ok = approve_mcp_confirmation(request.pending_id, current_user.id, request.approve)
+    if not ok:
+        raise HTTPException(status_code=404, detail="确认任务不存在或已过期")
+    return Success(data={"ok": True, "approved": bool(request.approve)})
+
+
 @router.get(
     "/chat/jobs/{job_id}/stream",
-    summary="订阅对话 Job 的 SSE（支持 since_seq 断点续传）",
+    summary="订阅对话 Job 的" + "SSE（支持 since_seq 断点续传）",
     tags=["智能体模块"],
 )
 async def chat_job_stream_endpoint(

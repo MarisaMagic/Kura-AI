@@ -15,6 +15,7 @@ from app.chat.milvus_memory import get_chat_memory_milvus, memory_filter_expr
 from app.chat.memory_scope import memory_scope_for
 from app.kb.multimodal_embedding import get_multimodal_embedding_service
 from app.settings import settings
+from app.utils.egress import pinned_llm_client_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ def rewrite_memory_query(raw_query: str, llm_config: dict[str, Any]) -> str:
             base_url=(llm_config.get("base_url") or "").strip() or None,
             temperature=0,
             stream_usage=False,
+            **pinned_llm_client_kwargs((llm_config.get("base_url") or "").strip() or None),
         )
         out = model.invoke([HumanMessage(content=REWRITE_PROMPT.format(query=q))])
         text = (getattr(out, "content", None) or str(out)).strip()

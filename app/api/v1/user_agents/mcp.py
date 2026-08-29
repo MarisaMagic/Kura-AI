@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Query
 
 from app.controllers.user_agent import user_agent_controller
@@ -26,6 +28,8 @@ from app.schemas.user_agent_mcp import (
     UserAgentMcpServerUpdate,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
@@ -38,6 +42,7 @@ def _to_item(row: UserAgentMcpServer) -> UserAgentMcpServerItem:
         transport=row.transport,
         url=row.url,
         enabled=bool(row.enabled),
+        confirm_policy=(row.confirm_policy or "auto"),
         header_keys=sorted(headers.keys()),
         created_at=row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else "",
         updated_at=row.updated_at.strftime("%Y-%m-%d %H:%M:%S") if row.updated_at else "",
@@ -85,6 +90,7 @@ async def create_mcp_server(
         url=request.url,
         headers_ciphertext=encrypt_headers(request.headers),
         enabled=request.enabled,
+        confirm_policy=request.confirm_policy,
     )
     return Success(data=_to_item(row).model_dump())
 
@@ -115,6 +121,8 @@ async def update_mcp_server(
         row.headers_ciphertext = encrypt_headers(request.headers)
     if request.enabled is not None:
         row.enabled = request.enabled
+    if request.confirm_policy is not None:
+        row.confirm_policy = request.confirm_policy
     await row.save()
     return Success(data=_to_item(row).model_dump())
 
@@ -159,8 +167,9 @@ async def test_mcp_server(
         result = await test_mcp_server_connection(request.transport, request.url, headers)
         return Success(data=UserAgentMcpServerTestResponse(**result).model_dump())
     except Exception as e:
+        logger.warning("MCP server connection test failed: %s", str(e)[:1000])
         return Success(
-            data=UserAgentMcpServerTestResponse(ok=False, error=str(e)[:500]).model_dump()
+            data=UserAgentMcpServerTestResponse(ok=False, error="MCP 服务连接失败").model_dump()
         )
 
 

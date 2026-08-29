@@ -20,6 +20,7 @@ from app.kb.milvus_client import (
 )
 from app.kb.parent_chunk_store import ParentChunkStore
 from app.settings import settings
+from app.utils.egress import pinned_llm_client_kwargs
 
 _multimodal_embedding_service = get_multimodal_embedding_service()
 _milvus_manager = MilvusManager()
@@ -442,6 +443,7 @@ def _chat_from_config(llm_config: dict | None, temperature: float = 0.2):
         base_url=(llm_config.get("base_url") or "").strip() or None,
         temperature=temperature,
         stream_usage=True,
+        **pinned_llm_client_kwargs((llm_config.get("base_url") or "").strip() or None),
     )
 
 

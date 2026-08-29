@@ -177,6 +177,37 @@
                         >
                           {{ $t('views.agents.chat_msg_aborted') }}
                         </div>
+                        <div v-if="m.mcpConfirmations?.length" class="agent-chat-mcp-confirm">
+                          <div
+                            v-for="item in m.mcpConfirmations"
+                            :key="item.pending_id"
+                            class="agent-chat-mcp-confirm-item"
+                          >
+                            <div class="agent-chat-mcp-confirm-title">高危 MCP 工具调用确认</div>
+                            <div class="agent-chat-mcp-confirm-text">
+                              {{ item.server_name }} / {{ item.tool_name }}
+                            </div>
+                            <pre class="agent-chat-mcp-confirm-args">{{ item.args_preview }}</pre>
+                            <div class="agent-chat-mcp-confirm-actions">
+                              <n-button
+                                size="tiny"
+                                type="primary"
+                                :disabled="sending || confirmingMcpIds.has(item.pending_id)"
+                                @click="approveMcpConfirmation(m, item, true)"
+                              >
+                                允许一次
+                              </n-button>
+                              <n-button
+                                size="tiny"
+                                quaternary
+                                :disabled="sending || confirmingMcpIds.has(item.pending_id)"
+                                @click="approveMcpConfirmation(m, item, false)"
+                              >
+                                拒绝
+                              </n-button>
+                            </div>
+                          </div>
+                        </div>
                         <div
                           v-if="!m.pending && (m.content || '').trim()"
                           class="agent-chat-md"
@@ -450,6 +481,7 @@ const sessionPhase = ref('intro')
 const messages = ref([])
 const inputText = ref('')
 const sending = ref(false)
+const confirmingMcpIds = ref(new Set())
 /** 流式请求 AbortController，用于停止生成 */
 const streamAbortController = ref(null)
 const activeJobId = ref(null)
@@ -702,9 +734,11 @@ function applyChatSsePayload(data, idx) {
   if (idx === -1) return
   if (data.type === 'content') {
     const row = messages.value[idx]
+    const resumed = !!row.mcpExecuting
     messages.value[idx] = {
       ...row,
-      content: (row.content || '') + (data.content || ''),
+      content: resumed ? (data.content || '') : (row.content || '') + (data.content || ''),
+      mcpExecuting: resumed ? false : row.mcpExecuting,
       pending: false,
       thinkingOpen: row.thinkingOpen ?? false,
       ragSteps: row.ragSteps || [],
@@ -761,6 +795,7 @@ function applyChatSsePayload(data, idx) {
       ...cur,
       errorText: data.content || '',
       pending: false,
+      mcpExecuting: false,
       thinkingOpen: cur.thinkingOpen ?? false,
       ragSteps: cur.ragSteps || [],
       ragTrace: cur.ragTrace ?? null,
@@ -771,16 +806,30 @@ function applyChatSsePayload(data, idx) {
       ...cur,
       stoppedByUser: true,
       pending: false,
+      mcpExecuting: false,
       thinkingOpen: cur.thinkingOpen ?? false,
       ragSteps: cur.ragSteps || [],
       ragTrace: cur.ragTrace ?? null,
       errorText: undefined,
+    }
+  } else if (data.type === 'mcp_confirmation_required') {
+    const cur = messages.value[idx]
+    const item = data.confirmation || {}
+    const list = Array.isArray(cur.mcpConfirmations) ? cur.mcpConfirmations : []
+    if (item.pending_id && !list.some((x) => x.pending_id === item.pending_id)) {
+      list.push(item)
+    }
+    messages.value[idx] = {
+      ...cur,
+      mcpConfirmations: list,
+      pending: cur.pending,
     }
   } else if (data.type === 'done') {
     const row = messages.value[idx]
     messages.value[idx] = {
       ...row,
       pending: false,
+      mcpExecuting: false,
       stoppedByUser: data.cancelled ? true : row.stoppedByUser,
     }
   }
@@ -874,6 +923,7 @@ async function postChatJobAndConsumeStream({
   message,
   attachmentIds,
   assistantIdx,
+  mcpApprovedPendingId = null,
 }) {
   let jobId
   let startSeq = 0
@@ -897,6 +947,7 @@ async function postChatJobAndConsumeStream({
         use_web_search: useWebSearch.value,
         attachment_ids: attachmentIds,
         regenerate,
+        mcp_approved_pending_id: mcpApprovedPendingId || undefined,
       }),
       signal: ac.signal,
     })
@@ -1575,6 +1626,89 @@ async function regenerateAssistant(assistantMsg) {
     if (agentId && sessionId.value) persistSessionId(agentId, sessionId.value)
     scrollBodyToBottom()
     agentSidebarStore.bumpRefresh()
+  }
+}
+
+async function resumeApprovedMcp(assistantMsg, pendingId) {
+  const token = getToken()
+  const assistantIdx = messages.value.findIndex((x) => x.id === assistantMsg.id)
+  const agentId = Number(route.params.agentId)
+  if (!token || assistantIdx <= 0 || !Number.isFinite(agentId)) return
+  const prev = messages.value[assistantIdx - 1]
+  if (prev.role !== 'user') return
+
+  const row = messages.value[assistantIdx]
+  messages.value[assistantIdx] = {
+    ...row,
+    pending: true,
+    mcpExecuting: true,
+    mcpConfirmations: [],
+    errorText: undefined,
+    stoppedByUser: false,
+  }
+  sending.value = true
+  try {
+    await postChatJobAndConsumeStream({
+      agentId,
+      token,
+      regenerate: true,
+      message: '',
+      attachmentIds: [],
+      assistantIdx,
+      mcpApprovedPendingId: pendingId,
+    })
+  } catch (error) {
+    const cur = messages.value[assistantIdx]
+    messages.value[assistantIdx] = {
+      ...cur,
+      pending: false,
+      mcpExecuting: false,
+      errorText: t('views.agents.chat_msg_stream_error') + `：${error?.message || error}`,
+    }
+  } finally {
+    sending.value = false
+    scrollBodyToBottom()
+  }
+}
+
+async function approveMcpConfirmation(assistantMsg, item, approve) {
+  const token = getToken()
+  if (!token || !item?.pending_id) return
+  const idx = messages.value.findIndex((x) => x.id === assistantMsg.id)
+  if (confirmingMcpIds.value.has(item.pending_id)) return
+  confirmingMcpIds.value = new Set([...confirmingMcpIds.value, item.pending_id])
+  try {
+    const res = await fetch(`${baseApi}/user-agent/chat/mcp/confirm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', token },
+      body: JSON.stringify({ pending_id: item.pending_id, approve }),
+    })
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`
+      try {
+        const body = await res.json()
+        detail = body.detail || body.msg || detail
+      } catch {
+        /* ignore */
+      }
+      throw new Error(detail)
+    }
+    if (idx !== -1) {
+      const row = messages.value[idx]
+      messages.value[idx] = {
+        ...row,
+        mcpConfirmations: (row.mcpConfirmations || []).filter((x) => x.pending_id !== item.pending_id),
+      }
+    }
+    if (approve && idx !== -1) {
+      await resumeApprovedMcp(messages.value[idx], item.pending_id)
+    }
+  } catch (error) {
+    window.$message?.error(`${error?.message || error}`)
+  } finally {
+    const next = new Set(confirmingMcpIds.value)
+    next.delete(item.pending_id)
+    confirmingMcpIds.value = next
   }
 }
 
@@ -2542,6 +2676,49 @@ html.dark .agent-chat-msg-stopped {
 
 html.dark .agent-chat-md {
   color: rgba(255, 255, 255, 0.88);
+}
+
+/* 高危 MCP 工具调用确认卡 */
+.agent-chat-mcp-confirm {
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.agent-chat-mcp-confirm-item {
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.08);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-sizing: border-box;
+}
+
+.agent-chat-mcp-confirm-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--n-warning-color);
+  margin-bottom: 4px;
+}
+
+.agent-chat-mcp-confirm-text {
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.agent-chat-mcp-confirm-args {
+  margin: 0 0 8px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: var(--n-text-color-3);
+}
+
+.agent-chat-mcp-confirm-actions {
+  display: flex;
+  gap: 8px;
 }
 
 /* 知识库来源列表 */

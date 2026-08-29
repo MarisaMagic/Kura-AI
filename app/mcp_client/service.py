@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from app.mcp_client.tool_policy import wrap_mcp_tool_with_confirmation
 from typing import Any
 
 MCP_CONNECT_TIMEOUT_SECONDS = 12
@@ -58,11 +59,12 @@ def _connection_dict(transport: str, url: str, headers: dict[str, str] | None) -
 async def _list_tools(transport: str, url: str, headers: dict[str, str] | None) -> list:
     from langchain_mcp_adapters.client import MultiServerMCPClient
 
-    from app.utils.ssrf import assert_public_http_url
+    from app.utils.egress import build_mcp_httpx_client_factory
 
     # 连接前再检一次，降低 DNS 重绑定窗口
-    assert_public_http_url(url)
-    client = MultiServerMCPClient({"server": _connection_dict(transport, url, headers)})
+    conn = _connection_dict(transport, url, headers)
+    conn["httpx_client_factory"] = build_mcp_httpx_client_factory(url)
+    client = MultiServerMCPClient({"server": conn})
     return await asyncio.wait_for(client.get_tools(), timeout=MCP_CONNECT_TIMEOUT_SECONDS)
 
 
@@ -102,7 +104,12 @@ def _guard_mcp_tool_output(tool: Any) -> Any:
     )
 
 
-async def load_agent_mcp_tools(agent_id: int) -> tuple[list, list[dict]]:
+async def load_agent_mcp_tools(
+    agent_id: int,
+    *,
+    user_id: int | None = None,
+    session_id: str | None = None,
+) -> tuple[list, list[dict]]:
     """
     加载指定智能体全部已启用 MCP 服务的 LangChain 工具。
     单个服务连接失败仅记录错误、不中断对话；工具名与内置工具或彼此冲突时跳过。
@@ -132,5 +139,15 @@ async def load_agent_mcp_tools(agent_id: int) -> tuple[list, list[dict]]:
                 )
                 continue
             seen_names.add(tname)
-            all_tools.append(_guard_mcp_tool_output(t))
+            guarded = _guard_mcp_tool_output(t)
+            all_tools.append(
+                wrap_mcp_tool_with_confirmation(
+                    guarded,
+                    server_name=row.name,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    confirm_policy=getattr(row, "confirm_policy", "auto") or "auto",
+                )
+            )
     return all_tools, errors

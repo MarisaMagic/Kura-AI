@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     ALLOW_PUBLIC_REGISTRATION: bool = False
     # 为 True 时允许智能体 base_url / MCP url 指向内网或本机（仅本地调试 MCP）
     ALLOW_PRIVATE_UPSTREAM_URLS: bool = False
+    # 用户可配置上游出站默认钉死校验解析所得 IP；仅排障时临时关闭
+    EGRESS_PIN_DNS: bool = True
     # uvicorn 监听地址；公网请放在反代后并保持 127.0.0.1
     UVICORN_HOST: str = "127.0.0.1"
     # 为 False 时关闭 /docs /redoc /openapi.json（公网建议 false）
@@ -158,7 +160,11 @@ class Settings(BaseSettings):
     TOOL_UNTRUSTED_CONTENT_MAX_CHARS: int = 16000
     # 单个 MCP 工具返回内容的字符上限，0=不截断
     MCP_TOOL_RESULT_MAX_CHARS: int = 8000
-
+    # 高危/写操作 MCP 工具执行前要求用户确认；确认记录按工具名与参数哈希一次性生效
+    MCP_CONFIRMATION_REQUIRED: bool = True
+    MCP_CONFIRMATION_TTL_SECONDS: int = 300
+    MCP_CONFIRMATION_MAX_PER_TURN: int = 3
+    MCP_HIGH_RISK_TOOL_PATTERNS: list[str] = []
     # 全局嵌入（DashScope 兼容 OpenAI /embeddings）- 多模态嵌入模型
     EMBEDDING_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     EMBEDDING_MODEL: str = "qwen3-vl-embedding"

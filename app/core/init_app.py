@@ -212,6 +212,7 @@ async def init_db():
     await ensure_user_agent_supports_vision_column()
     await ensure_user_agent_is_published_column()
     await ensure_user_agent_share_table()
+    await ensure_user_agent_mcp_confirm_policy_column()
 
 
 async def ensure_user_avatar_column() -> None:
@@ -311,6 +312,42 @@ async def ensure_user_agent_share_table() -> None:
         logger.warning("ensure_user_agent_share_table: %s", e)
 
 
+async def ensure_user_agent_mcp_confirm_policy_column() -> None:
+    """旧库可能缺少 confirm_policy 列；aerich 未覆盖时补齐（SQLite）。"""
+    try:
+        conn = Tortoise.get_connection("sqlite")
+    except Exception:
+        return
+    try:
+        await conn.execute_query(
+            'ALTER TABLE "user_agent_mcp_server" ADD COLUMN "confirm_policy" VARCHAR(16) NOT NULL DEFAULT \'auto\''
+        )
+        logger.info('Added column "user_agent_mcp_server"."confirm_policy"')
+    except Exception as e:
+        msg = str(e).lower()
+        if "duplicate column" in msg or "already exists" in msg:
+            return
+        logger.warning("ensure_user_agent_mcp_confirm_policy_column: %s", e)
+
+
+async def ensure_readonly_mcp_preset_confirm_policy() -> None:
+    """已知只读 MCP 预置的存量 auto 配置收紧为 never，避免 Context7 等查询服务被误拦。"""
+    try:
+        from app.mcp_client.presets import MCP_SERVER_PRESETS
+        from app.models.user_agent_mcp import UserAgentMcpServer
+
+        readonly_urls = [p["url"] for p in MCP_SERVER_PRESETS if p.get("confirm_policy") == "never"]
+        if not readonly_urls:
+            return
+        updated = await UserAgentMcpServer.filter(confirm_policy="auto", url__in=readonly_urls).update(
+            confirm_policy="never"
+        )
+        if updated:
+            logger.info("已将 %d 个只读 MCP 预置服务的 confirm_policy 调整为 never", updated)
+    except Exception as e:
+        logger.warning("ensure_readonly_mcp_preset_confirm_policy: %s", e)
+
+
 async def ensure_agent_menus():
     """智能体：一级菜单「智能体中心」；创建/编辑为全屏路由，不在侧栏。"""
     legacy = await Menu.filter(path="/agents", parent_id=0).first()
@@ -403,6 +440,7 @@ async def restrict_normal_role_api_grants():
 
 async def init_data():
     await init_db()
+    await ensure_readonly_mcp_preset_confirm_policy()
     await init_superuser()
     await init_menus()
     await ensure_agent_menus()

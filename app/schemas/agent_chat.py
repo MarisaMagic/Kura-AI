@@ -30,6 +30,10 @@ class ChatRequest(BaseModel):
         False,
         description="为 True 时重新生成最后一轮助手回复（不新增用户消息；附件以存储中的最后一条用户消息为准）",
     )
+    mcp_approved_pending_id: Optional[str] = Field(
+        None,
+        description="用户已确认的高危 MCP 调用 pending_id；续跑时按该记录执行一次",
+    )
 
     @field_validator("message")
     @classmethod
@@ -95,6 +99,13 @@ class ChatAttachmentUploadResponse(BaseModel):
     size_bytes: int
 
 
+class McpConfirmRequest(BaseModel):
+    """高危 MCP 工具调用确认。"""
+
+    pending_id: str = Field(..., min_length=8, max_length=64)
+    approve: bool = True
+
+
 class ChatResponse(BaseModel):
     """
     智能体对话响应
@@ -106,6 +117,7 @@ class ChatResponse(BaseModel):
     rag_trace: Optional[dict[str, Any]] = None
     sources: Optional[list[dict[str, Any]]] = None
     kb_preselect: Optional[dict[str, Any]] = None
+    pending_mcp_confirmations: Optional[list[dict[str, Any]]] = None
 
 
 class MessageInfo(BaseModel):

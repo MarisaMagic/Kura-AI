@@ -14,6 +14,7 @@ from app.kb.rag_utils import (
     step_back_expand,
 )
 from app.settings import settings
+from app.utils.egress import pinned_llm_client_kwargs
 
 
 class ChunkRating(BaseModel):
@@ -85,6 +86,7 @@ def _grader_model(llm_config: dict[str, Any] | None):
         temperature=0,
         # Avoid empty/malformed tool-call payloads with OpenAI-compatible gateways (e.g. DashScope).
         stream_usage=False,
+        **pinned_llm_client_kwargs((llm_config.get("base_url") or "").strip() or None),
     )
 
 
@@ -103,6 +105,7 @@ def _router_model(llm_config: dict[str, Any] | None):
         base_url=(llm_config.get("base_url") or "").strip() or None,
         temperature=0,
         stream_usage=False,
+        **pinned_llm_client_kwargs((llm_config.get("base_url") or "").strip() or None),
     )
 
 

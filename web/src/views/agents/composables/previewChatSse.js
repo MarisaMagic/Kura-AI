@@ -40,9 +40,11 @@ export function applyPreviewChatSsePayload(data, messagesRef, idx) {
   const list = messagesRef.value ?? messagesRef
   if (data.type === 'content') {
     const row = list[idx]
+    const resumed = !!row.mcpExecuting
     list[idx] = {
       ...row,
-      content: (row.content || '') + (data.content || ''),
+      content: resumed ? (data.content || '') : (row.content || '') + (data.content || ''),
+      mcpExecuting: resumed ? false : row.mcpExecuting,
       pending: false,
       thinkingOpen: row.thinkingOpen ?? false,
       ragSteps: row.ragSteps || [],
@@ -113,11 +115,24 @@ export function applyPreviewChatSsePayload(data, messagesRef, idx) {
       ragTrace: cur.ragTrace ?? null,
       errorText: undefined,
     }
+  } else if (data.type === 'mcp_confirmation_required') {
+    const cur = list[idx]
+    const item = data.confirmation || {}
+    const confirmations = Array.isArray(cur.mcpConfirmations) ? cur.mcpConfirmations : []
+    if (item.pending_id && !confirmations.some((x) => x.pending_id === item.pending_id)) {
+      confirmations.push(item)
+    }
+    list[idx] = {
+      ...cur,
+      mcpConfirmations: confirmations,
+      pending: cur.pending,
+    }
   } else if (data.type === 'done') {
     const row = list[idx]
     list[idx] = {
       ...row,
       pending: false,
+      mcpExecuting: false,
       stoppedByUser: data.cancelled ? true : row.stoppedByUser,
     }
   }

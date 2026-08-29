@@ -91,6 +91,13 @@
             <n-radio-button value="sse">sse</n-radio-button>
           </n-radio-group>
         </n-form-item>
+        <n-form-item label="调用确认">
+          <n-radio-group v-model:value="editorForm.confirm_policy">
+            <n-radio-button value="auto">仅高风险</n-radio-button>
+            <n-radio-button value="always">全部确认</n-radio-button>
+            <n-radio-button value="never">不确认</n-radio-button>
+          </n-radio-group>
+        </n-form-item>
         <n-form-item :label="$t('views.agents.mcp_form_desc')">
           <n-input v-model:value="editorForm.description" type="textarea" :rows="2" />
         </n-form-item>
@@ -270,6 +277,7 @@ function emptyEditorForm() {
     transport: 'streamable_http',
     description: '',
     enabled: true,
+    confirm_policy: 'auto',
     headersList: [],
   }
 }
@@ -306,6 +314,7 @@ function openEditor(srv) {
       transport: srv.transport || 'streamable_http',
       description: srv.description || '',
       enabled: !!srv.enabled,
+      confirm_policy: srv.confirm_policy || 'auto',
       headersList: [],
     }
   } else {
@@ -340,6 +349,7 @@ function onPickPreset(p) {
     transport: p.transport || 'streamable_http',
     description: p.description || '',
     enabled: true,
+    confirm_policy: p.confirm_policy || 'auto',
     headersList: (p.header_fields || []).map((f) => ({ key: f.key, value: '' })),
   }
   editorVisible.value = true
@@ -360,6 +370,7 @@ async function onSave() {
         transport: f.transport,
         description: f.description,
         enabled: f.enabled,
+        confirm_policy: f.confirm_policy,
       }
       // 编辑时仅在用户填写了请求头时覆盖；留空则保留已保存值
       if (f.headersList.length) payload.headers = headersListToDict(f.headersList)
@@ -371,6 +382,7 @@ async function onSave() {
         transport: f.transport,
         description: f.description,
         enabled: f.enabled,
+        confirm_policy: f.confirm_policy,
         headers: headersListToDict(f.headersList),
       })
     }

@@ -19,6 +19,7 @@ MCP_SERVER_PRESETS: list[dict] = [
         "transport": "streamable_http",
         "url": "https://mcp.context7.com/mcp",
         "icon": "https://context7.com/favicon.ico",
+        "confirm_policy": "never",
         "header_fields": [
             {
                 "key": "CONTEXT7_API_KEY",
@@ -34,6 +35,7 @@ MCP_SERVER_PRESETS: list[dict] = [
         "transport": "streamable_http",
         "url": "https://mcp.tavily.com/mcp/",
         "icon": "https://tavily.com/favicon.ico",
+        "confirm_policy": "never",
         "header_fields": [
             {
                 "key": "Authorization",
@@ -49,6 +51,7 @@ MCP_SERVER_PRESETS: list[dict] = [
         "transport": "streamable_http",
         "url": "https://mcp.exa.ai/mcp",
         "icon": "https://exa.ai/favicon.ico",
+        "confirm_policy": "never",
         "header_fields": [
             {
                 "key": "Authorization",
@@ -79,6 +82,7 @@ MCP_SERVER_PRESETS: list[dict] = [
         "transport": "streamable_http",
         "url": "https://huggingface.co/mcp",
         "icon": "simple-icons:huggingface",
+        "confirm_policy": "never",
         "header_fields": [
             {
                 "key": "Authorization",

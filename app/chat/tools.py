@@ -24,6 +24,8 @@ class _RequestState:
         "web_search_calls",
         "rag_step_queue",
         "rag_step_loop",
+        "pending_mcp_confirmations",
+        "approved_mcp_pending_id",
     )
 
     def __init__(self) -> None:
@@ -34,6 +36,8 @@ class _RequestState:
         self.web_search_calls = 0
         self.rag_step_queue: Any = None
         self.rag_step_loop: asyncio.AbstractEventLoop | None = None
+        self.pending_mcp_confirmations: list[dict] = []
+        self.approved_mcp_pending_id: str | None = None
 
 
 _REQUEST_STATE: contextvars.ContextVar[_RequestState | None] = contextvars.ContextVar(
@@ -59,6 +63,42 @@ def get_last_rag_context(clear: bool = True) -> Optional[dict]:
     if clear:
         state.last_rag_context = None
     return context
+
+
+def add_pending_mcp_confirmation(pending: dict) -> dict:
+    from app.settings import settings
+
+    state = _state()
+    items = state.pending_mcp_confirmations
+    key = (pending.get("tool_name"), pending.get("args_hash"))
+    for item in items:
+        if (item.get("tool_name"), item.get("args_hash")) == key:
+            return {"status": "duplicate", "pending": item}
+    max_n = max(1, int(getattr(settings, "MCP_" + "CONFIRMATION_MAX_PER_TURN", 3)))
+    if len(items) >= max_n:
+        return {"status": "capped"}
+    items.append(dict(pending))
+    return {"status": "added", "pending": pending}
+
+
+def get_pending_mcp_confirmations(clear: bool = True) -> list[dict]:
+    state = _state()
+    items = list(state.pending_mcp_confirmations)
+    if clear:
+        state.pending_mcp_confirmations = []
+    return items
+
+
+def set_approved_mcp_pending_id(pending_id: str | None) -> None:
+    _state().approved_mcp_pending_id = (pending_id or "").strip() or None
+
+
+def get_approved_mcp_pending_id(clear: bool = True) -> str | None:
+    state = _state()
+    pending_id = state.approved_mcp_pending_id
+    if clear:
+        state.approved_mcp_pending_id = None
+    return pending_id
 
 
 def reset_tool_call_guards() -> None:

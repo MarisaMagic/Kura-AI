@@ -22,6 +22,9 @@ class UserAgentMcpServer(BaseModel, TimestampMixin):
         null=True, description="加密存储的请求头 JSON（如 Authorization/API Key）"
     )
     enabled = fields.BooleanField(default=True, description="对话时是否加载该服务的工具")
+    confirm_policy = fields.CharField(
+        max_length=16, default="auto", description="调用确认策略：auto / always / never"
+    )
 
     class Meta:
         table = "user_agent_mcp_server"

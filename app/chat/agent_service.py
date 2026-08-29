@@ -32,7 +32,9 @@ from app.chat.storage import storage
 from app.chat.tools import (
     emit_rag_step,
     get_last_rag_context,
+    get_pending_mcp_confirmations,
     reset_tool_call_guards,
+    set_approved_mcp_pending_id,
     set_rag_step_queue,
 )
 from app.chat.web_search_tool import make_web_search_tool
@@ -346,10 +348,9 @@ def build_model_and_agent(
 
     # 获取基础 URL, 用户在创建智能体时配置的 OpenAI 兼容 API Base URL
     base_url = (ua.base_url or "").strip() or None
-    if base_url:
-        from app.utils.ssrf import assert_public_http_url
+    from app.utils.egress import pinned_llm_client_kwargs
 
-        assert_public_http_url(base_url)
+    pinned_kwargs = pinned_llm_client_kwargs(base_url)
     # 构建大模型, 使用 OpenAI 兼容 API Base URL
     model = init_chat_model(
         model=ua.model_name,
@@ -358,6 +359,7 @@ def build_model_and_agent(
         base_url=base_url,
         temperature=float(ua.temperature),
         stream_usage=True,
+        **pinned_kwargs,
     )
     kb_scope = kb_scope_for(ua.user_id, ua.id)
     llm_config = {
@@ -431,6 +433,7 @@ def chat_with_agent_sync(
     use_knowledge_retrieval: bool = True,
     use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
+    mcp_approved_pending_id: str | None = None,
 ) -> dict:
     """
     同步对话
@@ -450,6 +453,7 @@ def chat_with_agent_sync(
     # 清空 RAG 上下文, 重置工具调用守卫
     get_last_rag_context(clear=True)
     reset_tool_call_guards()
+    set_approved_mcp_pending_id(mcp_approved_pending_id)
 
     session_attachment_hint = format_attachment_hint(user_id, agent_id, session_id)
 
@@ -472,7 +476,7 @@ def chat_with_agent_sync(
     mcp_errors: list[dict] = []
     if _mcp_tools_allowed_for(ua, user_id):
         try:
-            raw_mcp_tools, mcp_errors = asyncio.run(load_agent_mcp_tools(agent_id))
+            raw_mcp_tools, mcp_errors = asyncio.run(load_agent_mcp_tools(agent_id, user_id=user_id, session_id=session_id))
             mcp_tools = [_wrap_async_tool_for_sync(t) for t in raw_mcp_tools]
         except RuntimeError:
             # 兜底：若意外处于运行中的事件循环（不应发生），跳过 MCP 不阻断对话
@@ -529,6 +533,20 @@ def chat_with_agent_sync(
         session_id,
         (user_text or "").strip(),
     )
+    if mcp_approved_pending_id:
+        from app.mcp_client.tool_policy import peek_approved_mcp_call
+
+        approved = peek_approved_mcp_call(
+            mcp_approved_pending_id, user_id=user_id, agent_id=agent_id, session_id=session_id
+        )
+        if approved:
+            note = SystemMessage(
+                content=(
+                    f"用户已批准执行 MCP 工具 {approved.get('server_name')}/{approved.get('tool_name')} 一次。"
+                    "请立即调用该工具一次；不要调用其他高危工具。"
+                )
+            )
+            to_invoke = [note, *to_invoke]
     caught_exc: Exception | None = None
     response_content = ""
     try:
@@ -544,6 +562,7 @@ def chat_with_agent_sync(
     rag_context = get_last_rag_context(clear=True)
     # 获取 RAG 追踪
     rag_trace = rag_context.get("rag_trace") if rag_context else None
+    pending_mcp = get_pending_mcp_confirmations(clear=True)
     # 获取图片引用
     image_references = rag_context.get("image_references") if rag_context else None
     # 获取来源列表（知识库 / 联网搜索互斥，合并走统一 sources 通道）
@@ -584,6 +603,7 @@ def chat_with_agent_sync(
         "rag_trace": rag_trace,
         "sources": merged_sources,
         "kb_preselect": kb_preselect_meta or None,
+        "pending_mcp_confirmations": pending_mcp or None,
     }
 
 
@@ -599,6 +619,7 @@ async def iter_chat_stream_events(
     attachment_ids: list[str] | None = None,
     regenerate: bool = False,
     cancel_check: Callable[[], bool] | None = None,
+    mcp_approved_pending_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """
     异步对话：产出与 SSE 中 `data: {...}` 相同结构的 dict 事件（供直连 SSE 与后台 Job 复用）。
@@ -620,6 +641,7 @@ async def iter_chat_stream_events(
     # 清空 RAG 上下文, 重置工具调用守卫
     get_last_rag_context(clear=True)
     reset_tool_call_guards()
+    set_approved_mcp_pending_id(mcp_approved_pending_id)
 
     if regenerate:
         if not messages:
@@ -667,7 +689,7 @@ async def iter_chat_stream_events(
     # 加载该智能体已启用的 MCP 工具（单服务失败仅记录，不中断对话）；
     # 共享（非属主）会话跳过加载，避免属主凭据被共享用户对话驱动。
     if _mcp_tools_allowed_for(ua, user_id):
-        mcp_tools, mcp_errors = await load_agent_mcp_tools(agent_id)
+        mcp_tools, mcp_errors = await load_agent_mcp_tools(agent_id, user_id=user_id, session_id=session_id)
     else:
         mcp_tools, mcp_errors = [], []
 
@@ -731,6 +753,20 @@ async def iter_chat_stream_events(
         session_id,
         memory_query,
     )
+    if mcp_approved_pending_id:
+        from app.mcp_client.tool_policy import peek_approved_mcp_call
+
+        approved = peek_approved_mcp_call(
+            mcp_approved_pending_id, user_id=user_id, agent_id=agent_id, session_id=session_id
+        )
+        if approved:
+            note = SystemMessage(
+                content=(
+                    f"用户已批准执行 MCP 工具 {approved.get('server_name')}/{approved.get('tool_name')} 一次。"
+                    "请立即调用该工具一次；不要调用其他高危工具。"
+                )
+            )
+            to_invoke = [note, *to_invoke]
 
     # 初始化响应内容
     full_response = ""
@@ -829,6 +865,7 @@ async def iter_chat_stream_events(
 
     if cancelled_externally:
         get_last_rag_context(clear=True)
+        get_pending_mcp_confirmations(clear=True)
         yield {"type": "cancelled"}
         yield {"type": "done", "cancelled": True}
         return
@@ -837,6 +874,7 @@ async def iter_chat_stream_events(
     rag_context = get_last_rag_context(clear=True)
     # 获取 RAG 追踪
     rag_trace = rag_context.get("rag_trace") if rag_context else None
+    pending_mcp = get_pending_mcp_confirmations(clear=True)
     # 获取图片引用
     image_references = rag_context.get("image_references") if rag_context else None
     # 获取来源列表（知识库 / 联网搜索互斥，合并走统一 sources 通道）
@@ -852,7 +890,9 @@ async def iter_chat_stream_events(
     if merged_sources:
         yield {"type": "sources", "sources": merged_sources}
 
-    # 助手落库仅用纯文本；见 chat_with_agent_sync
+    for pending in pending_mcp:
+        yield {"type": "mcp_confirmation_required", "confirmation": pending}
+
     ai_msg = AIMessage(content=full_response)
     messages.append(ai_msg)
     ai_extra = {
@@ -888,6 +928,7 @@ async def chat_with_agent_stream(
     use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
     regenerate: bool = False,
+    mcp_approved_pending_id: str | None = None,
 ) -> AsyncIterator[str]:
     """
     异步对话（SSE 字符串片段）
@@ -911,6 +952,7 @@ async def chat_with_agent_stream(
         use_web_search=use_web_search,
         attachment_ids=attachment_ids,
         regenerate=regenerate,
+        mcp_approved_pending_id=mcp_approved_pending_id,
     ):
         yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"

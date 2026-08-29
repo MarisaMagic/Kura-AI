@@ -28,6 +28,7 @@ class UserAgentMcpServerCreate(BaseModel):
     url: str = Field(..., min_length=1, max_length=512, description="MCP 服务 URL")
     headers: Optional[dict[str, str]] = Field(None, description="请求头（敏感值加密存储）")
     enabled: bool = Field(True, description="对话时是否加载该服务的工具")
+    confirm_policy: Literal["auto", "always", "never"] = Field("auto", description="调用确认策略")
 
     @field_validator("url")
     @classmethod
@@ -47,6 +48,7 @@ class UserAgentMcpServerUpdate(BaseModel):
     url: Optional[str] = Field(None, min_length=1, max_length=512)
     headers: Optional[dict[str, str]] = None
     enabled: Optional[bool] = None
+    confirm_policy: Optional[Literal["auto", "always", "never"]] = None
 
     @field_validator("url")
     @classmethod
@@ -67,6 +69,7 @@ class UserAgentMcpServerItem(BaseModel):
     transport: str
     url: str
     enabled: bool
+    confirm_policy: str = "auto"
     header_keys: list[str] = Field(default_factory=list, description="已配置请求头的键名")
     created_at: str = ""
     updated_at: str = ""
@@ -111,6 +114,7 @@ class McpPresetItem(BaseModel):
     url: str
     icon: Optional[str] = Field(None, description="卡片图标：iconify 图标名或图片 URL")
     header_fields: list[dict] = Field(default_factory=list)
+    confirm_policy: str = "auto"
 
 
 class McpPresetListResponse(BaseModel):

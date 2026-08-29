@@ -12,6 +12,7 @@ from app.chat.tools import emit_rag_step
 from app.kb.milvus_client import MilvusManager
 from app.kb.rag_utils import KB_MAX_DOCUMENT_FILTER
 from app.settings import settings
+from app.utils.egress import pinned_llm_client_kwargs
 
 _milvus = MilvusManager()
 
@@ -40,6 +41,7 @@ def _pick_model(llm_config: dict[str, Any]):
         base_url=(llm_config.get("base_url") or "").strip() or None,
         temperature=0,
         stream_usage=False,
+        **pinned_llm_client_kwargs((llm_config.get("base_url") or "").strip() or None),
     )
 
 
