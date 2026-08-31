@@ -108,7 +108,7 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 4. 启动后端服务
 
-建议预先启动 docker 数据库服务
+建议预先启动 docker [数据库服务](#数据库服务)
 
 ```sh
 python run.py
@@ -184,7 +184,7 @@ docker compose up -d
 
 启动数据库镜像服务成功输出:
 
-![](deploy\sample-picture\docker-compose-up.png)
+![](deploy/sample-picture/docker-compose-up.png)
 
 停止所有数据库服务:
 
@@ -194,7 +194,7 @@ docker compose stop
 
 停止数据库镜像服务成功输出:
 
-![](deploy\sample-picture\docker-compose-stop.png)
+![](deploy/sample-picture/docker-compose-stop.png)
 
 二次开发：用上面的命令只起数据库，再分别 `python run.py` 与 `pnpm dev`。若要把前后端也打进镜像、一条命令访问网页，见下方「快速一键部署」。
 
@@ -271,6 +271,8 @@ WEB_SEARCH_BOCHA_API_KEY=
 WEB_SEARCH_BOCHA_ENDPOINT=https://api.bochaai.com/v1/web-search
 ```
 
+---
+
 ## 部署方式2: 一键快速部署（Docker）
 
 ### 运行命令
@@ -286,7 +288,7 @@ docker compose -f docker-compose.prod.yml up -d --build
 
 启动成功：
 
-![](deploy\sample-picture\docker-compose-prod.png)
+![](deploy/sample-picture/docker-compose-prod.png)
 
 启动成功后浏览器打开 **http://localhost:8088** 即可访问（端口可用 `.env` 里的 `WEB_PORT` 更改）。
 
@@ -323,7 +325,7 @@ docker compose -f docker-compose.prod.yml logs -f backend
 
 相关文件：`deploy/Dockerfile.backend`、`deploy/Dockerfile.frontend`、`deploy/nginx.conf`、`docker-compose.prod.yml`。
 
-
+---
 
 ## 公网部署清单
 
