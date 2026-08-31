@@ -231,7 +231,7 @@
                             </a>
                             <a
                               v-else-if="src.image_url"
-                              :href="src.image_url"
+                              :href="toSameOriginMediaUrl(src.image_url)"
                               target="_blank"
                               rel="noopener noreferrer"
                               class="agent-chat-source-chip"
@@ -461,7 +461,7 @@ import ChatAttachmentItem from './ChatAttachmentItem.vue'
 import { useChatStickToBottom } from './useChatStickToBottom.js'
 import api from '@/api'
 import { getToken } from '@/utils'
-import { renderAgentChatMarkdown } from '@/utils/agentChatMarkdown'
+import { renderAgentChatMarkdown, toSameOriginMediaUrl } from '@/utils/agentChatMarkdown'
 import { useAgentChatHeaderStore, useAgentSidebarStore, useRecentAgentsStore, useUserStore } from '@/store'
 import { DEFAULT_AVATAR } from '@/views/agents/composables/agentFormCommon.js'
 

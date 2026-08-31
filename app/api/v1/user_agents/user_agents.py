@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 
 from fastapi import APIRouter, File, Query, UploadFile
 from tortoise.expressions import Q
@@ -13,13 +14,14 @@ from app.models.user_agent import UserAgent
 from app.models.user_agent_share import UserAgentShare
 from app.schemas.base import Fail, Success, SuccessExtra
 from app.schemas.user_agent import (
+    SubLlmTestIn,
     UserAgentCreate,
     UserAgentOfflineIn,
     UserAgentPublishIn,
     UserAgentShareIn,
     UserAgentUpdate,
 )
-from app.utils.api_key_crypto import encrypt_api_key
+from app.utils.api_key_crypto import decrypt_api_key_safe, encrypt_api_key
 from app.kb.kb_scope import kb_scope_for
 from app.kb.kb_service import purge_kb_for_scope
 from app.utils.avatar import enrich_user_avatar
@@ -32,12 +34,15 @@ from app.utils.user_agent_avatar import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+# 表单辅助接口（如连通性测试）：仅需登录，不占用菜单 API 权限，属主校验在接口内完成
+auth_router = APIRouter()
 
 
 async def _public_agent_dict(obj: UserAgent, username: str) -> dict:
     """不包含密文，附带 has_api_key、属主用户名与共享人数（头像按属主目录存储）。"""
-    d = await obj.to_dict(exclude_fields=["api_key_ciphertext"])
+    d = await obj.to_dict(exclude_fields=["api_key_ciphertext", "sub_api_key_ciphertext"])
     d["has_api_key"] = bool(obj.api_key_ciphertext)
+    d["has_sub_api_key"] = bool(obj.sub_api_key_ciphertext)
     d["avatar_url"] = agent_avatar_url(username, obj.avatar_filename)
     d["owner_username"] = username
     d["shared_count"] = await UserAgentShare.filter(agent_id=obj.id).count()
@@ -202,6 +207,7 @@ async def get_user_agent(agent_id: int = Query(..., description="智能体 ID"))
     d = await _public_agent_dict(obj, owner.username)
     if int(obj.user_id or 0) != int(user_id):
         d["has_api_key"] = False
+        d["has_sub_api_key"] = False
     return Success(data=d)
 
 
@@ -211,6 +217,9 @@ async def create_user_agent(body: UserAgentCreate):
     payload = body.model_dump()
     plain = payload.pop("api_key")
     payload["api_key_ciphertext"] = encrypt_api_key(plain)
+    sub_plain = (payload.pop("sub_api_key", None) or "").strip()
+    if sub_plain:
+        payload["sub_api_key_ciphertext"] = encrypt_api_key(sub_plain)
     payload["user_id"] = user_id
     obj = await UserAgent.create(**payload)
     user_obj = await user_controller.get(id=user_id)
@@ -228,11 +237,56 @@ async def update_user_agent(body: UserAgentUpdate):
     api_key = payload.pop("api_key", None)
     if api_key and api_key.strip():
         obj.api_key_ciphertext = encrypt_api_key(api_key.strip())
+    sub_api_key = payload.pop("sub_api_key", None)
+    if sub_api_key is not None:
+        sub_plain = sub_api_key.strip()
+        # 空字符串表示清除子 Key（恢复跟随主配置）；非空则覆盖
+        obj.sub_api_key_ciphertext = encrypt_api_key(sub_plain) if sub_plain else None
     obj = obj.update_from_dict(payload)
     await obj.save()
     user_obj = await user_controller.get(id=user_id)
     d = await _public_agent_dict(obj, user_obj.username)
     return Success(data=d, msg="更新成功")
+
+
+@auth_router.post("/test-llm", summary="测试子智能体模型连通性", tags=["智能体模块"])
+async def test_sub_llm(body: SubLlmTestIn):
+    user_id = CTX_USER_ID.get()
+    api_key = (body.api_key or "").strip()
+    if not api_key:
+        if body.agent_id is None:
+            return Fail(code=400, msg="请填写子智能体 API Key")
+        obj = await user_agent_controller.get_owned(body.agent_id, user_id)
+        if not obj:
+            return Fail(code=404, msg="智能体不存在或无权限访问")
+        api_key = (decrypt_api_key_safe(obj.sub_api_key_ciphertext) or "").strip()
+        if not api_key:
+            return Fail(code=400, msg="该智能体尚未保存子智能体 API Key")
+
+    from langchain.chat_models import init_chat_model
+    from langchain_core.messages import HumanMessage
+
+    from app.utils.egress import pinned_llm_client_kwargs
+
+    started = time.perf_counter()
+    try:
+        model = init_chat_model(
+            model=body.model_name.strip(),
+            model_provider="openai",
+            api_key=api_key,
+            base_url=body.base_url,
+            max_tokens=1,
+            temperature=0,
+            stream_usage=False,
+            **pinned_llm_client_kwargs(body.base_url),
+        )
+        await asyncio.wait_for(model.ainvoke([HumanMessage(content="ping")]), timeout=15)
+    except asyncio.TimeoutError:
+        return Fail(msg="连接超时（15 秒），请检查 Base URL 与网络")
+    except Exception as e:
+        return Fail(msg=f"连通性测试失败：{str(e)[:200]}")
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    return Success(data={"ok": True, "latency_ms": latency_ms}, msg="连接成功")
 
 
 @router.delete("/delete", summary="删除智能体", tags=["智能体模块"])

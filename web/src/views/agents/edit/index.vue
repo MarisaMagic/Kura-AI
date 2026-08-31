@@ -20,6 +20,7 @@
                 :form="form"
                 :rules="rules"
                 :has-saved-api-key="hasSavedApiKey"
+                :has-sub-api-key="hasSubApiKey"
                 :dialogue-open="dialogueOpen"
                 :advanced-open="advancedOpen"
                 :avatar-preview="avatarPreview"
@@ -89,13 +90,14 @@ const avatarUploadKey = ref(0)
 const dialogueOpen = ref(false)
 const advancedOpen = ref(false)
 const hasSavedApiKey = ref(false)
+const hasSubApiKey = ref(false)
 const isPublished = ref(false)
 const sharedCount = ref(0)
 const savedSnapshot = ref(null)
 const pendingAvatarChanged = ref(false)
 
 const form = ref(emptyForm())
-const rules = computed(() => buildAgentFormRules(t, { isEdit: true }))
+const rules = computed(() => buildAgentFormRules(t, { isEdit: true, getForm: () => form.value }))
 
 const avatarPreview = computed(() => {
   if (serverAvatarUrl.value) return serverAvatarUrl.value
@@ -114,6 +116,7 @@ const configStale = computed(() => {
   if (!savedSnapshot.value) return false
   if (pendingAvatarChanged.value) return true
   if (String(form.value.api_key || '').trim()) return true
+  if (String(form.value.sub_api_key || '').trim()) return true
   return !previewConfigEqual(pickPreviewConfig(form.value), savedSnapshot.value)
 })
 
@@ -134,6 +137,7 @@ async function loadAgent(id) {
     const d = res.data
     agentId.value = d.id
     hasSavedApiKey.value = !!d.has_api_key
+    hasSubApiKey.value = !!d.has_sub_api_key
     isPublished.value = !!d.is_published
     sharedCount.value = d.shared_count || 0
     form.value = {
@@ -146,6 +150,9 @@ async function loadAgent(id) {
       supports_vision: !!d.supports_vision,
       opening_message: d.opening_message || '',
       temperature: d.temperature ?? 0.1,
+      sub_model_name: d.sub_model_name || '',
+      sub_base_url: d.sub_base_url || '',
+      sub_api_key: '',
     }
     savedSnapshot.value = snapshotFromForm(form.value)
     pendingAvatarChanged.value = false
@@ -155,6 +162,7 @@ async function loadAgent(id) {
   } catch {
     agentId.value = null
     hasSavedApiKey.value = false
+    hasSubApiKey.value = false
     isPublished.value = false
     sharedCount.value = 0
     form.value = emptyForm()

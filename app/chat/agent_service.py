@@ -153,6 +153,30 @@ def _llm_config_from_ua(ua: UserAgent) -> dict[str, Any]:
     }
 
 
+def _sub_llm_config_from_ua(ua: UserAgent) -> dict[str, Any]:
+    """
+    打杂任务（记忆重写、知识库选档、RAG 打分/改写/HyDE）使用的子智能体 LLM 配置。
+    仅当 sub_model_name 非空且子 Key 可解密出非空值时使用子配置（整体判定，不混搭）；
+    否则实时回退主配置，主配置变更自动跟随。
+    :param ua: 智能体
+    :return: LLM 配置
+    """
+    plain = decrypt_api_key_safe(ua.sub_api_key_ciphertext)
+    sub_model = (ua.sub_model_name or "").strip()
+    if sub_model and (plain or "").strip():
+        base_url = (ua.sub_base_url or "").strip() or None
+        if base_url:
+            from app.utils.ssrf import assert_public_http_url
+
+            assert_public_http_url(base_url)
+        return {
+            "api_key": plain.strip(),
+            "base_url": base_url,
+            "model_name": sub_model,
+        }
+    return _llm_config_from_ua(ua)
+
+
 def _run_kb_document_preselect_with_context(
     messages: list[BaseMessage],
     current_question: str,
@@ -174,7 +198,7 @@ def _run_kb_document_preselect_with_context(
     filt, pre_meta = run_kb_document_preselect(
         (current_question or "").strip(),
         kb_scope_for(ua.user_id, agent_id),
-        _llm_config_from_ua(ua),
+        _sub_llm_config_from_ua(ua),
         conversation_context=ctx or None,
     )
     return filt, {**ctx_meta, **pre_meta}
@@ -222,7 +246,7 @@ def _prepare_to_invoke_messages(
     from app.chat.tools import emit_rag_step
 
     windowed = apply_sliding_window_turns(messages)
-    llm_cfg = _llm_config_from_ua(ua)
+    llm_cfg = _sub_llm_config_from_ua(ua)
     inj = proactive_session_memory_inject_text( # 预检索会话记忆
         (user_query_for_memory or "").strip(),
         user_id=user_id,
@@ -298,10 +322,11 @@ def _compose_system_prompt(
         parts.append(kb_retrieval_system_extension.strip())
     if use_knowledge_retrieval:
         parts.append(
-            "知识库检索结果中若出现「图片公网访问 URL」或「PostgreSQL 存储相对路径 stored_relpath」，"
-            "展示图片时必须在回答中使用工具给出的完整 http(s) 图片 URL（Markdown：![](完整URL)），"
-            "须与工具返回的「图片公网访问 URL」逐字一致。"
-            "禁止使用 image://、file://、kb_image:// 等自定义协议，禁止用 [1][2] 或序号代替 URL。"
+            "知识库检索结果中若出现「图片访问 URL」或「PostgreSQL 存储相对路径 stored_relpath」，"
+            "展示图片时必须在回答中原样使用工具给出的图片访问 URL（Markdown：![](URL)），"
+            "须与工具返回的「图片访问 URL」逐字一致（通常为 /api/v1/media/... 相对路径，含 ?exp=&sig=）。"
+            "禁止改写成 http:// 或 https:// 绝对地址，禁止使用 stored_relpath、image://、file://、kb_image://，"
+            "禁止用 [1][2] 或序号代替 URL。"
         )
         parts.append(
             "知识库作答纪律：回答必须仅依据知识库检索工具的返回内容与多轮对话上下文；"
@@ -362,11 +387,8 @@ def build_model_and_agent(
         **pinned_kwargs,
     )
     kb_scope = kb_scope_for(ua.user_id, ua.id)
-    llm_config = {
-        "api_key": plain.strip(),
-        "base_url": base_url,
-        "model_name": ua.model_name,
-    }
+    # 打杂任务（检索打分/改写/HyDE、记忆重写）走子智能体配置；未配置时回退主配置
+    llm_config = _sub_llm_config_from_ua(ua)
     tools: list[Any] = []
     tools.extend(make_session_attachment_tools(user_id, agent_id, session_id))
     if use_web_search and getattr(settings, "WEB_SEARCH_ENABLED", True):

@@ -8,7 +8,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import HTTPException
 from fastapi.responses import FileResponse
@@ -111,7 +111,10 @@ def serve_signed_media(kind: str, relpath: str, exp: int, sig: str) -> FileRespo
 
 
 def resign_media_url(url: str) -> str:
-    """将已有媒体 URL（可带过期签名或无签名）换成当前有效签名。非媒体 URL 原样返回。"""
+    """将已有媒体 URL 换成当前有效签名的同源相对路径。非媒体 URL 原样返回。
+
+    始终去掉 http(s) origin / PUBLIC_API_BASE，避免前端 CSP img-src 'self' 拦截跨源图片。
+    """
     raw = (url or "").strip()
     if not raw:
         return raw
@@ -126,14 +129,7 @@ def resign_media_url(url: str) -> str:
             break
     if not kind or not rel:
         return raw
-    signed = sign_media_url(kind, rel, absolute=False)
-    new_split = urlsplit(signed)
-    origin = ""
-    if split.scheme and split.netloc:
-        origin = urlunsplit((split.scheme, split.netloc, "", "", ""))
-    elif (getattr(settings, "PUBLIC_API_BASE", None) or "").strip():
-        origin = settings.PUBLIC_API_BASE.strip().rstrip("/")
-    return f"{origin}{new_split.path}?{new_split.query}" if origin else signed
+    return sign_media_url(kind, rel, absolute=False)
 
 
 def resign_media_urls_in_text(text: str) -> str:
@@ -141,16 +137,12 @@ def resign_media_urls_in_text(text: str) -> str:
         return text
 
     def _repl(m: re.Match) -> str:
-        origin = m.group("origin") or ""
         prefix = m.group("prefix")
         rel = m.group("path")
         kind = _PREFIX_KIND.get(prefix.rstrip("/"))
         if not kind:
             return m.group(0)
-        signed = sign_media_url(kind, rel, absolute=False)
-        if origin:
-            return f"{origin}{signed}" if signed.startswith("/") else f"{origin}/{signed}"
-        return signed
+        return sign_media_url(kind, rel, absolute=False)
 
     return _MEDIA_URL_RE.sub(_repl, text)
 

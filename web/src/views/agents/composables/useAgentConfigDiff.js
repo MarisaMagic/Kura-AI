@@ -9,6 +9,8 @@ export const PREVIEW_CONFIG_FIELDS = [
   'supports_vision',
   'opening_message',
   'temperature',
+  'sub_model_name',
+  'sub_base_url',
 ]
 
 export function pickPreviewConfig(form) {

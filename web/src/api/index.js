@@ -48,6 +48,8 @@ export default {
   getUserAgent: (params = {}) => request.get('/user-agent/get', { params }),
   createUserAgent: (data = {}) => request.post('/user-agent/create', data),
   updateUserAgent: (data = {}) => request.post('/user-agent/update', data),
+  /** 子智能体（打杂模型）连通性测试；错误由调用方自行展示 */
+  testSubLlm: (data = {}) => request.post('/user-agent/test-llm', data, { noErrorMessage: true }),
   deleteUserAgent: (params = {}) => request.delete('/user-agent/delete', { params }),
   uploadUserAgentAvatar: (agentId, data) =>
     request.post(`/user-agent/upload_avatar?agent_id=${agentId}`, data),

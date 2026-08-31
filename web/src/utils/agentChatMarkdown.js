@@ -54,13 +54,41 @@ md.renderer.rules.kura_citation = (tokens, idx, _options, env) => {
   return `<sup class="kcite-group">${badges.join('<span class="kcite-sep">,</span>')}</sup>`
 }
 
+// 知识库/头像等签名媒体：把 http(s)://host/api/v1/media/... 收成同源相对路径，
+// 以通过 CSP img-src 'self'（绝对 http://127.0.0.1:9999 会被拦截）。
+const MEDIA_PATH_RE =
+  /\/api\/v1\/media\/(?:user_avatar|user_agents_avatar|user_agent_images)\/[^\s"'<>)]*/i
+const ABS_MEDIA_URL_RE = new RegExp(`https?://[^/\\s"'<>)]+(${MEDIA_PATH_RE.source})`, 'gi')
+
+export function toSameOriginMediaUrl(url) {
+  const raw = String(url || '').trim()
+  if (!raw) return raw
+  const m = raw.match(new RegExp(`^https?://[^/]+(${MEDIA_PATH_RE.source})$`, 'i'))
+  return m ? m[1] : raw
+}
+
+export function rewriteMediaUrlsInText(text) {
+  if (text == null || text === '') return text
+  return String(text).replace(ABS_MEDIA_URL_RE, (_, path) => path)
+}
+
 /**
  * 将 Markdown + LaTeX（$...$ / $$...$$）转为可安全 v-html 的 HTML。
  * sources（可选）：消息来源数组，与正文 [来源N] 编号对应，用于引用胶囊的 hover 提示。
  */
 export function renderAgentChatMarkdown(text, sources) {
   if (text == null || text === '') return ''
-  const raw = md.render(String(text), { kuraSources: sources })
+  const rewritten = rewriteMediaUrlsInText(String(text))
+  const kuraSources = Array.isArray(sources)
+    ? sources.map((s) => {
+        if (!s || typeof s !== 'object') return s
+        const next = { ...s }
+        if (next.image_url) next.image_url = toSameOriginMediaUrl(next.image_url)
+        if (next.url) next.url = toSameOriginMediaUrl(next.url)
+        return next
+      })
+    : sources
+  const raw = md.render(rewritten, { kuraSources })
   return DOMPurify.sanitize(raw, {
     USE_PROFILES: { html: true },
   })

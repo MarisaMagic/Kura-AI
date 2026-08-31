@@ -164,8 +164,8 @@ class Settings(BaseSettings):
     USER_AGENT_KB_IMAGES_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_images")
     # 浏览器访问图片路径前缀
     USER_AGENT_KB_IMAGES_URL_PREFIX: str = "/api/v1/media/user_agent_images"
-    # 对外可访问的 API 根地址（无尾斜杠），用于拼接知识库图片完整 URL；例如 http://127.0.0.1:8000 或 https://api.example.com
-    # 未设置时工具返回相对路径，前端需自行补全；多模态 image_url 建议使用完整 http(s) 地址
+    # 对外可访问的 API 根地址（无尾斜杠）。聊天/知识库图片一律用同源相对路径 /api/v1/media/...，
+    # 不拼接此值，以免 http 绝对地址被前端 CSP img-src 拦截。
     PUBLIC_API_BASE: str = ""
     # 会话对话附件：data/user_agent_uploads/user_{id}/{agent_id}/{session}/
     USER_AGENT_CHAT_UPLOAD_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_uploads")

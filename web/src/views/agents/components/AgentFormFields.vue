@@ -148,6 +148,76 @@
         </n-form-item>
       </div>
     </section>
+
+    <section class="agent-section">
+      <header
+        class="section-header section-header--collapsible"
+        role="button"
+        tabindex="0"
+        :aria-expanded="subLlmOpen"
+        @click="subLlmOpen = !subLlmOpen"
+        @keydown.enter.prevent="subLlmOpen = !subLlmOpen"
+      >
+        <span class="section-header__title">{{ $t('views.agents.label_sub_llm') }}</span>
+        <span class="section-header__chevron" :class="{ 'is-collapsed': !subLlmOpen }" aria-hidden="true">
+          <TheIcon icon="material-symbols:keyboard-arrow-down-rounded" :size="22" />
+        </span>
+      </header>
+      <div v-show="subLlmOpen" class="section-body">
+        <div class="agent-sub-hint">{{ $t('views.agents.hint_sub_llm') }}</div>
+        <n-form-item path="sub_model_name" :label="$t('views.agents.label_sub_model_name')" :show-require-mark="false">
+          <n-input
+            v-model:value="form.sub_model_name"
+            :placeholder="$t('views.agents.placeholder_sub_model_name')"
+          />
+        </n-form-item>
+        <n-form-item path="sub_base_url" :label="$t('views.agents.label_sub_base_url')" :show-require-mark="false">
+          <n-input
+            v-model:value="form.sub_base_url"
+            :placeholder="$t('views.agents.placeholder_base_url')"
+          />
+        </n-form-item>
+        <n-form-item path="sub_api_key" :label="$t('views.agents.label_sub_api_key')" :show-require-mark="false">
+          <n-input
+            v-model:value="form.sub_api_key"
+            type="password"
+            show-password-on="click"
+            :placeholder="
+              hasSubApiKey ? $t('views.agents.placeholder_api_key_edit') : $t('views.agents.placeholder_sub_api_key')
+            "
+          />
+        </n-form-item>
+        <div class="agent-sub-actions">
+          <n-button secondary size="small" :loading="subTesting" @click="onTestSubLlm">
+            {{ $t('views.agents.button_test_sub_llm') }}
+          </n-button>
+          <n-button
+            v-if="agentId && subCustomized"
+            tertiary
+            size="small"
+            @click="onResetSubLlm"
+          >
+            {{ $t('views.agents.button_reset_sub_llm') }}
+          </n-button>
+        </div>
+        <n-alert
+          v-if="subTestOk || subTestMsg"
+          class="agent-sub-test-result"
+          :type="subTestOk ? 'success' : 'error'"
+          :show-icon="true"
+          :bordered="false"
+          :title="subTestOk ? $t('views.agents.msg_sub_test_ok') : undefined"
+          aria-live="polite"
+        >
+          <template v-if="subTestOk && subTestLatency != null">
+            {{ $t('views.agents.msg_sub_test_latency', { n: subTestLatency }) }}
+          </template>
+          <template v-else-if="!subTestOk">
+            {{ subTestMsg }}
+          </template>
+        </n-alert>
+      </div>
+    </section>
   </n-form>
 
   <AgentAvatarCropModal
@@ -159,16 +229,21 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
-import { NButton, NForm, NFormItem, NImage, NInput, NSlider, NSwitch, NUpload } from 'naive-ui'
+import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { NAlert, NButton, NForm, NFormItem, NImage, NInput, NSlider, NSwitch, NUpload } from 'naive-ui'
 import TheIcon from '@/components/icon/TheIcon.vue'
 import AgentAvatarCropModal from '@/views/agents/components/AgentAvatarCropModal.vue'
 import AgentPublishPanel from '@/views/agents/components/AgentPublishPanel.vue'
+import api from '@/api'
+
+const { t } = useI18n()
 
 const props = defineProps({
   form: { type: Object, required: true },
   rules: { type: Object, required: true },
   hasSavedApiKey: { type: Boolean, default: false },
+  hasSubApiKey: { type: Boolean, default: false },
   dialogueOpen: { type: Boolean, default: false },
   advancedOpen: { type: Boolean, default: false },
   avatarPreview: { type: String, default: '' },
@@ -185,6 +260,68 @@ const formInnerRef = ref(null)
 const innerUploadKey = ref(0)
 const cropModalShow = ref(false)
 const cropSourceFile = ref(null)
+
+const subLlmOpen = ref(false)
+const subTesting = ref(false)
+const subTestMsg = ref('')
+const subTestOk = ref(false)
+const subTestLatency = ref(null)
+
+const subCustomized = computed(() => {
+  return (
+    !!String(props.form.sub_model_name || '').trim() ||
+    !!String(props.form.sub_base_url || '').trim() ||
+    !!String(props.form.sub_api_key || '').trim() ||
+    props.hasSubApiKey
+  )
+})
+
+function clearSubTest() {
+  subTestMsg.value = ''
+  subTestOk.value = false
+  subTestLatency.value = null
+}
+
+watch(
+  () => [props.form.sub_model_name, props.form.sub_base_url, props.form.sub_api_key],
+  () => {
+    clearSubTest()
+  }
+)
+
+async function onTestSubLlm() {
+  const modelName = String(props.form.sub_model_name || '').trim()
+  if (!modelName) {
+    window.$message?.warning(t('views.agents.msg_sub_model_required'))
+    return
+  }
+  subTesting.value = true
+  clearSubTest()
+  try {
+    const res = await api.testSubLlm({
+      model_name: modelName,
+      base_url: String(props.form.sub_base_url || '').trim() || null,
+      api_key: String(props.form.sub_api_key || '').trim() || null,
+      agent_id: props.agentId ?? null,
+    })
+    subTestOk.value = true
+    const latency = res?.data?.latency_ms
+    subTestLatency.value = typeof latency === 'number' ? latency : null
+  } catch (e) {
+    subTestOk.value = false
+    subTestMsg.value = e?.message || t('views.agents.msg_sub_test_failed')
+  } finally {
+    subTesting.value = false
+  }
+}
+
+function onResetSubLlm() {
+  props.form.sub_model_name = ''
+  props.form.sub_base_url = ''
+  props.form.sub_api_key = ''
+  clearSubTest()
+  window.$message?.info(t('views.agents.msg_sub_reset_hint'))
+}
 
 function onAvatarUploadChange(options) {
   const f = options.fileList?.[0]?.file
@@ -415,5 +552,27 @@ html.dark .section-header {
   bottom: -4px;
   z-index: 1;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
+.agent-sub-hint {
+  margin-bottom: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--n-text-color-3);
+}
+
+.agent-sub-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.agent-sub-test-result {
+  margin-bottom: 8px;
+}
+
+.agent-sub-test-result :deep(.n-alert-body__content) {
+  word-break: break-all;
 }
 </style>

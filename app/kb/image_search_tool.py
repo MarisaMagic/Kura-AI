@@ -135,7 +135,7 @@ def make_search_knowledge_by_image_tool(
         name="search_knowledge_by_image",
         description=(
             "用「本会话已上传的某张图片」作为查询，在智能体知识库中做以图搜文/以图搜图（多模态向量相似度）。"
-            "图片块 URL 以工具返回的公网/相对路径为准，回答中配图须原样使用返回链接。"
+            "图片块 URL 以工具返回的「图片访问 URL」（/api/v1/media/... 相对路径）为准，回答中配图须原样使用，勿改成 http(s) 绝对地址。"
             "需传入 attachment_id；每轮以图成功检索次数不超过当前会话中图片类附件张数；"
             "与 search_knowledge_base（以文检索）的额度相互独立。"
             "回答中凡引用检索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），让用户可追溯出处。"

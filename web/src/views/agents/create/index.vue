@@ -90,7 +90,7 @@ const advancedOpen = ref(false)
 const draftPersistReady = ref(false)
 
 const form = ref(emptyForm())
-const rules = computed(() => buildAgentFormRules(t, { isEdit: false }))
+const rules = computed(() => buildAgentFormRules(t, { isEdit: false, getForm: () => form.value }))
 
 const avatarPreview = computed(() => {
   if (serverAvatarUrl.value) return serverAvatarUrl.value
@@ -122,7 +122,7 @@ function saveCreateDraft() {
   if (agentId.value) return
   const payload = {
     v: CREATE_DRAFT_VERSION,
-      form: { ...form.value, api_key: '' },
+      form: { ...form.value, api_key: '', sub_api_key: '' },
     dialogueOpen: dialogueOpen.value,
     advancedOpen: advancedOpen.value,
     avatarDataUrl: draftAvatarDataUrl.value || null,
@@ -158,6 +158,7 @@ function loadCreateDraft() {
           ? parsed.form.temperature
           : Number(parsed.form.temperature) || 0.1,
       api_key: '',
+      sub_api_key: '',
     }
     dialogueOpen.value = parsed.dialogueOpen === true
     advancedOpen.value = parsed.advancedOpen === true

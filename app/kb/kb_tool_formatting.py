@@ -12,14 +12,15 @@ from app.utils.signed_media import KIND_KB_IMAGE, sign_media_url
 
 def _kb_image_public_url(stored_relpath: str) -> str:
     """
-    获取图片的公网访问 URL
+    获取图片的同源相对访问 URL（/api/v1/media/...）。
+    使用相对路径以便前端 CSP img-src 'self' 放行；勿拼 PUBLIC_API_BASE 绝对 http 地址。
     :param stored_relpath: 知识库图片表中的相对存储路径
-    :return: 公网访问 URL
+    :return: 带签名的相对 URL
     """
     relpath = (stored_relpath or "").strip().replace("\\", "/")
     if not relpath:
         return ""
-    return sign_media_url(KIND_KB_IMAGE, relpath, absolute=True)
+    return sign_media_url(KIND_KB_IMAGE, relpath, absolute=False)
 
 
 def _kb_image_absolute_fs_path(stored_relpath: str) -> Path:
@@ -94,13 +95,9 @@ def format_knowledge_retrieval_tool_output(
                 formatted.append(f"PostgreSQL mg_kb_images.id: {img_id}")
             formatted.append(f"本地文件已落盘: {'是' if on_disk else '否'}")
             formatted.append(
-                f"图片公网访问 URL（回答中展示图片时必须原样使用该字符串，Markdown 示例: ![]({public_url}) ）: {public_url}"
+                f"图片访问 URL（回答中展示图片时必须原样使用该字符串，不要改成 http(s) 绝对地址；"
+                f"Markdown 示例: ![]({public_url}) ）: {public_url}"
             )
-            if not (getattr(settings, "PUBLIC_API_BASE", None) or "").strip():
-                formatted.append(
-                    "提示：未配置 PUBLIC_API_BASE 时为相对路径；请在 .env 设置 PUBLIC_API_BASE=http://主机:端口 "
-                    "以便模型获得完整 http(s) 链接（前端 Markdown 渲染同样需要可访问的绝对 URL）。"
-                )
 
             image_references.append(
                 {

@@ -201,6 +201,10 @@ async def init_db():
     # aerich 迁移（含 AUTOINCREMENT，且被 .gitignore 忽略），在 PostgreSQL 上不可执行，
     # 故启动不再走 aerich upgrade；新增列由下方 ensure_* 幂等补丁兜底。
     await Tortoise.init(config=settings.TORTOISE_ORM)
+    # 列级补丁须先于 generate_schemas 执行：它会为带 description 的新列生成 COMMENT ON COLUMN
+    # （PG 无 IF EXISTS），旧库缺列时直接报错，事后补丁来不及兜底。
+    # 全新库上表尚不存在，ALTER 失败由 ensure 内 try/except 吞掉，随后由建表覆盖新列。
+    await ensure_user_agent_sub_llm_columns()
     await Tortoise.generate_schemas(safe=True)
     await ensure_user_avatar_column()
     await ensure_user_agent_base_url_column()
@@ -289,6 +293,23 @@ async def ensure_user_agent_mcp_confirm_policy_column() -> None:
         )
     except Exception as e:
         logger.warning("ensure_user_agent_mcp_confirm_policy_column: %s", e)
+
+
+async def ensure_user_agent_sub_llm_columns() -> None:
+    """旧库可能缺少子智能体（打杂模型）配置列；aerich 未覆盖时补齐。"""
+    try:
+        conn = Tortoise.get_connection("default")
+        await conn.execute_query(
+            'ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "sub_model_name" VARCHAR(100)'
+        )
+        await conn.execute_query(
+            'ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "sub_base_url" VARCHAR(512)'
+        )
+        await conn.execute_query(
+            'ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "sub_api_key_ciphertext" TEXT'
+        )
+    except Exception as e:
+        logger.warning("ensure_user_agent_sub_llm_columns: %s", e)
 
 
 async def ensure_readonly_mcp_preset_confirm_policy() -> None:

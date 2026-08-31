@@ -111,9 +111,9 @@ def make_search_knowledge_tool(
         description=(
             "在本智能体「知识库」中检索与用户问题相关的文档片段（多模态：文本 + 图片）。"
             "本回合可检索的文档范围已由系统预先确定，你只需传 query，不要尝试指定文件名或换库。"
-            "图片的存储路径以 PostgreSQL（mg_kb_images.stored_relpath）为准；工具返回中会给出「图片公网访问 URL」。"
-            "回答用户时若需配图，必须使用工具返回的完整 http(s) URL 写入 Markdown 图片语法，与原文字符完全一致；"
-            "不得使用 image://、file://、序号或自拟路径。"
+            "图片的存储路径以 PostgreSQL（mg_kb_images.stored_relpath）为准；工具返回中会给出「图片访问 URL」。"
+            "回答用户时若需配图，必须将工具返回的图片访问 URL 原样写入 Markdown 图片语法（相对路径 /api/v1/media/...，勿改成 http(s) 绝对地址）；"
+            "不得使用 stored_relpath、image://、file://、序号或自拟路径。"
             "回答中凡引用检索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），让用户可追溯出处。"
             "调用约束：同一用户提问轮次内最多成功检索一次；得到工具返回后应直接整合为最终回答，勿重复检索。"
         ),

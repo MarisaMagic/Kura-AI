@@ -17,6 +17,9 @@ export function emptyForm() {
     opening_message: '',
     temperature: 0.1,
     supports_vision: false,
+    sub_model_name: '',
+    sub_base_url: '',
+    sub_api_key: '',
   }
 }
 
@@ -32,7 +35,7 @@ export function dataURLtoBlob(dataurl) {
   return new Blob([u8arr], { type: mime })
 }
 
-export function buildAgentFormRules(t, { isEdit = false } = {}) {
+export function buildAgentFormRules(t, { isEdit = false, getForm = null } = {}) {
   const rules = {
     name: { required: true, message: () => t('views.agents.rule_name'), trigger: ['input', 'blur'] },
     model_name: { required: true, message: () => t('views.agents.rule_model_name'), trigger: ['input', 'blur'] },
@@ -41,6 +44,38 @@ export function buildAgentFormRules(t, { isEdit = false } = {}) {
     rules.api_key = {
       required: true,
       message: () => t('views.agents.rule_api_key'),
+      trigger: ['input', 'blur'],
+    }
+  }
+  // 子智能体（打杂模型）：任一子字段非空即视为自定义，此时模型名称必填
+  rules.sub_model_name = {
+    validator: (_rule, value) => {
+      const f = getForm?.() || {}
+      const customizing =
+        !!String(value || '').trim() ||
+        !!String(f.sub_base_url || '').trim() ||
+        !!String(f.sub_api_key || '').trim()
+      if (customizing && !String(value || '').trim()) {
+        return new Error(t('views.agents.rule_sub_model_name'))
+      }
+      return true
+    },
+    trigger: ['input', 'blur'],
+  }
+  if (!isEdit) {
+    // 创建页无已保存子 Key，自定义子配置时必填；编辑页留空表示保留
+    rules.sub_api_key = {
+      validator: (_rule, value) => {
+        const f = getForm?.() || {}
+        const customizing =
+          !!String(f.sub_model_name || '').trim() ||
+          !!String(f.sub_base_url || '').trim() ||
+          !!String(value || '').trim()
+        if (customizing && !String(value || '').trim()) {
+          return new Error(t('views.agents.rule_sub_api_key'))
+        }
+        return true
+      },
       trigger: ['input', 'blur'],
     }
   }

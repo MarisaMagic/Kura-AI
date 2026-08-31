@@ -21,6 +21,10 @@ class UserAgent(BaseModel, TimestampMixin):
         description="启用后允许会话中的图片附件以多模态方式理解（需模型支持视觉）",
     )
     is_published = fields.BooleanField(default=False, description="已发布（仅共享名单内用户可查看并对话）")
+    # 子智能体（打杂模型）配置：供记忆重写、知识库选档、RAG 打分/改写等辅助任务使用；留空则跟随主配置
+    sub_model_name = fields.CharField(max_length=100, null=True, description="子智能体模型名称（打杂任务）")
+    sub_base_url = fields.CharField(max_length=512, null=True, description="子智能体 Base URL")
+    sub_api_key_ciphertext = fields.TextField(null=True, description="子智能体 API Key 密文")
 
     class Meta:
         table = "user_agent"
