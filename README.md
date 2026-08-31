@@ -64,6 +64,14 @@
 
 ![](/deploy/sample-picture/agent-share-2.png)
 
+### 暗色主题切换
+
+![](/deploy/sample-picture/agent-darkmode.png)
+
+![](/deploy/sample-picture/agent-darkmode-1.png)
+
+![](/deploy/sample-picture/agent-darkmode-2.png)
+
 ---
 
 
