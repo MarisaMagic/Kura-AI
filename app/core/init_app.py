@@ -1,4 +1,3 @@
-from aerich import Command
 from fastapi import FastAPI
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,6 +44,7 @@ def make_middlewares():
                 "/api/v1/base/access_token",
                 "/api/v1/base/register",
                 "/api/v1/base/registration_enabled",
+                "/api/v1/base/health",
                 "/api/v1/base/upload_avatar",
                 "/api/v1/base/update_password",
                 "/api/v1/user/reset_password",
@@ -197,16 +197,11 @@ async def init_apis():
 
 
 async def init_db():
-    command = Command(tortoise_config=settings.TORTOISE_ORM)
-    try:
-        await command.init_db(safe=True)
-    except FileExistsError:
-        pass
-
-    await command.init()
-    # 不在启动时调用 command.migrate()：会对比模型生成迁移，SQLite 对「改列」会报 NotSupportError。
-    # 变更模型请在开发机执行 `aerich migrate` 并提交迁移；启动时只执行已有迁移。
-    await command.upgrade(run_in_transaction=True)
+    # 直接按当前模型建表（IF NOT EXISTS，幂等）。本地 migrations/ 为 SQLite 时代的
+    # aerich 迁移（含 AUTOINCREMENT，且被 .gitignore 忽略），在 PostgreSQL 上不可执行，
+    # 故启动不再走 aerich upgrade；新增列由下方 ensure_* 幂等补丁兜底。
+    await Tortoise.init(config=settings.TORTOISE_ORM)
+    await Tortoise.generate_schemas(safe=True)
     await ensure_user_avatar_column()
     await ensure_user_agent_base_url_column()
     await ensure_user_agent_supports_vision_column()
@@ -216,85 +211,58 @@ async def init_db():
 
 
 async def ensure_user_avatar_column() -> None:
-    """旧库可能缺少 avatar 列；aerich 未覆盖时补齐（SQLite）。"""
+    """旧库可能缺少 avatar 列；aerich 未覆盖时补齐。"""
     try:
-        conn = Tortoise.get_connection("sqlite")
-    except Exception:
-        return
-    try:
-        await conn.execute_query('ALTER TABLE "user" ADD COLUMN "avatar" VARCHAR(255)')
-        logger.info('Added column "user"."avatar"')
+        conn = Tortoise.get_connection("default")
+        await conn.execute_query(
+            'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "avatar" VARCHAR(255)'
+        )
     except Exception as e:
-        msg = str(e).lower()
-        if "duplicate column" in msg or "already exists" in msg:
-            return
-        logger.warning('ensure_user_avatar_column: %s', e)
+        logger.warning("ensure_user_avatar_column: %s", e)
 
 
 async def ensure_user_agent_base_url_column() -> None:
-    """旧库可能缺少 base_url 列；aerich 未覆盖时补齐（SQLite）。"""
+    """旧库可能缺少 base_url 列；aerich 未覆盖时补齐。"""
     try:
-        conn = Tortoise.get_connection("sqlite")
-    except Exception:
-        return
-    try:
-        await conn.execute_query('ALTER TABLE "user_agent" ADD COLUMN "base_url" VARCHAR(512)')
-        logger.info('Added column "user_agent"."base_url"')
+        conn = Tortoise.get_connection("default")
+        await conn.execute_query(
+            'ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "base_url" VARCHAR(512)'
+        )
     except Exception as e:
-        msg = str(e).lower()
-        if "duplicate column" in msg or "already exists" in msg:
-            return
-        logger.warning('ensure_user_agent_base_url_column: %s', e)
+        logger.warning("ensure_user_agent_base_url_column: %s", e)
 
 
 async def ensure_user_agent_supports_vision_column() -> None:
-    """旧库可能缺少 supports_vision 列；aerich 未覆盖时补齐（SQLite）。"""
+    """旧库可能缺少 supports_vision 列；aerich 未覆盖时补齐。"""
     try:
-        conn = Tortoise.get_connection("sqlite")
-    except Exception:
-        return
-    try:
+        conn = Tortoise.get_connection("default")
         await conn.execute_query(
-            'ALTER TABLE "user_agent" ADD COLUMN "supports_vision" INTEGER NOT NULL DEFAULT 0'
+            'ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "supports_vision" BOOL NOT NULL DEFAULT FALSE'
         )
-        logger.info('Added column "user_agent"."supports_vision"')
     except Exception as e:
-        msg = str(e).lower()
-        if "duplicate column" in msg or "already exists" in msg:
-            return
-        logger.warning('ensure_user_agent_supports_vision_column: %s', e)
+        logger.warning("ensure_user_agent_supports_vision_column: %s", e)
 
 
 async def ensure_user_agent_is_published_column() -> None:
-    """旧库可能缺少 is_published 列；aerich 未覆盖时补齐（SQLite）。"""
+    """旧库可能缺少 is_published 列；aerich 未覆盖时补齐。"""
     try:
-        conn = Tortoise.get_connection("sqlite")
-    except Exception:
-        return
-    try:
+        conn = Tortoise.get_connection("default")
         await conn.execute_query(
-            'ALTER TABLE "user_agent" ADD COLUMN "is_published" INTEGER NOT NULL DEFAULT 0'
+            'ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "is_published" BOOL NOT NULL DEFAULT FALSE'
         )
-        logger.info('Added column "user_agent"."is_published"')
     except Exception as e:
-        msg = str(e).lower()
-        if "duplicate column" in msg or "already exists" in msg:
-            return
-        logger.warning('ensure_user_agent_is_published_column: %s', e)
+        logger.warning("ensure_user_agent_is_published_column: %s", e)
 
 
 async def ensure_user_agent_share_table() -> None:
-    """旧库可能缺少 user_agent_share 表；aerich 未覆盖时补齐（SQLite）。"""
+    """旧库可能缺少 user_agent_share 表；aerich 未覆盖时补齐。"""
     try:
-        conn = Tortoise.get_connection("sqlite")
-    except Exception:
-        return
-    try:
+        conn = Tortoise.get_connection("default")
         await conn.execute_query(
             '''CREATE TABLE IF NOT EXISTS "user_agent_share" (
-    "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-    "created_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TIMESTAMP NOT NULL  DEFAULT CURRENT_TIMESTAMP,
+    "id" BIGSERIAL PRIMARY KEY,
+    "created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updated_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "agent_id" BIGINT NOT NULL REFERENCES "user_agent" ("id") ON DELETE CASCADE,
     "user_id" BIGINT NOT NULL REFERENCES "user" ("id") ON DELETE CASCADE
 )'''
@@ -313,20 +281,13 @@ async def ensure_user_agent_share_table() -> None:
 
 
 async def ensure_user_agent_mcp_confirm_policy_column() -> None:
-    """旧库可能缺少 confirm_policy 列；aerich 未覆盖时补齐（SQLite）。"""
+    """旧库可能缺少 confirm_policy 列；aerich 未覆盖时补齐。"""
     try:
-        conn = Tortoise.get_connection("sqlite")
-    except Exception:
-        return
-    try:
+        conn = Tortoise.get_connection("default")
         await conn.execute_query(
-            'ALTER TABLE "user_agent_mcp_server" ADD COLUMN "confirm_policy" VARCHAR(16) NOT NULL DEFAULT \'auto\''
+            "ALTER TABLE \"user_agent_mcp_server\" ADD COLUMN IF NOT EXISTS \"confirm_policy\" VARCHAR(16) NOT NULL DEFAULT 'auto'"
         )
-        logger.info('Added column "user_agent_mcp_server"."confirm_policy"')
     except Exception as e:
-        msg = str(e).lower()
-        if "duplicate column" in msg or "already exists" in msg:
-            return
         logger.warning("ensure_user_agent_mcp_confirm_policy_column: %s", e)
 
 

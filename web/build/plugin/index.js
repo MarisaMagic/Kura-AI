@@ -22,9 +22,10 @@ export function createVitePlugins(viteEnv, isBuild) {
   }
 
   if (isBuild) {
+    const openVisualizer = process.env.CI !== 'true' && process.env.DOCKER_BUILD !== 'true'
     plugins.push(
       visualizer({
-        open: true,
+        open: openVisualizer,
         gzipSize: true,
         brotliSize: true,
       }),

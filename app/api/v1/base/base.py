@@ -20,6 +20,11 @@ from app.utils.password import get_password_hash, validate_password_strength, ve
 router = APIRouter()
 
 
+@router.get("/health", summary="存活检查", tags=["基础模块"])
+async def health():
+    return {"status": "ok"}
+
+
 @router.get("/registration_enabled", summary="是否开放自助注册", tags=["基础模块"])
 async def registration_enabled():
     return Success(data={"enabled": settings.ALLOW_PUBLIC_REGISTRATION})

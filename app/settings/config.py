@@ -4,6 +4,20 @@ import typing
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _tortoise_pg_url(raw: str) -> str:
+    """把 SQLAlchemy 风格连接串归一为 Tortoise/asyncpg 的 postgres:// URL。"""
+    for prefix in (
+        "postgresql+psycopg2://",
+        "postgresql+psycopg://",
+        "postgresql+asyncpg://",
+        "postgresql://",
+        "postgres://",
+    ):
+        if raw.startswith(prefix):
+            return "postgres://" + raw[len(prefix) :]
+    raise ValueError(f"无法识别的 PostgreSQL 连接串: {raw!r}")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, ".env")),
@@ -46,7 +60,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str
     # 首次启动且库中无用户时创建的管理员（密码勿提交仓库；至少 8 位且含字母与数字）
     INITIAL_ADMIN_USERNAME: str = "admin"
-    INITIAL_ADMIN_EMAIL: str = "admin@localhost"
+    INITIAL_ADMIN_EMAIL: str = "admin@example.com"
     INITIAL_ADMIN_PASSWORD: typing.Optional[str] = None
     # 是否开放邮箱自助注册（公网务必 false；本机开发可在 .env 设 true）
     ALLOW_PUBLIC_REGISTRATION: bool = False
@@ -73,73 +87,10 @@ class Settings(BaseSettings):
     # 用户智能体 API Key 字段级加密：优先设置环境变量 API_KEY_ENCRYPTION_KEY（Fernet 密钥，见 cryptography.fernet.Fernet.generate_key()）
     # 未设置时由 SECRET_KEY 派生（仅适合开发；生产请显式配置独立密钥）
     API_KEY_ENCRYPTION_KEY: typing.Optional[str] = None
-    TORTOISE_ORM: dict = {
-        "connections": {
-            # SQLite configuration
-            "sqlite": {
-                "engine": "tortoise.backends.sqlite",
-                "credentials": {"file_path": f"{BASE_DIR}/db.sqlite3"},  # Path to SQLite database file
-            },
-            # MySQL/MariaDB configuration
-            # Install with: tortoise-orm[asyncmy]
-            # "mysql": {
-            #     "engine": "tortoise.backends.mysql",
-            #     "credentials": {
-            #         "host": "localhost",  # Database host address
-            #         "port": 3306,  # Database port
-            #         "user": "yourusername",  # Database username
-            #         "password": "yourpassword",  # Database password
-            #         "database": "yourdatabase",  # Database name
-            #     },
-            # },
-            # PostgreSQL configuration
-            # Install with: tortoise-orm[asyncpg]
-            # "postgres": {
-            #     "engine": "tortoise.backends.asyncpg",
-            #     "credentials": {
-            #         "host": "localhost",  # Database host address
-            #         "port": 5432,  # Database port
-            #         "user": "yourusername",  # Database username
-            #         "password": "yourpassword",  # Database password
-            #         "database": "yourdatabase",  # Database name
-            #     },
-            # },
-            # MSSQL/Oracle configuration
-            # Install with: tortoise-orm[asyncodbc]
-            # "oracle": {
-            #     "engine": "tortoise.backends.asyncodbc",
-            #     "credentials": {
-            #         "host": "localhost",  # Database host address
-            #         "port": 1433,  # Database port
-            #         "user": "yourusername",  # Database username
-            #         "password": "yourpassword",  # Database password
-            #         "database": "yourdatabase",  # Database name
-            #     },
-            # },
-            # SQLServer configuration
-            # Install with: tortoise-orm[asyncodbc]
-            # "sqlserver": {
-            #     "engine": "tortoise.backends.asyncodbc",
-            #     "credentials": {
-            #         "host": "localhost",  # Database host address
-            #         "port": 1433,  # Database port
-            #         "user": "yourusername",  # Database username
-            #         "password": "yourpassword",  # Database password
-            #         "database": "yourdatabase",  # Database name
-            #     },
-            # },
-        },
-        "apps": {
-            "models": {
-                "models": ["app.models", "aerich.models"],
-                "default_connection": "sqlite",
-            },
-        },
-        "use_tz": False,  # Whether to use timezone-aware datetimes
-        "timezone": "Asia/Shanghai",  # Timezone setting
-    }
     DATETIME_FORMAT: str = "%Y-%m-%d %H:%M:%S"
 
+    # 管理端（Tortoise ORM）PostgreSQL 连接串；未设置时回落到 DATABASE_URL
+    ADMIN_DATABASE_URL: typing.Optional[str] = None
     # 智能体对话：PostgreSQL（可与主库分离；未设置 CHAT_DATABASE_URL 时使用 DATABASE_URL）
     CHAT_DATABASE_URL: typing.Optional[str] = None
     DATABASE_URL: typing.Optional[str] = None
@@ -279,6 +230,29 @@ class Settings(BaseSettings):
                 "请配置 CHAT_DATABASE_URL 或 DATABASE_URL（PostgreSQL 连接串）用于智能体聊天存储。"
             )
         return raw
+
+    @property
+    def admin_database_url(self) -> str:
+        raw = (self.ADMIN_DATABASE_URL or self.DATABASE_URL or "").strip()
+        if not raw:
+            raise ValueError(
+                "请配置 ADMIN_DATABASE_URL 或 DATABASE_URL（PostgreSQL 连接串）用于管理端存储。"
+            )
+        return raw
+
+    @property
+    def TORTOISE_ORM(self) -> dict:
+        return {
+            "connections": {"default": _tortoise_pg_url(self.admin_database_url)},
+            "apps": {
+                "models": {
+                    "models": ["app.models", "aerich.models"],
+                    "default_connection": "default",
+                },
+            },
+            "use_tz": False,  # Whether to use timezone-aware datetimes
+            "timezone": "Asia/Shanghai",  # Timezone setting
+        }
 
 
 settings = Settings()

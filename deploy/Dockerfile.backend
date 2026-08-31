@@ -1,0 +1,30 @@
+FROM python:3.11-slim-bookworm
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl \
+        libmagic1 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt deploy/filter_requirements.py /tmp/
+# pywin32 / win32_setctime 仅 Windows；并兼容 UTF-16 的 requirements.txt
+RUN python /tmp/filter_requirements.py \
+    && pip install --no-cache-dir -r /tmp/requirements-linux.txt \
+        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    && python -c "import uvicorn, fastapi" \
+    && rm -f /tmp/requirements.txt /tmp/requirements-linux.txt /tmp/filter_requirements.py
+
+COPY app ./app
+COPY run.py ./
+
+# 管理端数据在 PostgreSQL；/app/data 仅存头像/文档/附件等文件
+RUN mkdir -p /app/data /app/app/logs
+
+EXPOSE 9999
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=40s --retries=5 \
+    CMD curl -fsS http://127.0.0.1:9999/api/v1/base/health || exit 1
+
+CMD ["python", "run.py"]

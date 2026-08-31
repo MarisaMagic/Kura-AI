@@ -1,0 +1,51 @@
+# 一键部署：复用 docker-compose.yml 的数据库，并启动后端 + Nginx 前端。
+# 用法（项目根目录，需先有 .env）:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# 浏览器打开 http://localhost:${WEB_PORT:-8088}
+
+include:
+  - path: docker-compose.yml
+
+services:
+  backend:
+    container_name: kura-ai-backend
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.backend
+    env_file:
+      - .env
+    environment:
+      # 覆盖本机开发用的 127.0.0.1 地址，改为 Docker 网络内主机名
+      UVICORN_HOST: "0.0.0.0"
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/langchain_app
+      # 管理端（Tortoise）连接；默认与 DATABASE_URL 同库，可在 .env 覆盖以分离
+      ADMIN_DATABASE_URL: ${ADMIN_DATABASE_URL:-postgresql+psycopg2://postgres:postgres@postgres:5432/langchain_app}
+      REDIS_URL: redis://redis:6379/0
+      MILVUS_HOST: standalone
+      MILVUS_PORT: "19530"
+      AUTH_TRUST_X_FORWARDED_FOR: "true"
+      # 同域反代时留空；公网可在 .env 设 PROD_PUBLIC_API_BASE=https://your.domain
+      PUBLIC_API_BASE: ${PROD_PUBLIC_API_BASE:-}
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes/app-data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      standalone:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    container_name: kura-ai-frontend
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.frontend
+    ports:
+      - "${WEB_PORT:-8088}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped

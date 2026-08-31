@@ -67,7 +67,7 @@
 ---
 
 
-## 本地启动项目
+## 部署方式 1: 本地启动项目（适用于开发者）
 
 ### 后端
 
@@ -196,6 +196,7 @@ docker compose stop
 
 ![](deploy\sample-picture\docker-compose-stop.png)
 
+二次开发：用上面的命令只起数据库，再分别 `python run.py` 与 `pnpm dev`。若要把前后端也打进镜像、一条命令访问网页，见下方「快速一键部署」。
 
 ---
 
@@ -213,7 +214,7 @@ DEBUG=false
 DEBUG_AGENT_KB_PROMPT=false
 # 首次启动且库中无用户时创建的管理员（密码勿提交仓库；至少 8 位且含字母与数字）
 INITIAL_ADMIN_USERNAME=admin
-INITIAL_ADMIN_EMAIL=admin@localhost
+INITIAL_ADMIN_EMAIL=admin@example.com
 INITIAL_ADMIN_PASSWORD=
 # 是否开放邮箱自助注册（本机开发可 true；公网务必 false）
 ALLOW_PUBLIC_REGISTRATION=false
@@ -245,6 +246,8 @@ MILVUS_COLLECTION=kura_ai_kb
 
 # ===== Database / Cache =====
 DATABASE_URL=postgresql+psycopg2://postgres:postgres@127.0.0.1:5433/langchain_app
+# 管理端（用户/角色/菜单/智能体配置）连接；未设置时复用 DATABASE_URL
+# ADMIN_DATABASE_URL=postgresql+psycopg2://postgres:postgres@127.0.0.1:5433/langchain_app
 REDIS_URL=redis://127.0.0.1:6379/0
 
 CHAT_MEMORY_MILVUS_RECREATE_ON_INIT=false
@@ -268,7 +271,61 @@ WEB_SEARCH_BOCHA_API_KEY=
 WEB_SEARCH_BOCHA_ENDPOINT=https://api.bochaai.com/v1/web-search
 ```
 
-### 公网部署清单
+## 部署方式2: 一键快速部署（Docker）
+
+### 运行命令
+
+前置：已安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，并已按上一节准备好根目录 `.env`（至少填写 `SECRET_KEY`、`INITIAL_ADMIN_PASSWORD`、`EMBEDDING_API_KEY`）。
+
+在项目根目录运行命令：
+
+```sh
+# 首次或代码有变更时加 --build
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+启动成功：
+
+![](deploy\sample-picture\docker-compose-prod.png)
+
+启动成功后浏览器打开 **http://localhost:8088** 即可访问（端口可用 `.env` 里的 `WEB_PORT` 更改）。
+
+---
+
+### 常用命令与说明
+
+一键快速部署通过把 Vue 打成静态文件由 Nginx 托管，FastAPI 单独一个容器；Nginx 将 `/api/v1` 反代到后端（和本地 `pnpm dev` 的 Vite 代理同一思路）。数据库仍用现有 `docker-compose.yml`。
+
+首次构建会拉 Python / Node / Milvus 等镜像，并执行 `pnpm build` 与 `pip install`，可能需要十几分钟。之后再启动会快很多。
+
+常用命令：
+
+```sh
+# 查看状态
+docker compose -f docker-compose.prod.yml ps
+
+# 只停前后端，数据库继续跑（方便切回本地 python / pnpm 开发）
+docker compose -f docker-compose.prod.yml stop backend frontend
+
+# 停止全部（含数据库）
+docker compose -f docker-compose.prod.yml stop
+
+# 看后端日志
+docker compose -f docker-compose.prod.yml logs -f backend
+```
+
+说明：
+
+- 已在跑 `docker compose up -d`（仅数据库）时，再执行上面的 prod 命令只会补起 `backend` / `frontend`，数据目录共用 `volumes/`。
+- 容器内会覆盖 `.env` 里的本机地址：`DATABASE_URL` / `REDIS_URL` / `MILVUS_HOST` 改为 Docker 服务名，`UVICORN_HOST=0.0.0.0`。本机开发不受影响。
+- 后端不对外暴露 9999；浏览器只访问 Nginx 的 `WEB_PORT`。
+- 公网请把 `PROD_PUBLIC_API_BASE` 设为站点根地址（如 `https://your.domain`），并继续核对下面的清单。
+
+相关文件：`deploy/Dockerfile.backend`、`deploy/Dockerfile.frontend`、`deploy/nginx.conf`、`docker-compose.prod.yml`。
+
+
+
+## 公网部署清单
 
 上线前请核对（本仓库默认面向本机开发）：
 
@@ -276,7 +333,7 @@ WEB_SEARCH_BOCHA_ENDPOINT=https://api.bochaai.com/v1/web-search
 - `ALLOW_PUBLIC_REGISTRATION=false`
 - `DOCS_ENABLED=false`
 - `ALLOW_PRIVATE_UPSTREAM_URLS=false`
-- `UVICORN_HOST=127.0.0.1`，前面用 Nginx/Caddy 做 HTTPS 反代
+- `UVICORN_HOST=127.0.0.1`，前面用 Nginx/Caddy 做 HTTPS 反代（`docker-compose.prod.yml` 已在容器内用 Nginx 反代，且不把 9999 映射到宿主机）
 - `AUTH_TRUST_X_FORWARDED_FOR` 仅在**可信**反代正确设置 `X-Forwarded-For` 后开启
 - 生产单独配置 `API_KEY_ENCRYPTION_KEY`，不要只靠 `SECRET_KEY` 派生
 - 公网可将 `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` 改为 `1440`
