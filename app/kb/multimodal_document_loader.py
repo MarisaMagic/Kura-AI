@@ -92,6 +92,16 @@ def _load_excel_pages(file_path: str) -> list[_SheetPage]:
     return pages
 
 
+def _load_text_pages(file_path: str) -> list[_SheetPage]:
+    """
+    读取 TXT / Markdown 纯文本为单个"页"（page=0），沿用现有三级分块。
+    :param file_path: 文本文件路径
+    :return: _SheetPage 列表；空文件返回空列表
+    """
+    text = Path(file_path).read_bytes().decode("utf-8", errors="replace").strip()
+    return [_SheetPage(text, 0)] if text else []
+
+
 class MultimodalDocumentLoader:
     def __init__(self, chunk_size: int = 900, chunk_overlap: int = 90) -> None:
         """
@@ -805,6 +815,11 @@ class MultimodalDocumentLoader:
             # 逐 sheet 转 Markdown 表格，sheet 序号作 page_number
             raw_docs = _load_excel_pages(file_path)
             images = []  # Excel 暂不支持图片提取
+        elif file_lower.endswith((".txt", ".md")):
+            doc_type = "Text"
+            # 纯文本/Markdown 整篇读入为单页，走现有三级分块
+            raw_docs = _load_text_pages(file_path)
+            images = []  # 纯文本无图片可提取
         else:
             raise ValueError(f"不支持的文件类型: {filename}")
 

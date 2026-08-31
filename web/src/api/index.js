@@ -45,7 +45,7 @@ export default {
   // user agents
   getUserAgentList: (params = {}) => request.get('/user-agent/list', { params }),
   getSharedAgentList: (params = {}) => request.get('/user-agent/shared', { params }),
-  getUserAgent: (params = {}) => request.get('/user-agent/get', { params }),
+  getUserAgent: (params = {}) => request.get('/user-agent/get', { params, timeout: 30000 }),
   createUserAgent: (data = {}) => request.post('/user-agent/create', data),
   updateUserAgent: (data = {}) => request.post('/user-agent/update', data),
   /** 子智能体（打杂模型）连通性测试；错误由调用方自行展示 */
@@ -109,7 +109,9 @@ export default {
   touchRecentAgent: (params = {}) =>
     request.post('/user-agent/recent_agents/touch', null, { params }),
   /** 知识库（DependAuth） */
-  getKbDocuments: (params = {}) => request.get('/user-agent/kb/documents', { params }),
+  // KB 页请求统一 30s：并发处理文档时 worker 线程抢占事件循环，默认 12s 会误报超时
+  getKbDocuments: (params = {}) =>
+    request.get('/user-agent/kb/documents', { params, timeout: 30000 }),
   /**
    * 上传知识库文档：立即返回 data.task_id（后台线程处理），进度用 getKbUploadStatus 轮询。
    * timeout: 0 关闭 12s 全局超时（大文件传输不受限）；onUploadProgress 用于上传传输进度。
@@ -123,10 +125,10 @@ export default {
     }),
   /** 查询知识库上传任务进度 */
   getKbUploadStatus: (params = {}, config = {}) =>
-    request.get('/user-agent/kb/upload/status', { params, ...config }),
+    request.get('/user-agent/kb/upload/status', { params, timeout: 30000, ...config }),
   /** 取消知识库上传任务 */
   cancelKbUploadTask: (params = {}, config = {}) =>
-    request.post('/user-agent/kb/upload/cancel', null, { params, ...config }),
+    request.post('/user-agent/kb/upload/cancel', null, { params, timeout: 30000, ...config }),
   deleteKbDocument: ({ agent_id, filename }) =>
     request.delete('/user-agent/kb/document', { params: { agent_id, filename } }),
   /** MCP 服务配置（DependAuth，仅智能体属主） */

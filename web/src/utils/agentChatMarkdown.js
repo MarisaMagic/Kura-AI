@@ -13,7 +13,9 @@ const md = new MarkdownIt({
   highlight(str, lang) {
     if (lang && hljs.getLanguage(lang)) {
       try {
-        return `<pre class="hljs"><code>${hljs.highlight(str, { language: lang, ignoreIllegals: true }).value}</code></pre>`
+        return `<pre class="hljs"><code>${
+          hljs.highlight(str, { language: lang, ignoreIllegals: true }).value
+        }</code></pre>`
       } catch {
         /* ignore */
       }
@@ -85,7 +87,9 @@ export function rewriteMediaUrlsInText(text, sources) {
   let out = String(text).replace(ABS_MEDIA_URL_RE, (_, path) => path)
   const fallback = firstMediaImageUrl(sources)
   if (!fallback) return out
-  const hasValidImg = new RegExp(`!\\[[^\\]]*\\]\\(\\s*${MEDIA_PATH_RE.source}\\s*\\)`, 'i').test(out)
+  const hasValidImg = new RegExp(`!\\[[^\\]]*\\]\\(\\s*${MEDIA_PATH_RE.source}\\s*\\)`, 'i').test(
+    out
+  )
   if (hasValidImg) return out
   let replaced = false
   out = out.replace(MD_IMG_LINE, (line, indent, alt, inner) => {

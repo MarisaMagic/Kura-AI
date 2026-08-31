@@ -51,7 +51,7 @@ async def kb_upload(
     raw_name = file.filename or ""
     display = kb_service.normalize_display_filename(raw_name)
     if not kb_service.allowed_upload_extension(display):
-        return Fail(code=400, msg="仅支持 PDF、Word、Excel 文档")
+        return Fail(code=400, msg="仅支持 PDF、Word、Excel、TXT、Markdown 文档")
     if not (settings.EMBEDDING_API_KEY or "").strip():
         return Fail(code=400, msg="未配置 EMBEDDING_API_KEY，无法生成向量")
     content = await file.read()

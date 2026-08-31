@@ -53,12 +53,17 @@ def normalize_display_filename(raw: str) -> str:
 
 def allowed_upload_extension(filename: str) -> bool:
     """
-    允许上传的文件扩展名, 支持 PDF、Word、Excel 文档
+    允许上传的文件扩展名, 支持 PDF、Word、Excel、TXT、Markdown 文档
     :param filename: 文件名
     :return: 是否允许上传
     """
     fl = filename.lower()
-    return fl.endswith(".pdf") or fl.endswith((".docx", ".doc")) or fl.endswith((".xlsx", ".xls"))
+    return (
+        fl.endswith(".pdf")
+        or fl.endswith((".docx", ".doc"))
+        or fl.endswith((".xlsx", ".xls"))
+        or fl.endswith((".txt", ".md"))
+    )
 
 
 def purge_kb_for_scope(kb_scope: str, user_id: int, agent_id: int) -> None:
@@ -272,7 +277,7 @@ def run_ingest_pipeline_sync(
     report = progress_cb or (lambda stage, done, total: None)
 
     if not allowed_upload_extension(display_filename):
-        raise ValueError("仅支持 PDF、Word、Excel 文档")
+        raise ValueError("仅支持 PDF、Word、Excel、TXT、Markdown 文档")
     if not (settings.EMBEDDING_API_KEY or "").strip():
         raise ValueError("未配置 EMBEDDING_API_KEY，无法生成向量")
 

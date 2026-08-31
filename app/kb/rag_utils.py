@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from collections import defaultdict
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Tuple
 
 import requests
@@ -73,13 +75,47 @@ LEAF_RETRIEVE_LEVEL = int(settings.LEAF_RETRIEVE_LEVEL or 3)
 
 def _rerank_endpoint() -> str:
     """
-    获取 rerank 端点
+    获取 rerank 端点（DashScope 原生协议）。
+    RERANK_BINDING_HOST 填完整路径时原样使用；填基础地址（.../api/v1）时补全服务路径。
     :return: rerank 端点
     """
     host = (getattr(settings, "RERANK_BINDING_HOST", None) or "").strip().rstrip("/") # 获取 rerank 绑定主机
     if not host:
         return ""
-    return host if host.endswith("/v1/rerank") else f"{host}/v1/rerank"
+    if "services/rerank" in host:
+        return host
+    if host.endswith("/api/v1"):
+        return f"{host}/services/rerank/text-rerank/text-rerank"
+    return host
+
+
+def _kb_image_data_uri(doc: dict) -> str:
+    """
+    将图片块的本地文件读为 base64 Data URI（DashScope 多模态 rerank 的 image 输入）。
+    仅 jpeg/png 参与；文件缺失、超限或非支持格式时返回空串（该图不参与重排）。
+    :param doc: 图片块文档
+    :return: data:image/{fmt};base64,... 或空串
+    """
+    meta = doc.get("image_metadata") or {}
+    rel = str(meta.get("stored_relpath") or "").strip().replace("\\", "/")
+    if not rel:
+        return ""
+    fmt = str(meta.get("format") or Path(rel).suffix.lstrip(".") or "").lower()
+    if fmt == "jpg":
+        fmt = "jpeg"
+    if fmt not in ("jpeg", "png"):
+        return ""
+    path = Path(settings.USER_AGENT_KB_IMAGES_ROOT) / rel
+    try:
+        if not path.is_file():
+            return ""
+        max_bytes = max(1, int(getattr(settings, "RERANK_MAX_IMAGE_BYTES", 4 * 1024 * 1024) or 0))
+        raw = path.read_bytes()
+        if len(raw) > max_bytes:
+            return ""
+    except OSError:
+        return ""
+    return f"data:image/{fmt};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 def _merge_to_parent_level(docs: List[dict], threshold: int = 2) -> Tuple[List[dict], int]:
@@ -321,8 +357,9 @@ def _rerank_documents(
     skip_rerank: bool = False,
 ) -> Tuple[List[dict], Dict[str, Any]]:
     """
-    重新排序文档, 使用 Rerank 模型对文档进行重新排序。
-    注意：图片块的 text 字段为空，需要特殊处理。
+    重新排序文档, 使用 DashScope 多模态 Rerank 模型（如 qwen3-vl-rerank）对文本+图片统一排序。
+    图片块以本地文件 base64 Data URI 参与重排；读取失败/超限的图片块不参与，按向量分排在已重排结果之后。
+    rerank 成功后用 relevance_score 覆盖 doc.score（原向量分移入 vector_score），保证下游 Auto-merge / 图片槽位按重排分排序。
     :param return_cap: 本阶段返回条数上限（可大于最终 top_k，便于后续 merge 与图片槽位截断）
     :param include_images: 无图片语义时可 False（当前仅写入 meta）
     :param skip_rerank: 以图检索等场景无自然语言 query 时跳过 rerank，仅按向量分排序
@@ -333,16 +370,17 @@ def _rerank_documents(
     # 分离文本块和图片块
     text_docs = [doc for doc in docs if doc.get("content_type") == "text"]
     image_docs = [doc for doc in docs if doc.get("content_type") == "image"]
-    
-    # 只对文本块进行 rerank（图片块没有文本内容）
+
+    # 文本块加 rrf_rank（供调用方追溯召回顺序）
     if text_docs:
         docs_with_rank = [{**doc, "rrf_rank": i} for i, doc in enumerate(text_docs, 1)] # 添加 rrf_rank 字段
     else:
         docs_with_rank = []
-    
-    rm = getattr(settings, "RERANK_MODEL", None)
-    rk = getattr(settings, "RERANK_API_KEY", None)
-    rh = getattr(settings, "RERANK_BINDING_HOST", None)
+
+    rm = (getattr(settings, "RERANK_MODEL", None) or "").strip()
+    rk = (getattr(settings, "RERANK_API_KEY", None) or "").strip()
+    rh = (getattr(settings, "RERANK_BINDING_HOST", None) or "").strip()
+    include_img = include_images and bool(getattr(settings, "RERANK_INCLUDE_IMAGES", True))
     meta: Dict[str, Any] = {
         "rerank_enabled": bool(rm and rk and rh),
         "rerank_applied": False,
@@ -353,50 +391,83 @@ def _rerank_documents(
         "text_count": len(text_docs),
         "image_count": len(image_docs),
         "include_images": include_images,
+        "rerank_include_images": include_img,
         "return_cap": return_cap,
         "rerank_below_min": False,
     }
-    
-    if skip_rerank:
+
+    def _fallback_by_vector_score() -> Tuple[List[dict], Dict[str, Any]]:
+        """rerank 不可用时的兜底：保持原行为，按向量分排序。"""
         final_docs = docs_with_rank + image_docs
         final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-        meta["rerank_skipped"] = "image_query"
         return final_docs[:return_cap], meta
 
-    # 如果没有文本块或有文本块但 rerank 未配置，直接返回
-    if not docs_with_rank or not meta["rerank_enabled"]:
-        # 合并回图片块（保持原始顺序）
-        final_docs = docs_with_rank + image_docs
-        # 按原始分数排序
-        final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-        return final_docs[:return_cap], meta
+    if skip_rerank:
+        meta["rerank_skipped"] = "image_query"
+        return _fallback_by_vector_score()
+
+    # rerank 未配置或无文本块可排时，按向量分兜底
+    if not meta["rerank_enabled"] or not docs_with_rank:
+        return _fallback_by_vector_score()
+
+    # 组装多模态候选：文本块 +（可选）可读取的图片块；按向量分截断到单次送排上限
+    max_candidates = max(1, int(getattr(settings, "RERANK_MAX_CANDIDATES", 30) or 30))
+    candidates: List[dict] = list(docs_with_rank)
+    excluded_images: List[dict] = []
+    if include_img:
+        for doc in image_docs:
+            data_uri = _kb_image_data_uri(doc)
+            if data_uri:
+                candidates.append({**doc, "_rerank_image_uri": data_uri})
+            else:
+                excluded_images.append(doc)
+    else:
+        excluded_images = list(image_docs)
+    candidates.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+    candidates = candidates[:max_candidates]
+
+    documents: List[dict] = []
+    for doc in candidates:
+        if doc.get("content_type") == "image":
+            documents.append({"image": doc["_rerank_image_uri"]})
+        else:
+            documents.append({"text": doc.get("text", "") or ""})
 
     payload = {
         "model": rm,
-        "query": query,
-        "documents": [doc.get("text", "") for doc in docs_with_rank],
-        "top_n": min(return_cap, len(docs_with_rank)),
-        "return_documents": False,
+        "input": {
+            "query": {"text": query},
+            "documents": documents,
+        },
+        "parameters": {
+            "top_n": min(return_cap, len(candidates)),
+            "return_documents": False,
+        },
     }
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {rk}"}
+    timeout = max(5, int(getattr(settings, "RERANK_TIMEOUT_SECONDS", 15) or 15))
     try:
         meta["rerank_applied"] = True
-        response = requests.post(meta["rerank_endpoint"], headers=headers, json=payload, timeout=15)
+        response = requests.post(meta["rerank_endpoint"], headers=headers, json=payload, timeout=timeout)
         if response.status_code >= 400:
-            meta["rerank_error"] = f"HTTP {response.status_code}: {response.text}"
-            # 合并回图片块
-            final_docs = docs_with_rank + image_docs
-            final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-            return final_docs[:return_cap], meta
-        items = response.json().get("results", [])
-        reranked = []
+            meta["rerank_error"] = f"HTTP {response.status_code}: {response.text[:500]}"
+            return _fallback_by_vector_score()
+        items = (response.json().get("output") or {}).get("results") or []
+        reranked: List[dict] = []
         for item in items:
             idx = item.get("index")
-            if isinstance(idx, int) and 0 <= idx < len(docs_with_rank):
-                doc = dict(docs_with_rank[idx])
+            if isinstance(idx, int) and 0 <= idx < len(candidates):
+                doc = dict(candidates[idx])
+                doc.pop("_rerank_image_uri", None)
                 sc = item.get("relevance_score")
                 if sc is not None:
+                    # relevance_score 覆盖 score，使下游排序/展示统一使用重排分
+                    doc["vector_score"] = doc.get("score")
                     doc["rerank_score"] = sc
+                    try:
+                        doc["score"] = float(sc)
+                    except (TypeError, ValueError):
+                        pass
                 reranked.append(doc)
         if reranked:
             # rerank 分数阈值门控（可选）：最高分低于 RERANK_MIN_SCORE 时标记不达标，供上层走「无相关资料」路径
@@ -410,21 +481,15 @@ def _rerank_documents(
                 except (TypeError, ValueError):
                     meta["max_rerank_score"] = None
             meta["rerank_below_min"] = below_min
-            # 合并回图片块
-            final_docs = reranked + image_docs
-            final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+            # 保持 rerank 返回顺序（API 按 relevance_score 降序）；未参与重排的图片块按向量分排在末尾
+            excluded_images.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+            final_docs = reranked + excluded_images
             return final_docs[:return_cap], meta
         meta["rerank_error"] = "empty_rerank_results"
-        # 合并回图片块
-        final_docs = docs_with_rank + image_docs
-        final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-        return final_docs[:return_cap], meta
+        return _fallback_by_vector_score()
     except (requests.RequestException, json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
-        meta["rerank_error"] = str(e)
-        # 合并回图片块
-        final_docs = docs_with_rank + image_docs
-        final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-        return final_docs[:return_cap], meta
+        meta["rerank_error"] = str(e)[:500]
+        return _fallback_by_vector_score()
 
 
 def _chat_from_config(llm_config: dict | None, temperature: float = 0.2):

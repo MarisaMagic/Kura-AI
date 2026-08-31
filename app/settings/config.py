@@ -182,6 +182,19 @@ class Settings(BaseSettings):
     KB_GRADE_REFUSAL_ENABLED: bool = True
     # Rerank 分数阈值：最高 relevance_score 低于该值时按「知识库无相关资料」处理；None=禁用（默认）
     RERANK_MIN_SCORE: typing.Optional[float] = None
+    # ===== 知识库重排（DashScope qwen3-vl-rerank，多模态；三者皆配置才启用，否则跳过 rerank）=====
+    RERANK_MODEL: str = ""
+    RERANK_API_KEY: str = ""
+    # 完整端点（.../services/rerank/text-rerank/text-rerank）或基础地址（.../api/v1，自动补全路径）
+    RERANK_BINDING_HOST: str = ""
+    # 单次 rerank HTTP 超时（秒）
+    RERANK_TIMEOUT_SECONDS: int = 15
+    # 图片块是否以 base64 Data URI 参与多模态重排；False 时仅文本块参与
+    RERANK_INCLUDE_IMAGES: bool = True
+    # 单次送排文档数上限（含图片，控制成本与延迟）
+    RERANK_MAX_CANDIDATES: int = 30
+    # 单张图片参与重排的体积上限（base64 编码前字节数），超限则该图不参与重排
+    RERANK_MAX_IMAGE_BYTES: int = 4 * 1024 * 1024
 
     # Auto-merge / 叶子层（与 SuperMew 一致）
     AUTO_MERGE_ENABLED: bool = True
