@@ -67,9 +67,35 @@ export function toSameOriginMediaUrl(url) {
   return m ? m[1] : raw
 }
 
-export function rewriteMediaUrlsInText(text) {
+function firstMediaImageUrl(sources) {
+  if (!Array.isArray(sources)) return null
+  for (const s of sources) {
+    const raw = s && s.image_url
+    const u = toSameOriginMediaUrl(raw)
+    if (u && new RegExp(`^${MEDIA_PATH_RE.source}$`, 'i').test(u)) return u
+  }
+  return null
+}
+
+// 修正常见坏图 Markdown：模型把文档标题/页码/stored_relpath 或没有签名的裸路径塞进 ![](...)
+const MD_IMG_LINE = /^([ \t]*)!\[([^\]]*)\]\((.*)\)[ \t]*$/gm
+
+export function rewriteMediaUrlsInText(text, sources) {
   if (text == null || text === '') return text
-  return String(text).replace(ABS_MEDIA_URL_RE, (_, path) => path)
+  let out = String(text).replace(ABS_MEDIA_URL_RE, (_, path) => path)
+  const fallback = firstMediaImageUrl(sources)
+  if (!fallback) return out
+  const hasValidImg = new RegExp(`!\\[[^\\]]*\\]\\(\\s*${MEDIA_PATH_RE.source}\\s*\\)`, 'i').test(out)
+  if (hasValidImg) return out
+  let replaced = false
+  out = out.replace(MD_IMG_LINE, (line, indent, alt, inner) => {
+    if (replaced) return line
+    const target = String(inner || '').trim()
+    if (new RegExp(`^${MEDIA_PATH_RE.source}$`, 'i').test(target)) return line
+    replaced = true
+    return `${indent}![${alt || '知识库图片'}](${fallback})`
+  })
+  return out
 }
 
 /**
@@ -78,7 +104,6 @@ export function rewriteMediaUrlsInText(text) {
  */
 export function renderAgentChatMarkdown(text, sources) {
   if (text == null || text === '') return ''
-  const rewritten = rewriteMediaUrlsInText(String(text))
   const kuraSources = Array.isArray(sources)
     ? sources.map((s) => {
         if (!s || typeof s !== 'object') return s
@@ -88,6 +113,7 @@ export function renderAgentChatMarkdown(text, sources) {
         return next
       })
     : sources
+  const rewritten = rewriteMediaUrlsInText(String(text), kuraSources)
   const raw = md.render(rewritten, { kuraSources })
   return DOMPurify.sanitize(raw, {
     USE_PROFILES: { html: true },

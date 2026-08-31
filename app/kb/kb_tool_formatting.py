@@ -84,19 +84,16 @@ def format_knowledge_retrieval_tool_output(
                 }
             )
 
-            if not stored_relpath:
-                formatted.append("（PostgreSQL 中无 stored_relpath，无法生成图片链接）")
+            if not public_url:
+                formatted.append("（无可用图片链接，回答中不要为此 chunk 插入任何 Markdown 图片）")
                 continue
 
-            on_disk = _kb_image_absolute_fs_path(stored_relpath).is_file()
-
-            formatted.append(f"PostgreSQL stored_relpath（知识库图片表中的相对存储路径）: {stored_relpath}")
-            if img_id:
-                formatted.append(f"PostgreSQL mg_kb_images.id: {img_id}")
-            formatted.append(f"本地文件已落盘: {'是' if on_disk else '否'}")
+            page_part = f"第{page}页" if str(page).strip() and str(page) != "N/A" else "图片"
+            img_md = f"![{source} {page_part}]({public_url})"
             formatted.append(
-                f"图片访问 URL（回答中展示图片时必须原样使用该字符串，不要改成 http(s) 绝对地址；"
-                f"Markdown 示例: ![]({public_url}) ）: {public_url}"
+                f"展示此图片时，将下面这一行原样复制到回答中（不要放进代码块，不要改写括号内路径，"
+                f"不要把「[{i}] {source} (Page {page})...」或任何存储路径填进 ![...](...)）：\n"
+                f"{img_md}"
             )
 
             image_references.append(

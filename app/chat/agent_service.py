@@ -322,11 +322,10 @@ def _compose_system_prompt(
         parts.append(kb_retrieval_system_extension.strip())
     if use_knowledge_retrieval:
         parts.append(
-            "知识库检索结果中若出现「图片访问 URL」或「PostgreSQL 存储相对路径 stored_relpath」，"
-            "展示图片时必须在回答中原样使用工具给出的图片访问 URL（Markdown：![](URL)），"
-            "须与工具返回的「图片访问 URL」逐字一致（通常为 /api/v1/media/... 相对路径，含 ?exp=&sig=）。"
-            "禁止改写成 http:// 或 https:// 绝对地址，禁止使用 stored_relpath、image://、file://、kb_image://，"
-            "禁止用 [1][2] 或序号代替 URL。"
+            "知识库检索结果中，每个图片 chunk 都会单独给出一行现成的 Markdown：`![说明](/api/v1/media/...?exp=...&sig=...)`。"
+            "展示图片时必须把那一行原样复制到回答中，括号内必须是以 /api/v1/media/ 开头并带 ?exp=&sig= 的地址。"
+            "禁止自行改写或拼接括号内内容：不得填入文档名、页码、`[i] ... (Page n)` 标题、stored_relpath、"
+            "不得改成 http(s) 绝对地址、image://、file://、kb_image://，也不得用 [1][2] 或序号代替。"
         )
         parts.append(
             "知识库作答纪律：回答必须仅依据知识库检索工具的返回内容与多轮对话上下文；"
