@@ -210,74 +210,25 @@ docker compose stop
 
 ### 环境变量配置
 
-建议在项目根目录下创建 `.env` 环境变量配置（需根据自身情况更改）:
+将仓库根目录的 `.env.example` 复制为 `.env`，再填写密钥（填好的 `.env` 勿提交仓库）：
 
-```bash
-# 复制为 .env 后填写。SECRET_KEY 等敏感项勿提交仓库。
+```sh
+# Linux / macOS
+cp .env.example .env
 
-# ===== App security =====
-SECRET_KEY=
-# 本地开发可设为 true；生产务必 false。仅 DEBUG=true 时允许 Header token=dev 免 JWT
-DEBUG=false
-DEBUG_AGENT_KB_PROMPT=false
-# 首次启动且库中无用户时创建的管理员（密码勿提交仓库；至少 8 位且含字母与数字）
-INITIAL_ADMIN_USERNAME=admin
-INITIAL_ADMIN_EMAIL=admin@example.com
-INITIAL_ADMIN_PASSWORD=
-# 是否开放邮箱自助注册（本机开发可 true；公网务必 false）
-ALLOW_PUBLIC_REGISTRATION=false
-# 本机调试 MCP / 内网模型时才设 true
-ALLOW_PRIVATE_UPSTREAM_URLS=false
-# 生产设 false，关闭 /docs /redoc /openapi.json
-DOCS_ENABLED=true
-# uvicorn 监听；公网请保持 127.0.0.1 并放在反代后
-UVICORN_HOST=127.0.0.1
-# 公网建议 1440（1 天）
-# JWT_ACCESS_TOKEN_EXPIRE_MINUTES=1440
-# 仅在可信反向代理之后设 true
-AUTH_TRUST_X_FORWARDED_FOR=false
-# 生产建议单独设置 Fernet 密钥
-# API_KEY_ENCRYPTION_KEY=
-# CORS_ORIGINS=["http://localhost:3100","http://127.0.0.1:3100"]
-
-# ===== Embedding Model (多模态) =====
-EMBEDDING_API_KEY=
-EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-EMBEDDING_MODEL=qwen3-vl-embedding
-EMBEDDING_DIM=1536
-EMBEDDING_BATCH_SIZE=10
-
-# ===== Milvus =====
-MILVUS_HOST=127.0.0.1
-MILVUS_PORT=19530
-MILVUS_COLLECTION=kura_ai_kb
-
-# ===== Database / Cache =====
-DATABASE_URL=postgresql+psycopg2://postgres:postgres@127.0.0.1:5433/langchain_app
-# 管理端（用户/角色/菜单/智能体配置）连接；未设置时复用 DATABASE_URL
-# ADMIN_DATABASE_URL=postgresql+psycopg2://postgres:postgres@127.0.0.1:5433/langchain_app
-REDIS_URL=redis://127.0.0.1:6379/0
-
-CHAT_MEMORY_MILVUS_RECREATE_ON_INIT=false
-
-PUBLIC_API_BASE=http://127.0.0.1:9999
-
-# ===== Web Search（联网搜索）=====
-# provider: auto / ddgs / bocha / bing_html
-# auto：无代理且已配博查 Key 时 bocha → bing_html；有代理时 ddgs → bocha → bing_html
-WEB_SEARCH_PROVIDER=auto
-WEB_SEARCH_MAX_RESULTS=5
-# ddgs 格式 {country}-{language}；旧值 zh-cn 会自动归一为 cn-zh
-WEB_SEARCH_REGION=cn-zh
-WEB_SEARCH_TIMEOUT_SECONDS=15
-# 可选：ddgs / 博查 / bing_html 均使用，如 http://127.0.0.1:7890
-# WEB_SEARCH_PROXY=
-# 空=自动（无代理 bing / 有代理 auto）；也可强制指定，如 bing 或 google,brave,bing
-# WEB_SEARCH_DDGS_BACKEND=
-# 博查 Web Search（国内无代理主路径）。申请: https://open.bochaai.com/ → API KEY 管理
-WEB_SEARCH_BOCHA_API_KEY=
-WEB_SEARCH_BOCHA_ENDPOINT=https://api.bochaai.com/v1/web-search
+# Windows PowerShell
+Copy-Item .env.example .env
 ```
+
+至少填写：
+
+- `SECRET_KEY`（生成：`openssl rand -hex 32`）
+- `INITIAL_ADMIN_PASSWORD`（至少 8 位，含字母与数字）
+- `EMBEDDING_API_KEY`
+- 启用知识库重排时再填 `RERANK_API_KEY`
+- 国内联网搜索可填 `WEB_SEARCH_BOCHA_API_KEY`
+
+完整项与注释见 `.env.example`。公网上线请再对照下方「公网部署清单」。
 
 ---
 
