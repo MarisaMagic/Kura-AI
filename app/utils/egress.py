@@ -128,6 +128,26 @@ class PinnedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
             pool._network_backend = _PinnedAsyncNetworkBackend(upstream.ips)
 
 
+def build_pinned_sync_client(
+    url: str,
+    *,
+    timeout: httpx.Timeout | float | None = None,
+    verify: bool | str = True,
+) -> httpx.Client:
+    """同步 pinned client；读页等同步路径不要创建 AsyncClient。"""
+    upstream = validate_public_http_url(url)
+    from app.settings import settings
+
+    if not bool(getattr(settings, "EGRESS_PIN_DNS", True)):
+        return httpx.Client(timeout=timeout, verify=verify, trust_env=False, follow_redirects=False)
+    return httpx.Client(
+        transport=PinnedHTTPTransport(upstream, verify=verify),
+        timeout=timeout,
+        trust_env=False,
+        follow_redirects=False,
+    )
+
+
 def build_pinned_clients(
     url: str,
     *,

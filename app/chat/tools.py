@@ -22,6 +22,7 @@ class _RequestState:
         "memory_calls",
         "image_kb_calls",
         "web_search_calls",
+        "fetch_url_calls",
         "rag_step_queue",
         "rag_step_loop",
         "pending_mcp_confirmations",
@@ -36,6 +37,7 @@ class _RequestState:
         self.memory_calls = 0
         self.image_kb_calls = 0
         self.web_search_calls = 0
+        self.fetch_url_calls = 0
         self.rag_step_queue: Any = None
         self.rag_step_loop: asyncio.AbstractEventLoop | None = None
         self.pending_mcp_confirmations: list[dict] = []
@@ -111,6 +113,7 @@ def reset_tool_call_guards() -> None:
     state.memory_calls = 0
     state.image_kb_calls = 0
     state.web_search_calls = 0
+    state.fetch_url_calls = 0
 
 
 def set_turn_tool_policy(*, use_knowledge_retrieval: bool, use_web_search: bool) -> None:
@@ -138,7 +141,14 @@ def knowledge_disabled_this_turn_msg(tool_name: str) -> str:
 def web_search_disabled_this_turn_msg() -> str:
     return (
         "TOOL_DISABLED_THIS_TURN: web_search is not enabled for this turn. "
-        "Do not call web_search; answer without live web results."
+        "Do not call web_search or fetch_url; answer without live web results."
+    )
+
+
+def fetch_url_disabled_this_turn_msg() -> str:
+    return (
+        "TOOL_DISABLED_THIS_TURN: fetch_url is not enabled for this turn. "
+        "Do not call fetch_url or web_search; answer without live web results."
     )
 
 
@@ -186,6 +196,18 @@ def try_acquire_web_search_tool_slot() -> bool:
     if state.web_search_calls >= max_n:
         return False
     state.web_search_calls += 1
+    return True
+
+
+def try_acquire_fetch_url_tool_slot() -> bool:
+    """同一轮对话限制 fetch_url 次数；成功占用返回 True。"""
+    from app.settings import settings
+
+    state = _state()
+    max_n = max(1, int(getattr(settings, "WEB_SEARCH_FETCH_MAX_CALLS_PER_TURN", 3)))
+    if state.fetch_url_calls >= max_n:
+        return False
+    state.fetch_url_calls += 1
     return True
 
 

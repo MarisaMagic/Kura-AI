@@ -22,6 +22,7 @@ _BUILTIN_TOOL_NAMES = {
     "read_session_attachment",
     "list_session_attachments_brief",
     "web_search",
+    "fetch_url",
 }
 
 

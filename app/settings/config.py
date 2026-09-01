@@ -232,8 +232,32 @@ class Settings(BaseSettings):
     # 博查 Web Search（国内无代理主路径）；空则 auto 不走博查。申请: https://open.bochaai.com/
     WEB_SEARCH_BOCHA_API_KEY: str = ""
     WEB_SEARCH_BOCHA_ENDPOINT: str = "https://api.bochaai.com/v1/web-search"
+    # 召回条数（重排前，1–50）；最终交给模型的条数仍是 WEB_SEARCH_MAX_RESULTS
+    WEB_SEARCH_CANDIDATE_COUNT: int = 15
+    # 时效：auto 按查询时间意图词映射；也可固定 noLimit / oneDay / oneWeek / oneMonth / oneYear
+    WEB_SEARCH_FRESHNESS: str = "auto"
+    # 博查 Semantic Reranker（复用 WEB_SEARCH_BOCHA_API_KEY；无 Key 或 false 则跳过）
+    WEB_SEARCH_RERANK_ENABLED: bool = True
+    WEB_SEARCH_RERANK_ENDPOINT: str = "https://api.bochaai.com/v1/rerank"
+    WEB_SEARCH_RERANK_MODEL: str = "gte-rerank"
+    WEB_SEARCH_RERANK_MIN_SCORE: float = 0.2
+    WEB_SEARCH_RERANK_TIMEOUT_SECONDS: int = 10
+    # 通用权威度软加权（与 rerank 融合后再截断到 MAX_RESULTS）
+    WEB_SEARCH_AUTHORITY_ENABLED: bool = True
+    WEB_SEARCH_AUTHORITY_BLEND: float = 0.25
+    # 有时间意图时 datePublished 软加权（与权威度、rerank 三分融合）
+    WEB_SEARCH_RECENCY_BLEND: float = 0.15
+    # 读页：对最终 topK 的前 N 条抓取 HTML 主文（失败保留摘要）
+    WEB_SEARCH_READ_ENABLED: bool = True
+    WEB_SEARCH_READ_TOP_N: int = 3
+    WEB_SEARCH_READ_TIMEOUT_SECONDS: int = 8
+    WEB_SEARCH_READ_MAX_BYTES: int = 524288
+    WEB_SEARCH_READ_MAX_CHARS: int = 2000
     # 单轮对话内 web_search 工具最大调用次数（防 ReAct 循环触发限流）
     WEB_SEARCH_MAX_CALLS_PER_TURN: int = 2
+    # fetch_url 独立配额与抽文长度
+    WEB_SEARCH_FETCH_MAX_CALLS_PER_TURN: int = 3
+    WEB_SEARCH_FETCH_MAX_CHARS: int = 4000
 
     @property
     def chat_database_url(self) -> str:

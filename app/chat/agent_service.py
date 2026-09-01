@@ -38,7 +38,7 @@ from app.chat.tools import (
     set_rag_step_queue,
     set_turn_tool_policy,
 )
-from app.chat.web_search_tool import make_web_search_tool
+from app.chat.web_search_tool import make_fetch_url_tool, make_web_search_tool
 from app.kb.image_search_tool import make_search_knowledge_by_image_tool
 from app.kb.kb_scope import kb_scope_for
 from app.kb.search_tool import make_search_knowledge_tool
@@ -206,12 +206,13 @@ def _run_kb_document_preselect_with_context(
 
 
 _WEB_SEARCH_DISCIPLINE = (
-    "联网搜索作答纪律：回答必须仅依据 web_search 工具的返回内容与多轮对话上下文；"
-    "凡引用搜索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），并保证引用的 URL 与工具返回逐字一致。"
-    "当工具返回明确提示搜索失败或无结果（TOOL_CALL_LIMIT_REACHED / WEB_SEARCH_NO_RESULTS / 联网搜索出错）"
+    "联网搜索作答纪律：回答必须仅依据 web_search / fetch_url 工具的返回内容与多轮对话上下文；"
+    "用户给出 http(s) 链接时优先调用 fetch_url；搜到结果后若需精读某一页也用 fetch_url。"
+    "凡引用搜索或读页内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），并保证引用的 URL 与工具返回逐字一致。"
+    "当工具返回明确提示失败或无结果（TOOL_CALL_LIMIT_REACHED / WEB_SEARCH_NO_RESULTS / FETCH_URL_FAILED / 联网搜索出错）"
     "或本轮禁用（TOOL_DISABLED_THIS_TURN）时，"
-    "必须如实告知用户「联网搜索未找到相关内容」并可建议换个问法重试，"
-    "不得编造搜索结果、实时数据或来源链接；"
+    "必须如实告知用户「联网搜索未找到相关内容」或「未能打开该链接」并可建议换个问法重试，"
+    "不得编造搜索结果、页面正文、实时数据或来源链接；"
     "注意区分搜索结论与你的一般常识推断，后者不得冒充联网检索结果。"
 )
 
@@ -261,15 +262,15 @@ def _format_turn_context_block(
     parts: list[str] = ["【本轮上下文（仅本回合有效）】"]
     if use_web_search:
         parts.append(
-            "本轮允许调用 web_search；不要调用 search_knowledge_base / search_knowledge_by_image。"
+            "本轮允许调用 web_search / fetch_url；不要调用 search_knowledge_base / search_knowledge_by_image。"
         )
     elif use_knowledge_retrieval:
         parts.append(
-            "本轮允许调用 search_knowledge_base / search_knowledge_by_image；不要调用 web_search。"
+            "本轮允许调用 search_knowledge_base / search_knowledge_by_image；不要调用 web_search / fetch_url。"
         )
     else:
         parts.append(
-            "本轮不要调用 web_search、search_knowledge_base、search_knowledge_by_image。"
+            "本轮不要调用 web_search、fetch_url、search_knowledge_base、search_knowledge_by_image。"
         )
     if use_knowledge_retrieval:
         parts.append(_format_kb_scope_for_turn(document_filter))
@@ -437,6 +438,7 @@ def build_model_and_agent(
     tools.extend(make_session_attachment_tools(user_id, agent_id, session_id))
     if getattr(settings, "WEB_SEARCH_ENABLED", True):
         tools.append(make_web_search_tool())
+        tools.append(make_fetch_url_tool())
     tools.append(
         make_search_knowledge_tool(
             kb_scope,

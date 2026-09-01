@@ -49,12 +49,13 @@ export function previewConfigEqual(a, b) {
 }
 
 const WEB_SEARCH_DISCIPLINE =
-  '联网搜索作答纪律：回答必须仅依据 web_search 工具的返回内容与多轮对话上下文；' +
-  '凡引用搜索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），并保证引用的 URL 与工具返回逐字一致。' +
-  '当工具返回明确提示搜索失败或无结果（TOOL_CALL_LIMIT_REACHED / WEB_SEARCH_NO_RESULTS / 联网搜索出错）' +
+  '联网搜索作答纪律：回答必须仅依据 web_search / fetch_url 工具的返回内容与多轮对话上下文；' +
+  '用户给出 http(s) 链接时优先调用 fetch_url；搜到结果后若需精读某一页也用 fetch_url。' +
+  '凡引用搜索或读页内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），并保证引用的 URL 与工具返回逐字一致。' +
+  '当工具返回明确提示失败或无结果（TOOL_CALL_LIMIT_REACHED / WEB_SEARCH_NO_RESULTS / FETCH_URL_FAILED / 联网搜索出错）' +
   '或本轮禁用（TOOL_DISABLED_THIS_TURN）时，' +
-  '必须如实告知用户「联网搜索未找到相关内容」并可建议换个问法重试，' +
-  '不得编造搜索结果、实时数据或来源链接；' +
+  '必须如实告知用户「联网搜索未找到相关内容」或「未能打开该链接」并可建议换个问法重试，' +
+  '不得编造搜索结果、页面正文、实时数据或来源链接；' +
   '注意区分搜索结论与你的一般常识推断，后者不得冒充联网检索结果。'
 
 const KB_IMAGE_DISCIPLINE =

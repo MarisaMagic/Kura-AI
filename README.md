@@ -226,7 +226,7 @@ Copy-Item .env.example .env
 - `INITIAL_ADMIN_PASSWORD`（至少 8 位，含字母与数字）
 - `EMBEDDING_API_KEY`
 - 启用知识库重排时再填 `RERANK_API_KEY`
-- 国内联网搜索可填 `WEB_SEARCH_BOCHA_API_KEY`
+- 国内联网搜索可填 `WEB_SEARCH_BOCHA_API_KEY`（默认同时启用博查 Semantic Reranker）
 
 完整项与注释见 `.env.example`。公网上线请再对照下方「公网部署清单」。
 
