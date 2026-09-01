@@ -13,7 +13,14 @@ from fastapi.responses import Response, StreamingResponse
 
 from app.chat.agent_service import chat_with_agent_stream, chat_with_agent_sync
 from app.chat.attachment_service import file_bytes_for_attachment, get_attachment_row, save_uploaded_file
-from app.chat.chat_job import create_chat_job, get_job_meta, iter_job_sse_events, request_chat_job_cancel, verify_job_owner
+from app.chat.chat_job import (
+    cancel_active_session_job,
+    create_chat_job,
+    get_job_meta,
+    iter_job_sse_events,
+    request_chat_job_cancel,
+    verify_job_owner,
+)
 from app.chat.preview_session import is_editor_preview_session
 from app.chat.storage import storage
 from app.controllers.user_agent import user_agent_controller
@@ -321,6 +328,25 @@ async def cancel_chat_job_endpoint(job_id: str, current_user: User = Depends(Aut
         return Success(data={"ok": True, "already_finished": True})
     await request_chat_job_cancel(job_id)
     return Success(data={"ok": True})
+
+
+@router.post("/chat/active_job/cancel", summary="停止当前会话正在进行的对话生成（按会话）", tags=["智能体模块"])
+async def cancel_active_chat_job_endpoint(
+    agent_id: int = Query(..., description="智能体 ID"),
+    session_id: str = Query(..., description="会话 ID"),
+    current_user: User = Depends(AuthControl.is_authed),
+):
+    """
+    按会话取消当前活动任务：用于前端停止生成时 job_id 未知的兜底场景（如创建请求在途被中断）。
+    :param agent_id: 智能体 ID
+    :param session_id: 会话 ID
+    :param current_user: 当前用户
+    :return: Success
+    """
+    user_id = current_user.id
+    sid = (session_id or "default_session").strip() or "default_session"
+    cancelled = await cancel_active_session_job(user_id, agent_id, sid)
+    return Success(data={"ok": True, "cancelled": cancelled})
 
 
 @router.post("/chat/mcp/confirm", summary="确认或拒绝高危 MCP 工具调用", tags=["智能体模块"])

@@ -32,7 +32,16 @@ def make_search_knowledge_tool(
         query: str = Field(description="用于检索的自然语言问题或关键词，应与用户意图一致。")
 
     def _search_knowledge_base(query: str) -> str:
-        from app.chat.tools import try_acquire_knowledge_tool_slot
+        from app.chat.tools import (
+            is_knowledge_allowed_this_turn,
+            knowledge_disabled_this_turn_msg,
+            try_acquire_knowledge_tool_slot,
+        )
+
+        if not is_knowledge_allowed_this_turn():
+            limit_msg = knowledge_disabled_this_turn_msg("search_knowledge_base")
+            log_kb_tool_return_to_terminal(limit_msg, tool_label="search_knowledge_base")
+            return limit_msg
 
         if not try_acquire_knowledge_tool_slot():
             limit_msg = (

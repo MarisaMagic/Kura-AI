@@ -49,9 +49,51 @@ def is_job_cancel_requested(job_id: str) -> bool:
     return bool(raw)
 
 
+def _release_active_key(user_id: int, agent_id: int, session_id: str, job_id: str) -> None:
+    """
+    释放会话占用锁：仅当锁仍指向该 job 时才删除，
+    避免旧任务退出时误删新任务的占用锁。
+    """
+    cache.delete_if_job_matches(_active_key(user_id, agent_id, session_id), job_id)
+
 async def request_chat_job_cancel(job_id: str) -> None:
-    """标记 Job 为「用户请求停止」，协作式中断生成。"""
+    """
+    标记 Job 为「用户请求停止」并即时终结：
+    1. 写取消标记，供生成协程协作中断；
+    2. 若任务仍 running，立即置为 cancelled 并释放会话占用锁，
+       使用户停止后可立刻发起新任务，不必等待旧任务完全退出。
+    """
     await asyncio.to_thread(cache.set_json, _cancel_key(job_id), {"v": 1}, _ttl())
+    meta = await asyncio.to_thread(cache.get_json, _meta_key(job_id))
+    if not isinstance(meta, dict) or meta.get("status") != "running":
+        return
+    meta["status"] = "cancelled"
+    meta["error"] = None
+    await asyncio.to_thread(cache.set_json, _meta_key(job_id), meta, _ttl())
+    await asyncio.to_thread(
+        _release_active_key,
+        int(meta.get("user_id", 0)),
+        int(meta.get("agent_id", 0)),
+        str(meta.get("session_id", "")),
+        job_id,
+    )
+
+async def cancel_active_session_job(user_id: int, agent_id: int, session_id: str) -> bool:
+    """
+    按会话取消当前活动任务（前端停止时 job_id 未知的兜底，如创建请求在途被中断）。
+    :return: 是否实际取消了任务
+    """
+    existing = await asyncio.to_thread(cache.get_json, _active_key(user_id, agent_id, session_id))
+    if not isinstance(existing, dict) or not existing.get("job_id"):
+        return False
+    job_id = str(existing["job_id"])
+    meta = await asyncio.to_thread(cache.get_json, _meta_key(job_id))
+    if not meta or int(meta.get("user_id", -1)) != int(user_id):
+        return False
+    if meta.get("status") != "running":
+        return False
+    await request_chat_job_cancel(job_id)
+    return True
 
 
 def _ttl() -> int:
@@ -104,7 +146,11 @@ async def create_chat_job(
         ej = str(existing["job_id"])
         meta = await asyncio.to_thread(cache.get_json, _meta_key(ej))
         if meta and meta.get("status") == "running":
-            return ej, True
+            if await asyncio.to_thread(is_job_cancel_requested, ej):
+                # 僵尸任务：取消标记已存在但占用锁尚未释放，清理后继续创建新任务
+                await asyncio.to_thread(_release_active_key, user_id, agent_id, session_id, ej)
+            else:
+                return ej, True
 
     # 创建新的 Job
     job_id = uuid.uuid4().hex
@@ -156,7 +202,6 @@ async def _run_chat_job(
 ) -> None:
     from app.controllers.user_agent_recent import touch_recent_agent
 
-    ak = _active_key(user_id, agent_id, session_id)
     seq = 0
     try:
         # 获取智能体
@@ -203,7 +248,8 @@ async def _run_chat_job(
         await _append_event(job_id, seq, {"type": "error", "content": str(e)})
         await _finish_meta(job_id, status="failed", error=str(e))
     finally:
-        await asyncio.to_thread(cache.delete, ak)
+        # 仅当占用锁仍指向本 job 时释放：取消即时终结后可能已有新任务持有该锁
+        await asyncio.to_thread(_release_active_key, user_id, agent_id, session_id, job_id)
 
 
 async def _finish_meta(job_id: str, *, status: str, error: str | None) -> None:

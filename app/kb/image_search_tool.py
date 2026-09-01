@@ -12,6 +12,8 @@ from app.chat.attachment_service import _abs_path, classify_kind, get_attachment
 from app.chat.tools import (
     _set_last_rag_context,
     emit_rag_step,
+    is_knowledge_allowed_this_turn,
+    knowledge_disabled_this_turn_msg,
     log_kb_tool_return_to_terminal,
     try_acquire_image_kb_tool_slot,
 )
@@ -36,6 +38,11 @@ def make_search_knowledge_by_image_tool(
         top_k: int = Field(5, ge=1, le=_MAX_KB_IMAGE_TOPK, description="返回片段条数上限。")
 
     def _search_knowledge_by_image(attachment_id: str, focus: str = "mixed", top_k: int = 5) -> str:
+        if not is_knowledge_allowed_this_turn():
+            limit_msg = knowledge_disabled_this_turn_msg("search_knowledge_by_image")
+            log_kb_tool_return_to_terminal(limit_msg, tool_label="search_knowledge_by_image")
+            return limit_msg
+
         aid = (attachment_id or "").strip()
         row = get_attachment_row(aid, user_id=user_id, agent_id=agent_id, session_id=session_id)
         if not row:

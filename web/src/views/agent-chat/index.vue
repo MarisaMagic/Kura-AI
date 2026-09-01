@@ -898,6 +898,19 @@ async function stopActiveChatGeneration() {
     } catch {
       /* ignore */
     }
+  } else if (token && aid && sessionId.value) {
+    // job_id 未知（创建请求在途被中断）：按会话兜底取消活动任务，避免孤儿任务阻塞后续对话
+    try {
+      await fetch(
+        `${baseApi}/user-agent/chat/active_job/cancel?agent_id=${aid}&session_id=${encodeURIComponent(sessionId.value)}`,
+        {
+          method: 'POST',
+          headers: { token, 'Content-Type': 'application/json' },
+        }
+      )
+    } catch {
+      /* ignore */
+    }
   }
   streamAbortController.value?.abort()
   streamAbortController.value = null
@@ -933,24 +946,33 @@ async function postChatJobAndConsumeStream({
   activeAssistantIdx.value = assistantIdx
   const idx = assistantIdx
   try {
-    const postRes = await fetch(`${baseApi}/user-agent/chat/jobs`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        token,
-      },
-      body: JSON.stringify({
-        agent_id: agentId,
-        message,
-        session_id: sessionId.value,
-        use_knowledge_retrieval: useKnowledgeRetrieval.value,
-        use_web_search: useWebSearch.value,
-        attachment_ids: attachmentIds,
-        regenerate,
-        mcp_approved_pending_id: mcpApprovedPendingId || undefined,
-      }),
-      signal: ac.signal,
-    })
+    const postJob = () =>
+      fetch(`${baseApi}/user-agent/chat/jobs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          token,
+        },
+        body: JSON.stringify({
+          agent_id: agentId,
+          message,
+          session_id: sessionId.value,
+          use_knowledge_retrieval: useKnowledgeRetrieval.value,
+          use_web_search: useWebSearch.value,
+          attachment_ids: attachmentIds,
+          regenerate,
+          mcp_approved_pending_id: mcpApprovedPendingId || undefined,
+        }),
+        signal: ac.signal,
+      })
+
+    let postRes = await postJob()
+    if (postRes.status === 409) {
+      // 旧任务刚被停止时占用锁释放存在短暂延迟，短延迟后重试一次创建；
+      // 仍 409 说明有其他真实运行中的任务，回退到重连 existing_job_id
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      postRes = await postJob()
+    }
 
     if (postRes.status === 409) {
       const errBody = await postRes.json()

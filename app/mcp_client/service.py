@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from app.mcp_client.tool_policy import wrap_mcp_tool_with_confirmation
 from typing import Any
 
 MCP_CONNECT_TIMEOUT_SECONDS = 12
+MCP_TOOL_SCHEMA_TTL_SECONDS = 120
+
+logger = logging.getLogger(__name__)
 
 # 内置工具名集合：MCP 工具与之撞名时跳过（保留内置实现）
 _BUILTIN_TOOL_NAMES = {
@@ -47,6 +51,99 @@ def encrypt_headers(headers: dict[str, str] | None) -> str | None:
     if not cleaned:
         return None
     return encrypt_api_key(json.dumps(cleaned, ensure_ascii=False))
+
+
+def mcp_tool_schema_cache_key(agent_id: int, server_id: int) -> str:
+    return f"mcp_tool_schema:{int(agent_id)}:{int(server_id)}"
+
+
+def invalidate_mcp_tool_schema_cache(agent_id: int, server_id: int) -> None:
+    from app.chat.cache import cache
+
+    cache.delete(mcp_tool_schema_cache_key(agent_id, server_id))
+
+
+def _tool_args_json_schema(tool: Any) -> dict[str, Any]:
+    schema_cls = getattr(tool, "args_schema", None)
+    if schema_cls is not None:
+        try:
+            if hasattr(schema_cls, "model_json_schema"):
+                out = schema_cls.model_json_schema()
+                if isinstance(out, dict):
+                    return out
+            if hasattr(schema_cls, "schema"):
+                out = schema_cls.schema()
+                if isinstance(out, dict):
+                    return out
+        except Exception:
+            pass
+    args = getattr(tool, "args", None)
+    if isinstance(args, dict):
+        return {"type": "object", "properties": args}
+    return {"type": "object", "properties": {}}
+
+
+def _snapshot_mcp_tools(tools: list) -> list[dict[str, Any]]:
+    snaps: list[dict[str, Any]] = []
+    for t in tools:
+        snaps.append(
+            {
+                "name": getattr(t, "name", "") or "",
+                "description": getattr(t, "description", "") or "",
+                "args_schema": _tool_args_json_schema(t),
+            }
+        )
+    return snaps
+
+
+def _frozen_args_schema(json_schema: dict | None, *, tool_name: str):
+    from pydantic import BaseModel, ConfigDict
+
+    schema = dict(json_schema) if isinstance(json_schema, dict) else {"type": "object", "properties": {}}
+
+    class Frozen(BaseModel):
+        model_config = ConfigDict(extra="allow")
+
+        @classmethod
+        def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            return schema
+
+    safe = "".join(c if c.isalnum() else "_" for c in (tool_name or "mcp")) or "mcp"
+    Frozen.__name__ = f"{safe}StubArgs"
+    Frozen.__qualname__ = Frozen.__name__
+    return Frozen
+
+
+def _stub_mcp_tools_from_snapshot(snaps: list, server_name: str, error: str) -> list:
+    """用上次成功的 schema 包一层「MCP 不可用」stub，避免 tools 列表整表消失。"""
+    from langchain_core.tools import StructuredTool
+
+    err_text = f"MCP_UNAVAILABLE: 服务「{server_name}」当前不可用：{error[:200]}"
+    tools: list = []
+    if not isinstance(snaps, list):
+        return tools
+    for snap in snaps:
+        if not isinstance(snap, dict):
+            continue
+        name = str(snap.get("name") or "").strip()
+        if not name:
+            continue
+        desc = str(snap.get("description") or name)
+        raw_schema = snap.get("args_schema")
+        schema = _frozen_args_schema(raw_schema if isinstance(raw_schema, dict) else None, tool_name=name)
+
+        async def _coro(*args: Any, _msg: str = err_text, **kwargs: Any) -> str:
+            return _msg
+
+        tools.append(
+            StructuredTool.from_function(
+                coroutine=_coro,
+                name=name,
+                description=desc,
+                args_schema=schema,
+            )
+        )
+    return tools
 
 
 def _connection_dict(transport: str, url: str, headers: dict[str, str] | None) -> dict[str, Any]:
@@ -115,6 +212,7 @@ async def load_agent_mcp_tools(
     单个服务连接失败仅记录错误、不中断对话；工具名与内置工具或彼此冲突时跳过。
     :return: (tools, errors)；errors 元素 {"name": 服务名, "error": 错误说明}
     """
+    from app.chat.cache import cache
     from app.models.user_agent_mcp import UserAgentMcpServer
 
     rows = await UserAgentMcpServer.filter(agent_id=agent_id, enabled=True).all()
@@ -126,11 +224,24 @@ async def load_agent_mcp_tools(
     seen_names: set[str] = set(_BUILTIN_TOOL_NAMES)
 
     for row in rows:
+        schema_key = mcp_tool_schema_cache_key(agent_id, row.id)
         try:
             tools = await _list_tools(row.transport, row.url, decrypt_headers(row.headers_ciphertext))
+            cache.set_json(schema_key, _snapshot_mcp_tools(tools), MCP_TOOL_SCHEMA_TTL_SECONDS)
         except Exception as e:
-            errors.append({"name": row.name, "error": str(e)[:300]})
-            continue
+            err_text = str(e)[:300]
+            errors.append({"name": row.name, "error": err_text})
+            cached = cache.get_json(schema_key)
+            if cached:
+                logger.warning(
+                    "MCP list_tools 失败，使用缓存 schema stub agent_id=%s server=%s: %s",
+                    agent_id,
+                    row.name,
+                    err_text,
+                )
+                tools = _stub_mcp_tools_from_snapshot(cached, row.name, err_text)
+            else:
+                continue
         for t in tools:
             tname = getattr(t, "name", "") or ""
             if not tname or tname in seen_names:
@@ -150,4 +261,5 @@ async def load_agent_mcp_tools(
                     confirm_policy=getattr(row, "confirm_policy", "auto") or "auto",
                 )
             )
+    all_tools.sort(key=lambda t: str(getattr(t, "name", "") or ""))
     return all_tools, errors

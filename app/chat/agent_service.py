@@ -36,6 +36,7 @@ from app.chat.tools import (
     reset_tool_call_guards,
     set_approved_mcp_pending_id,
     set_rag_step_queue,
+    set_turn_tool_policy,
 )
 from app.chat.web_search_tool import make_web_search_tool
 from app.kb.image_search_tool import make_search_knowledge_by_image_tool
@@ -204,72 +205,36 @@ def _run_kb_document_preselect_with_context(
     return filt, {**ctx_meta, **pre_meta}
 
 
-def _merge_proactive_memory_system(windowed: list[BaseMessage], inject_body: str) -> list[BaseMessage]:
-    """
-    合并预检索的会话记忆到系统提示词
-    :param windowed: 消息列表
-    :param inject_body: 预检索的会话记忆
-    :return: 消息列表
-    """
-    i = 0
-    while i < len(windowed) and isinstance(windowed[i], SystemMessage):
-        i += 1
-    block = SystemMessage(
-        content=(
-            "【本回合根据用户最新输入自动检索的较早会话摘录（仅供参考；"
-            "若仍不足可再调用 search_session_memory 工具）】\n\n"
-            + inject_body
-        )
-    )
-    return [*windowed[:i], block, *windowed[i:]]
+_WEB_SEARCH_DISCIPLINE = (
+    "联网搜索作答纪律：回答必须仅依据 web_search 工具的返回内容与多轮对话上下文；"
+    "凡引用搜索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），并保证引用的 URL 与工具返回逐字一致。"
+    "当工具返回明确提示搜索失败或无结果（TOOL_CALL_LIMIT_REACHED / WEB_SEARCH_NO_RESULTS / 联网搜索出错）"
+    "或本轮禁用（TOOL_DISABLED_THIS_TURN）时，"
+    "必须如实告知用户「联网搜索未找到相关内容」并可建议换个问法重试，"
+    "不得编造搜索结果、实时数据或来源链接；"
+    "注意区分搜索结论与你的一般常识推断，后者不得冒充联网检索结果。"
+)
+
+_KB_IMAGE_DISCIPLINE = (
+    "知识库检索结果中，每个图片 chunk 都会单独给出一行现成的 Markdown：`![说明](/api/v1/media/...?exp=...&sig=...)`。"
+    "展示图片时必须把那一行原样复制到回答中，括号内必须是以 /api/v1/media/ 开头并带 ?exp=&sig= 的地址。"
+    "禁止自行改写或拼接括号内内容：不得填入文档名、页码、`[i] ... (Page n)` 标题、stored_relpath、"
+    "不得改成 http(s) 绝对地址、image://、file://、kb_image://，也不得用 [1][2] 或序号代替。"
+)
+
+_KB_ANSWER_DISCIPLINE = (
+    "知识库作答纪律：回答必须仅依据知识库检索工具的返回内容与多轮对话上下文；"
+    "凡引用检索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致）。"
+    "当工具返回明确提示知识库无相关资料（或检索未命中）或本轮禁用（TOOL_DISABLED_THIS_TURN）时，"
+    "必须如实告知用户「知识库中未找到相关资料」"
+    "并说明可补充资料后重试，不得编造知识库结论或凭想象作答；"
+    "若无确凿资料支撑，宁可说明「知识库中未找到相关资料」，也不要虚构。"
+    "注意区分知识库中的结论与你的一般常识推断，后者不得冒充知识库内容。"
+)
 
 
-def _prepare_to_invoke_messages(
-    messages: list[BaseMessage],
-    ua: UserAgent,
-    user_id: int,
-    agent_id: int,
-    session_id: str,
-    user_query_for_memory: str,
-) -> list:
-    """
-    滑动窗口 → 可选会话记忆预注入 → 展开多模态。
-    :param messages: 消息列表
-    :param ua: 智能体
-    :param user_id: 用户ID
-    :param agent_id: 智能体ID
-    :param session_id: 会话ID
-    :param user_query_for_memory: 用户查询
-    :return: 展开后的消息列表
-    """
-    from app.chat.memory_search import proactive_session_memory_inject_text
-    from app.chat.tools import emit_rag_step
-
-    windowed = apply_sliding_window_turns(messages)
-    llm_cfg = _sub_llm_config_from_ua(ua)
-    inj = proactive_session_memory_inject_text( # 预检索会话记忆
-        (user_query_for_memory or "").strip(),
-        user_id=user_id,
-        agent_id=agent_id,
-        session_id=session_id,
-        llm_config=llm_cfg,
-    )
-    if inj:
-        emit_rag_step("📌", "会话记忆预注入", "已附加较早轮次摘录")
-        windowed = _merge_proactive_memory_system(windowed, inj)
-    return expand_messages_for_model(
-        windowed,
-        user_id=user_id,
-        agent_id=agent_id,
-        session_id=session_id,
-    )
-
-
-def _format_kb_system_extension(document_filter: list[str] | None) -> str:
-    """
-    将前置选档结果写入系统提示，使智能体知悉本回合 search_knowledge_base 的文档范围由系统固定。
-    document_filter 为 None 表示全知识库（或未加 filename 子句）；非空为限定 file_key 列表。
-    """
+def _format_kb_scope_for_turn(document_filter: list[str] | None) -> str:
+    """本回合选档范围（写入最后一条 Human，不进 system）。"""
     if document_filter is None:
         return (
             "【本回合知识库检索范围】未限定在单批 file_key（将按当前智能体整库检索；无文档时无结果）。"
@@ -283,59 +248,157 @@ def _format_kb_system_extension(document_filter: list[str] | None) -> str:
     )
 
 
-def _compose_system_prompt(
-    ua: UserAgent,
-    use_knowledge_retrieval: bool = True,
+def _format_turn_context_block(
     *,
-    use_web_search: bool = False,
-    session_attachment_hint: str = "",
-    kb_retrieval_system_extension: str | None = None,
+    use_knowledge_retrieval: bool,
+    use_web_search: bool,
+    document_filter: list[str] | None,
+    session_attachment_hint: str,
+    memory_inject: str | None,
+    mcp_approval_note: str | None,
 ) -> str:
+    """拼装仅本回合有效、挂在最后一条 Human 末尾的上下文（不落库）。"""
+    parts: list[str] = ["【本轮上下文（仅本回合有效）】"]
+    if use_web_search:
+        parts.append(
+            "本轮允许调用 web_search；不要调用 search_knowledge_base / search_knowledge_by_image。"
+        )
+    elif use_knowledge_retrieval:
+        parts.append(
+            "本轮允许调用 search_knowledge_base / search_knowledge_by_image；不要调用 web_search。"
+        )
+    else:
+        parts.append(
+            "本轮不要调用 web_search、search_knowledge_base、search_knowledge_by_image。"
+        )
+    if use_knowledge_retrieval:
+        parts.append(_format_kb_scope_for_turn(document_filter))
+    hint = (session_attachment_hint or "").strip()
+    if hint:
+        parts.append(hint)
+    if (memory_inject or "").strip():
+        parts.append(
+            "【本回合根据用户最新输入自动检索的较早会话摘录（仅供参考；"
+            "若仍不足可再调用 search_session_memory 工具）】\n\n"
+            + memory_inject.strip()
+        )
+    if (mcp_approval_note or "").strip():
+        parts.append(mcp_approval_note.strip())
+    return "\n\n".join(parts)
+
+
+def _append_text_to_last_human(messages: list, block: str) -> list:
+    """把文本接到最后一条 Human（字符串拼接或多模态 text 块）。无 Human 则原样返回。"""
+    text = (block or "").strip()
+    if not text:
+        return list(messages)
+    last_i = None
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            last_i = i
+            break
+    if last_i is None:
+        return list(messages)
+    content = messages[last_i].content
+    if isinstance(content, str):
+        new_content: Any = content + "\n\n" + text
+    elif isinstance(content, list):
+        new_content = list(content) + [{"type": "text", "text": text}]
+    else:
+        new_content = str(content) + "\n\n" + text
+    out = list(messages)
+    out[last_i] = HumanMessage(content=new_content)
+    return out
+
+
+def _mcp_approval_note(
+    pending_id: str | None,
+    *,
+    user_id: int,
+    agent_id: int,
+    session_id: str,
+) -> str | None:
+    if not (pending_id or "").strip():
+        return None
+    from app.mcp_client.tool_policy import peek_approved_mcp_call
+
+    approved = peek_approved_mcp_call(
+        pending_id, user_id=user_id, agent_id=agent_id, session_id=session_id
+    )
+    if not approved:
+        return None
+    return (
+        f"用户已批准执行 MCP 工具 {approved.get('server_name')}/{approved.get('tool_name')} 一次。"
+        "请立即调用该工具一次；不要调用其他高危工具。"
+    )
+
+
+def _prepare_to_invoke_messages(
+    messages: list[BaseMessage],
+    ua: UserAgent,
+    user_id: int,
+    agent_id: int,
+    session_id: str,
+    user_query_for_memory: str,
+    *,
+    use_knowledge_retrieval: bool,
+    use_web_search: bool,
+    document_filter: list[str] | None,
+    session_attachment_hint: str,
+    mcp_approval_note: str | None = None,
+) -> list:
     """
-    组合智能体的系统提示词（工具如何调用由各工具的 description 说明，此处不重复指令）。
-    :param ua: 智能体
-    :param use_knowledge_retrieval: 保留参数以兼容调用方；不在此写入知识库工具说明
-    :param use_web_search: 为 True 时写入联网搜索作答纪律
-    :param session_attachment_hint: 本会话已上传附件的纯事实列表（无工具调用指引）
-    :return: 系统提示词
+    滑动窗口 → 可选会话记忆预检索 → 展开多模态 → 本轮上下文接到最后一条 Human。
+    """
+    from app.chat.memory_search import proactive_session_memory_inject_text
+    from app.chat.tools import emit_rag_step
+
+    windowed = apply_sliding_window_turns(messages)
+    llm_cfg = _sub_llm_config_from_ua(ua)
+    inj = proactive_session_memory_inject_text(
+        (user_query_for_memory or "").strip(),
+        user_id=user_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        llm_config=llm_cfg,
+    )
+    if inj:
+        emit_rag_step("📌", "会话记忆预注入", "已附加较早轮次摘录")
+    expanded = expand_messages_for_model(
+        windowed,
+        user_id=user_id,
+        agent_id=agent_id,
+        session_id=session_id,
+    )
+    turn_block = _format_turn_context_block(
+        use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
+        document_filter=document_filter,
+        session_attachment_hint=session_attachment_hint,
+        memory_inject=inj,
+        mcp_approval_note=mcp_approval_note,
+    )
+    return _append_text_to_last_human(expanded, turn_block)
+
+
+def _compose_system_prompt(ua: UserAgent) -> str:
+    """
+    稳定系统提示：人设 + 联网/知识库纪律（跨轮不变；本轮开关写在最后一条 Human）。
     """
     parts: list[str] = []
-    # 基础提示词, 用户在创建智能体时配置的前置提示词
     base = (ua.system_prompt or "").strip()
     if base:
         parts.append(base)
     else:
         parts.append("You are a helpful assistant.")
-    # 联网搜索作答纪律（工具为 web_search，DuckDuckGo 实时结果）
-    if use_web_search:
-        parts.append(
-            "联网搜索作答纪律：回答必须仅依据 web_search 工具的返回内容与多轮对话上下文；"
-            "凡引用搜索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），并保证引用的 URL 与工具返回逐字一致。"
-            "当工具返回明确提示搜索失败或无结果（TOOL_CALL_LIMIT_REACHED / WEB_SEARCH_NO_RESULTS / 联网搜索出错）时，"
-            "必须如实告知用户「联网搜索未找到相关内容」并可建议换个问法重试，"
-            "不得编造搜索结果、实时数据或来源链接；"
-            "注意区分搜索结论与你的一般常识推断，后者不得冒充联网检索结果。"
-        )
-    if (session_attachment_hint or "").strip():
-        parts.append(session_attachment_hint.strip())
-    if use_knowledge_retrieval and (kb_retrieval_system_extension or "").strip():
-        parts.append(kb_retrieval_system_extension.strip())
-    if use_knowledge_retrieval:
-        parts.append(
-            "知识库检索结果中，每个图片 chunk 都会单独给出一行现成的 Markdown：`![说明](/api/v1/media/...?exp=...&sig=...)`。"
-            "展示图片时必须把那一行原样复制到回答中，括号内必须是以 /api/v1/media/ 开头并带 ?exp=&sig= 的地址。"
-            "禁止自行改写或拼接括号内内容：不得填入文档名、页码、`[i] ... (Page n)` 标题、stored_relpath、"
-            "不得改成 http(s) 绝对地址、image://、file://、kb_image://，也不得用 [1][2] 或序号代替。"
-        )
-        parts.append(
-            "知识库作答纪律：回答必须仅依据知识库检索工具的返回内容与多轮对话上下文；"
-            "凡引用检索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致）。"
-            "当工具返回明确提示知识库无相关资料（或检索未命中）时，必须如实告知用户「知识库中未找到相关资料」"
-            "并说明可补充资料后重试，不得编造知识库结论或凭想象作答；"
-            "若无确凿资料支撑，宁可说明「知识库中未找到相关资料」，也不要虚构。"
-            "注意区分知识库中的结论与你的一般常识推断，后者不得冒充知识库内容。"
-        )
+    parts.append(_WEB_SEARCH_DISCIPLINE)
+    parts.append(_KB_IMAGE_DISCIPLINE)
+    parts.append(_KB_ANSWER_DISCIPLINE)
     return "\n\n".join(parts)
+
+
+def _sort_tools(tools: list[Any]) -> list[Any]:
+    return sorted(tools, key=lambda t: str(getattr(t, "name", "") or ""))
 
 
 def build_model_and_agent(
@@ -344,38 +407,21 @@ def build_model_and_agent(
     agent_id: int,
     session_id: str,
     *,
-    use_knowledge_retrieval: bool = True,
-    use_web_search: bool = False,
-    session_attachment_hint: str = "",
     knowledge_base_document_filter: list[str] | None = None,
-    kb_retrieval_system_extension: str | None = None,
     extra_tools: list[Any] | None = None,
 ) -> tuple[Any, Any]:
     """
-    构建模型和智能体（知识库检索按属主隔离：使用他人已发布智能体时检索发布者的知识库）。
-    :param ua: 智能体
-    :param user_id: 聊天者用户 ID（会话附件/会话记忆按聊天者隔离；知识库按属主隔离）
-    :param agent_id: 智能体 ID
-    :param session_id: 会话 ID（会话附件工具作用域）
-    :param use_knowledge_retrieval: 是否注册知识库检索工具
-    :param use_web_search: 是否注册联网搜索工具（与知识库检索互斥，由请求层校验）
-    :param session_attachment_hint: 本会话附件列表说明
-    :param knowledge_base_document_filter: 由入口前置选档得到；None=全库，非空=仅这些 filename
-    :param kb_retrieval_system_extension: 与选档结果对应的系统补充说明（file_key 列表等）
-    :param extra_tools: 外部预加载的附加工具（如 MCP 服务工具）
-    :return: 模型和智能体
+    构建模型和智能体。检索工具始终挂载（本轮禁用由工具函数返回 TOOL_DISABLED_THIS_TURN）。
+    知识库检索按属主隔离：使用他人已发布智能体时检索发布者的知识库。
     """
-    # 解密 API Key
     plain = decrypt_api_key_safe(ua.api_key_ciphertext)
     if not plain or not plain.strip():
         raise ValueError("智能体未配置有效的 API Key")
 
-    # 获取基础 URL, 用户在创建智能体时配置的 OpenAI 兼容 API Base URL
     base_url = (ua.base_url or "").strip() or None
     from app.utils.egress import pinned_llm_client_kwargs
 
     pinned_kwargs = pinned_llm_client_kwargs(base_url)
-    # 构建大模型, 使用 OpenAI 兼容 API Base URL
     model = init_chat_model(
         model=ua.model_name,
         model_provider="openai",
@@ -386,40 +432,29 @@ def build_model_and_agent(
         **pinned_kwargs,
     )
     kb_scope = kb_scope_for(ua.user_id, ua.id)
-    # 打杂任务（检索打分/改写/HyDE、记忆重写）走子智能体配置；未配置时回退主配置
     llm_config = _sub_llm_config_from_ua(ua)
     tools: list[Any] = []
     tools.extend(make_session_attachment_tools(user_id, agent_id, session_id))
-    if use_web_search and getattr(settings, "WEB_SEARCH_ENABLED", True):
-        tools.append(make_web_search_tool())  # 联网搜索（DuckDuckGo）
-    if use_knowledge_retrieval:
-        tools.append(
-            make_search_knowledge_tool(
-                kb_scope,
-                llm_config,
-                knowledge_base_document_filter=knowledge_base_document_filter,
-            )
-        )  # 以文检索（范围由闭包固定）
-        tools.append(
-            make_search_knowledge_by_image_tool(kb_scope, user_id, agent_id, session_id)
-        )  # 以图检索
+    if getattr(settings, "WEB_SEARCH_ENABLED", True):
+        tools.append(make_web_search_tool())
+    tools.append(
+        make_search_knowledge_tool(
+            kb_scope,
+            llm_config,
+            knowledge_base_document_filter=knowledge_base_document_filter,
+        )
+    )
+    tools.append(make_search_knowledge_by_image_tool(kb_scope, user_id, agent_id, session_id))
     if getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
-        tools.append(make_search_session_memory_tool(user_id, agent_id, session_id, llm_config)) # 添加会话记忆检索工具
+        tools.append(make_search_session_memory_tool(user_id, agent_id, session_id, llm_config))
     if extra_tools:
-        tools.extend(extra_tools)  # MCP 服务等外部预加载工具
-    # create_agent 创建智能体, 使用模型和系统提示词
+        tools.extend(extra_tools)
+    tools = _sort_tools(tools)
     agent = create_agent(
         model=model,
         tools=tools,
-        system_prompt=_compose_system_prompt(
-            ua,
-            use_knowledge_retrieval=use_knowledge_retrieval,
-            use_web_search=use_web_search,
-            session_attachment_hint=session_attachment_hint,
-            kb_retrieval_system_extension=kb_retrieval_system_extension,
-        ),
+        system_prompt=_compose_system_prompt(ua),
     )
-    # 返回智能体和大模型
     return agent, model
 
 
@@ -474,6 +509,7 @@ def chat_with_agent_sync(
     # 清空 RAG 上下文, 重置工具调用守卫
     get_last_rag_context(clear=True)
     reset_tool_call_guards()
+    set_turn_tool_policy(use_knowledge_retrieval=use_knowledge_retrieval, use_web_search=use_web_search)
     set_approved_mcp_pending_id(mcp_approved_pending_id)
 
     session_attachment_hint = format_attachment_hint(user_id, agent_id, session_id)
@@ -488,7 +524,6 @@ def chat_with_agent_sync(
             ua=ua,
             agent_id=agent_id,
         )
-    kb_ext = _format_kb_system_extension(retrieval_filter) if use_knowledge_retrieval else None
 
     # 加载该智能体已启用的 MCP 工具（本函数在无线事件循环的线程中运行，asyncio.run 安全）；
     # MCP 工具为 async-only，包装为同步调用；单服务失败仅记录到 rag_steps，不中断对话。
@@ -509,11 +544,7 @@ def chat_with_agent_sync(
         user_id,
         agent_id,
         session_id,
-        use_knowledge_retrieval=use_knowledge_retrieval,
-        use_web_search=use_web_search,
-        session_attachment_hint=session_attachment_hint,
         knowledge_base_document_filter=retrieval_filter if use_knowledge_retrieval else None,
-        kb_retrieval_system_extension=kb_ext if use_knowledge_retrieval else None,
         extra_tools=mcp_tools,
     )
 
@@ -553,21 +584,14 @@ def chat_with_agent_sync(
         agent_id,
         session_id,
         (user_text or "").strip(),
-    )
-    if mcp_approved_pending_id:
-        from app.mcp_client.tool_policy import peek_approved_mcp_call
-
-        approved = peek_approved_mcp_call(
+        use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
+        document_filter=retrieval_filter if use_knowledge_retrieval else None,
+        session_attachment_hint=session_attachment_hint,
+        mcp_approval_note=_mcp_approval_note(
             mcp_approved_pending_id, user_id=user_id, agent_id=agent_id, session_id=session_id
-        )
-        if approved:
-            note = SystemMessage(
-                content=(
-                    f"用户已批准执行 MCP 工具 {approved.get('server_name')}/{approved.get('tool_name')} 一次。"
-                    "请立即调用该工具一次；不要调用其他高危工具。"
-                )
-            )
-            to_invoke = [note, *to_invoke]
+        ),
+    )
     caught_exc: Exception | None = None
     response_content = ""
     try:
@@ -662,6 +686,7 @@ async def iter_chat_stream_events(
     # 清空 RAG 上下文, 重置工具调用守卫
     get_last_rag_context(clear=True)
     reset_tool_call_guards()
+    set_turn_tool_policy(use_knowledge_retrieval=use_knowledge_retrieval, use_web_search=use_web_search)
     set_approved_mcp_pending_id(mcp_approved_pending_id)
 
     if regenerate:
@@ -705,7 +730,6 @@ async def iter_chat_stream_events(
                 agent_id=agent_id,
             )
         )
-    kb_ext = _format_kb_system_extension(retrieval_filter) if use_knowledge_retrieval else None
 
     # 加载该智能体已启用的 MCP 工具（单服务失败仅记录，不中断对话）；
     # 共享（非属主）会话跳过加载，避免属主凭据被共享用户对话驱动。
@@ -719,11 +743,7 @@ async def iter_chat_stream_events(
         user_id,
         agent_id,
         session_id,
-        use_knowledge_retrieval=use_knowledge_retrieval,
-        use_web_search=use_web_search,
-        session_attachment_hint=session_attachment_hint,
         knowledge_base_document_filter=retrieval_filter if use_knowledge_retrieval else None,
-        kb_retrieval_system_extension=kb_ext if use_knowledge_retrieval else None,
         extra_tools=mcp_tools,
     )
 
@@ -773,27 +793,30 @@ async def iter_chat_stream_events(
         agent_id,
         session_id,
         memory_query,
-    )
-    if mcp_approved_pending_id:
-        from app.mcp_client.tool_policy import peek_approved_mcp_call
-
-        approved = peek_approved_mcp_call(
+        use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
+        document_filter=retrieval_filter if use_knowledge_retrieval else None,
+        session_attachment_hint=session_attachment_hint,
+        mcp_approval_note=_mcp_approval_note(
             mcp_approved_pending_id, user_id=user_id, agent_id=agent_id, session_id=session_id
-        )
-        if approved:
-            note = SystemMessage(
-                content=(
-                    f"用户已批准执行 MCP 工具 {approved.get('server_name')}/{approved.get('tool_name')} 一次。"
-                    "请立即调用该工具一次；不要调用其他高危工具。"
-                )
-            )
-            to_invoke = [note, *to_invoke]
+        ),
+    )
 
     # 初始化响应内容
     full_response = ""
     thinking_text_parts: list[str] = []
     stream_error: str | None = None
     cancelled_externally = False
+
+    # 预流式阶段（KB 预选 / MCP 加载 / 记忆准备）完成后、启动生成前检查一次取消标记，
+    # 使用户在阻塞阶段点击停止也能即时生效（此时用户消息已落库，与流式中取消行为一致）
+    if cancel_check and await asyncio.to_thread(cancel_check):
+        get_last_rag_context(clear=True)
+        get_pending_mcp_confirmations(clear=True)
+        set_rag_step_queue(None)
+        yield {"type": "cancelled"}
+        yield {"type": "done", "cancelled": True}
+        return
 
     # 创建异步任务, 调用智能体
     async def _agent_worker() -> None:
@@ -866,6 +889,19 @@ async def iter_chat_stream_events(
     # 创建异步任务, 调用智能体
     agent_task = asyncio.create_task(_agent_worker())
 
+    # 取消看门狗：周期轮询取消标记，命中即中断生成任务。
+    # 覆盖工具执行等无 chunk 流出的阶段（chunk 循环内的取消检查在这些阶段不会被触发）
+    async def _cancel_watchdog() -> None:
+        if not cancel_check:
+            return
+        while not agent_task.done():
+            if await asyncio.to_thread(cancel_check):
+                agent_task.cancel()
+                return
+            await asyncio.sleep(0.3)
+
+    watchdog_task = asyncio.create_task(_cancel_watchdog())
+
     try:
         while True:
             event = await output_queue.get()
@@ -881,6 +917,7 @@ async def iter_chat_stream_events(
         raise
     finally:
         set_rag_step_queue(None)
+        watchdog_task.cancel()
         if not agent_task.done():
             agent_task.cancel()
 

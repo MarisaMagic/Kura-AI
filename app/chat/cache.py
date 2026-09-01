@@ -85,6 +85,27 @@ class RedisCache:
             logger.warning("Redis delete 失败 key={}: {}", key, e)
             return
 
+    def delete_if_job_matches(self, key: str, job_id: str) -> bool:
+        """
+        原子 compare-and-delete：仅当 key 存储的 JSON 中 job_id 字段匹配时才删除。
+        用于释放会话占用锁时避免旧任务误删新任务的锁。
+        :return: 实际执行了删除返回 True
+        """
+        lua = """
+        local v = redis.call('GET', KEYS[1])
+        if not v then return 0 end
+        local ok, decoded = pcall(cjson.decode, v)
+        if ok and type(decoded) == 'table' and decoded['job_id'] == ARGV[1] then
+            return redis.call('DEL', KEYS[1])
+        end
+        return 0
+        """
+        try:
+            return bool(self._get_client().eval(lua, 1, self._key(key), job_id))
+        except Exception as e:
+            logger.warning("Redis delete_if_job_matches 失败 key={}: {}", key, e)
+            return False
+
     def rpush_json(self, key: str, value: Any) -> int:
         """列表尾部追加 JSON 元素，返回列表长度。"""
         try:

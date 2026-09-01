@@ -12,6 +12,7 @@ from app.mcp_client.presets import MCP_SERVER_PRESETS
 from app.mcp_client.service import (
     decrypt_headers,
     encrypt_headers,
+    invalidate_mcp_tool_schema_cache,
     test_mcp_server_connection,
 )
 from app.models import User
@@ -92,6 +93,7 @@ async def create_mcp_server(
         enabled=request.enabled,
         confirm_policy=request.confirm_policy,
     )
+    invalidate_mcp_tool_schema_cache(agent_id, row.id)
     return Success(data=_to_item(row).model_dump())
 
 
@@ -124,6 +126,7 @@ async def update_mcp_server(
     if request.confirm_policy is not None:
         row.confirm_policy = request.confirm_policy
     await row.save()
+    invalidate_mcp_tool_schema_cache(agent_id, server_id)
     return Success(data=_to_item(row).model_dump())
 
 
@@ -139,6 +142,7 @@ async def delete_mcp_server(
     if not row:
         return Fail(code=404, msg="MCP 服务配置不存在")
     await row.delete()
+    invalidate_mcp_tool_schema_cache(agent_id, server_id)
     return Success(data={"ok": True})
 
 

@@ -26,6 +26,8 @@ class _RequestState:
         "rag_step_loop",
         "pending_mcp_confirmations",
         "approved_mcp_pending_id",
+        "allow_knowledge_retrieval",
+        "allow_web_search",
     )
 
     def __init__(self) -> None:
@@ -38,6 +40,8 @@ class _RequestState:
         self.rag_step_loop: asyncio.AbstractEventLoop | None = None
         self.pending_mcp_confirmations: list[dict] = []
         self.approved_mcp_pending_id: str | None = None
+        self.allow_knowledge_retrieval = True
+        self.allow_web_search = False
 
 
 _REQUEST_STATE: contextvars.ContextVar[_RequestState | None] = contextvars.ContextVar(
@@ -107,6 +111,35 @@ def reset_tool_call_guards() -> None:
     state.memory_calls = 0
     state.image_kb_calls = 0
     state.web_search_calls = 0
+
+
+def set_turn_tool_policy(*, use_knowledge_retrieval: bool, use_web_search: bool) -> None:
+    """本轮检索开关（工具始终挂载，禁用时由工具函数返回 TOOL_DISABLED_THIS_TURN）。"""
+    state = _state()
+    state.allow_knowledge_retrieval = bool(use_knowledge_retrieval)
+    state.allow_web_search = bool(use_web_search)
+
+
+def is_knowledge_allowed_this_turn() -> bool:
+    return bool(_state().allow_knowledge_retrieval)
+
+
+def is_web_search_allowed_this_turn() -> bool:
+    return bool(_state().allow_web_search)
+
+
+def knowledge_disabled_this_turn_msg(tool_name: str) -> str:
+    return (
+        f"TOOL_DISABLED_THIS_TURN: {tool_name} is not enabled for this turn. "
+        "Do not call knowledge-base retrieval tools; answer without them."
+    )
+
+
+def web_search_disabled_this_turn_msg() -> str:
+    return (
+        "TOOL_DISABLED_THIS_TURN: web_search is not enabled for this turn. "
+        "Do not call web_search; answer without live web results."
+    )
 
 
 def try_acquire_knowledge_tool_slot() -> bool:

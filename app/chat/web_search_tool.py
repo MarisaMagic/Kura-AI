@@ -18,8 +18,10 @@ from pydantic import BaseModel, Field
 from app.chat.tools import (
     _set_last_rag_context,
     emit_rag_step,
+    is_web_search_allowed_this_turn,
     log_kb_tool_return_to_terminal,
     try_acquire_web_search_tool_slot,
+    web_search_disabled_this_turn_msg,
 )
 from app.settings import settings
 from app.utils.content_guard import guard_untrusted_content
@@ -371,6 +373,11 @@ def make_web_search_tool() -> StructuredTool:
         )
 
     def _web_search(query: str) -> str:
+        if not is_web_search_allowed_this_turn():
+            limit_msg = web_search_disabled_this_turn_msg()
+            log_kb_tool_return_to_terminal(limit_msg, tool_label="web_search")
+            return limit_msg
+
         if not try_acquire_web_search_tool_slot():
             limit_msg = (
                 "TOOL_CALL_LIMIT_REACHED: web_search has reached the per-turn call limit. "
