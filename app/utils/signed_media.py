@@ -163,14 +163,14 @@ def _resign_obj(value: Any) -> Any:
 
 
 def resign_message_payload(msg: dict[str, Any]) -> dict[str, Any]:
-    """会话消息返回前重签媒体 URL（正文 / sources / rag_steps / content_json）。"""
+    """会话消息返回前重签媒体 URL（正文 / sources / rag_steps / thinking_items / content_json）。"""
     out = dict(msg)
     content = out.get("content")
     if isinstance(content, str):
         out["content"] = resign_media_urls_in_text(content)
     elif isinstance(content, list):
         out["content"] = _resign_obj(content)
-    for key in ("sources", "rag_steps", "rag_trace", "content_json"):
+    for key in ("sources", "rag_steps", "rag_trace", "thinking_items", "content_json"):
         if out.get(key) is not None:
             out[key] = _resign_obj(out[key])
     return out

@@ -88,8 +88,8 @@
                   >
                     <TheIcon icon="mdi:lightbulb-outline" :size="16" class="agent-chat-thinking-icon" />
                     <span>{{
-                      m.pending && m.ragSteps?.length
-                        ? m.ragSteps[m.ragSteps.length - 1].label
+                      m.pending && lastThinkingStepLabel(m)
+                        ? lastThinkingStepLabel(m)
                         : m.pending
                           ? $t('views.agents.chat_feed_thinking')
                           : $t('views.agents.chat_feed_thinking_done')
@@ -101,24 +101,29 @@
                     />
                   </button>
                   <div v-show="m.thinkingOpen" class="agent-chat-thinking-panel">
-                    <div v-if="m.ragSteps?.length" class="agent-chat-thinking-steps">
-                      <div
-                        v-for="(step, sIdx) in m.ragSteps"
-                        :key="sIdx"
-                        class="agent-chat-thinking-step-line"
-                      >
-                        <span class="agent-chat-thinking-step-icon">{{ step.icon || '▸' }}</span>
-                        <span class="agent-chat-thinking-step-label">{{ step.label }}</span>
-                        <span v-if="step.detail" class="agent-chat-thinking-step-detail">{{ step.detail }}</span>
-                      </div>
+                    <div v-if="m.thinkingItems?.length" class="agent-chat-thinking-steps">
+                      <template v-for="(item, sIdx) in m.thinkingItems" :key="sIdx">
+                        <div v-if="item.type === 'step'" class="agent-chat-thinking-step-line">
+                          <span class="agent-chat-thinking-step-icon">{{ item.icon || '▸' }}</span>
+                          <span class="agent-chat-thinking-step-label">{{ item.label }}</span>
+                          <span v-if="item.detail" class="agent-chat-thinking-step-detail">{{ item.detail }}</span>
+                        </div>
+                        <div
+                          v-else-if="item.type === 'text'"
+                          class="agent-chat-thinking-step-line agent-chat-thinking-step-line--text"
+                        >
+                          <span class="agent-chat-thinking-step-icon">💭</span>
+                          <span class="agent-chat-thinking-step-label">{{
+                            $t('views.agents.chat_thinking_text_label')
+                          }}</span>
+                          <div
+                            class="agent-chat-thinking-step-body agent-chat-md"
+                            v-html="renderAgentChatMarkdown(item.text)"
+                          ></div>
+                        </div>
+                      </template>
                     </div>
-                    <div v-if="(m.thinkingText || '').trim()" class="agent-chat-thinking-text">
-                      <div class="agent-chat-thinking-text-label">
-                        {{ $t('views.agents.chat_thinking_text_label') }}
-                      </div>
-                      <div class="agent-chat-thinking-text-body agent-chat-md" v-html="renderAgentChatMarkdown(m.thinkingText)"></div>
-                    </div>
-                    <p v-if="!m.ragSteps?.length && !(m.thinkingText || '').trim()" class="agent-chat-thinking-placeholder">
+                    <p v-if="!m.thinkingItems?.length" class="agent-chat-thinking-placeholder">
                       {{ $t('views.agents.chat_feed_thinking_placeholder') }}
                     </p>
                     <details v-if="m.ragTrace && Object.keys(m.ragTrace).length" class="agent-chat-rag-trace">
@@ -271,6 +276,7 @@ import { useI18n } from 'vue-i18n'
 import { NAlert, NAvatar, NButton, NInput, NSpin, NSwitch } from 'naive-ui'
 import TheIcon from '@/components/icon/TheIcon.vue'
 import { renderAgentChatMarkdown } from '@/utils/agentChatMarkdown'
+import { lastThinkingStepLabel } from '@/utils/agentChatThinking'
 import { useChatStickToBottom } from '@/views/agent-chat/useChatStickToBottom.js'
 import { DEFAULT_AVATAR } from '@/views/agents/composables/agentFormCommon.js'
 import { editorPreviewSessionId } from '@/views/agents/composables/useAgentConfigDiff.js'

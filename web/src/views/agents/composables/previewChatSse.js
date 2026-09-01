@@ -1,5 +1,7 @@
 /** 编辑器预览试聊 SSE 工具（与 agent-chat 字段一致） */
 
+import { applyThinkingItem } from '@/utils/agentChatThinking'
+
 const PENDING_JOB_PREFIX = 'kura_ai_preview_job_'
 
 export function previewPendingJobStorageKey(agentId, sid) {
@@ -43,43 +45,31 @@ export function applyPreviewChatSsePayload(data, messagesRef, idx) {
     const resumed = !!row.mcpExecuting
     list[idx] = {
       ...row,
-      content: resumed ? (data.content || '') : (row.content || '') + (data.content || ''),
+      content: resumed ? data.content || '' : (row.content || '') + (data.content || ''),
       mcpExecuting: resumed ? false : row.mcpExecuting,
       pending: false,
       thinkingOpen: row.thinkingOpen ?? false,
-      ragSteps: row.ragSteps || [],
       ragTrace: row.ragTrace ?? null,
     }
-  } else if (data.type === 'thinking_move') {
+  } else if (data.type === 'thinking_item') {
     const cur = list[idx]
-    const text = data.text || ''
-    const curContent = cur.content || ''
-    list[idx] = {
+    const item = data.item || {}
+    const patch = {
       ...cur,
-      content:
+      thinkingItems: applyThinkingItem(cur.thinkingItems, item, !!data.append),
+      thinkingOpen: true,
+      pending: cur.pending,
+    }
+    if (data.moved_from_content && item.type === 'text') {
+      const text = item.text || ''
+      const curContent = cur.content || ''
+      patch.content =
         text && curContent.endsWith(text)
           ? curContent.slice(0, curContent.length - text.length)
-          : curContent,
-      thinkingText: (cur.thinkingText || '') + text,
-      thinkingOpen: true,
-      pending: true,
+          : curContent
+      patch.pending = true
     }
-  } else if (data.type === 'thinking_text') {
-    const cur = list[idx]
-    list[idx] = {
-      ...cur,
-      thinkingText: (cur.thinkingText || '') + (data.content || ''),
-      thinkingOpen: true,
-      pending: cur.pending,
-    }
-  } else if (data.type === 'rag_step') {
-    const cur = list[idx]
-    list[idx] = {
-      ...cur,
-      ragSteps: [...(cur.ragSteps || []), data.step || {}],
-      thinkingOpen: true,
-      pending: cur.pending,
-    }
+    list[idx] = patch
   } else if (data.type === 'trace') {
     const cur = list[idx]
     list[idx] = {
@@ -101,7 +91,6 @@ export function applyPreviewChatSsePayload(data, messagesRef, idx) {
       errorText: data.content || '',
       pending: false,
       thinkingOpen: cur.thinkingOpen ?? false,
-      ragSteps: cur.ragSteps || [],
       ragTrace: cur.ragTrace ?? null,
     }
   } else if (data.type === 'cancelled') {
@@ -111,7 +100,6 @@ export function applyPreviewChatSsePayload(data, messagesRef, idx) {
       stoppedByUser: true,
       pending: false,
       thinkingOpen: cur.thinkingOpen ?? false,
-      ragSteps: cur.ragSteps || [],
       ragTrace: cur.ragTrace ?? null,
       errorText: undefined,
     }

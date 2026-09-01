@@ -89,8 +89,8 @@
                         >
                           <TheIcon icon="mdi:lightbulb-outline" :size="16" class="agent-chat-thinking-icon" />
                           <span>{{
-                            m.pending && m.ragSteps?.length
-                              ? m.ragSteps[m.ragSteps.length - 1].label
+                            m.pending && lastThinkingStepLabel(m)
+                              ? lastThinkingStepLabel(m)
                               : m.pending
                                 ? $t('views.agents.chat_feed_thinking')
                                 : $t('views.agents.chat_feed_thinking_done')
@@ -102,33 +102,32 @@
                           />
                         </button>
                         <div v-show="m.thinkingOpen" class="agent-chat-thinking-panel">
-                          <div v-if="m.ragSteps?.length" class="agent-chat-thinking-steps">
-                            <div
-                              v-for="(step, sIdx) in m.ragSteps"
-                              :key="sIdx"
-                              class="agent-chat-thinking-step-line"
-                            >
-                              <span class="agent-chat-thinking-step-icon">{{ step.icon || '▸' }}</span>
-                              <span class="agent-chat-thinking-step-label">{{ step.label }}</span>
-                              <span v-if="step.detail" class="agent-chat-thinking-step-detail">{{
-                                step.detail
-                              }}</span>
-                            </div>
-                          </div>
-                          <div
-                            v-if="(m.thinkingText || '').trim()"
-                            class="agent-chat-thinking-text"
-                          >
-                            <div class="agent-chat-thinking-text-label">
-                              {{ $t('views.agents.chat_thinking_text_label') }}
-                            </div>
-                            <div
-                              class="agent-chat-thinking-text-body agent-chat-md"
-                              v-html="renderAgentChatMarkdown(m.thinkingText)"
-                            ></div>
+                          <div v-if="m.thinkingItems?.length" class="agent-chat-thinking-steps">
+                            <template v-for="(item, sIdx) in m.thinkingItems" :key="sIdx">
+                              <div v-if="item.type === 'step'" class="agent-chat-thinking-step-line">
+                                <span class="agent-chat-thinking-step-icon">{{ item.icon || '▸' }}</span>
+                                <span class="agent-chat-thinking-step-label">{{ item.label }}</span>
+                                <span v-if="item.detail" class="agent-chat-thinking-step-detail">{{
+                                  item.detail
+                                }}</span>
+                              </div>
+                              <div
+                                v-else-if="item.type === 'text'"
+                                class="agent-chat-thinking-step-line agent-chat-thinking-step-line--text"
+                              >
+                                <span class="agent-chat-thinking-step-icon">💭</span>
+                                <span class="agent-chat-thinking-step-label">{{
+                                  $t('views.agents.chat_thinking_text_label')
+                                }}</span>
+                                <div
+                                  class="agent-chat-thinking-step-body agent-chat-md"
+                                  v-html="renderAgentChatMarkdown(item.text)"
+                                ></div>
+                              </div>
+                            </template>
                           </div>
                           <p
-                            v-if="!m.ragSteps?.length && !(m.thinkingText || '').trim()"
+                            v-if="!m.thinkingItems?.length"
                             class="agent-chat-thinking-placeholder"
                           >
                             {{ $t('views.agents.chat_feed_thinking_placeholder') }}
@@ -462,6 +461,7 @@ import { useChatStickToBottom } from './useChatStickToBottom.js'
 import api from '@/api'
 import { getToken } from '@/utils'
 import { renderAgentChatMarkdown, toSameOriginMediaUrl } from '@/utils/agentChatMarkdown'
+import { applyThinkingItem, buildThinkingItemsFromRow, lastThinkingStepLabel } from '@/utils/agentChatThinking'
 import { useAgentChatHeaderStore, useAgentSidebarStore, useRecentAgentsStore, useUserStore } from '@/store'
 import { DEFAULT_AVATAR } from '@/views/agents/composables/agentFormCommon.js'
 
@@ -741,40 +741,27 @@ function applyChatSsePayload(data, idx) {
       mcpExecuting: resumed ? false : row.mcpExecuting,
       pending: false,
       thinkingOpen: row.thinkingOpen ?? false,
-      ragSteps: row.ragSteps || [],
       ragTrace: row.ragTrace ?? null,
     }
-  } else if (data.type === 'thinking_move') {
+  } else if (data.type === 'thinking_item') {
     const cur = messages.value[idx]
-    const text = data.text || ''
-    const curContent = cur.content || ''
-    messages.value[idx] = {
+    const item = data.item || {}
+    const patch = {
       ...cur,
-      content:
+      thinkingItems: applyThinkingItem(cur.thinkingItems, item, !!data.append),
+      thinkingOpen: true,
+      pending: cur.pending,
+    }
+    if (data.moved_from_content && item.type === 'text') {
+      const text = item.text || ''
+      const curContent = cur.content || ''
+      patch.content =
         text && curContent.endsWith(text)
           ? curContent.slice(0, curContent.length - text.length)
-          : curContent,
-      thinkingText: (cur.thinkingText || '') + text,
-      thinkingOpen: true,
-      pending: true,
+          : curContent
+      patch.pending = true
     }
-  } else if (data.type === 'thinking_text') {
-    const cur = messages.value[idx]
-    messages.value[idx] = {
-      ...cur,
-      thinkingText: (cur.thinkingText || '') + (data.content || ''),
-      thinkingOpen: true,
-      pending: cur.pending,
-    }
-  } else if (data.type === 'rag_step') {
-    const cur = messages.value[idx]
-    const nextSteps = [...(cur.ragSteps || []), data.step || {}]
-    messages.value[idx] = {
-      ...cur,
-      ragSteps: nextSteps,
-      thinkingOpen: true,
-      pending: cur.pending,
-    }
+    messages.value[idx] = patch
   } else if (data.type === 'trace') {
     const cur = messages.value[idx]
     messages.value[idx] = {
@@ -797,7 +784,6 @@ function applyChatSsePayload(data, idx) {
       pending: false,
       mcpExecuting: false,
       thinkingOpen: cur.thinkingOpen ?? false,
-      ragSteps: cur.ragSteps || [],
       ragTrace: cur.ragTrace ?? null,
     }
   } else if (data.type === 'cancelled') {
@@ -808,7 +794,6 @@ function applyChatSsePayload(data, idx) {
       pending: false,
       mcpExecuting: false,
       thinkingOpen: cur.thinkingOpen ?? false,
-      ragSteps: cur.ragSteps || [],
       ragTrace: cur.ragTrace ?? null,
       errorText: undefined,
     }
@@ -1077,10 +1062,9 @@ async function maybeResumePendingChatJob() {
       errorText: undefined,
       pending: true,
       thinkingOpen: true,
-      ragSteps: [],
+      thinkingItems: [],
       ragTrace: null,
       sources: [],
-      thinkingText: '',
     })
     idx = messages.value.length - 1
     sessionPhase.value = 'chat'
@@ -1133,11 +1117,10 @@ async function loadMessagesForSession(agentId, sid) {
       content: userContentFromHistoryRow(row),
       pending: false,
       thinkingOpen: row.type === 'human' ? undefined : false,
-      ragSteps: Array.isArray(row.rag_steps) ? row.rag_steps : [],
+      thinkingItems: buildThinkingItemsFromRow(row),
       ragTrace: row.rag_trace || null,
       errorText: row.error_text || undefined,
       sources: Array.isArray(row.sources) ? row.sources : [],
-      thinkingText: row.thinking_text || '',
     }
     if (role === 'user') {
       const att = attachmentsFromHistoryRow(row)
@@ -1523,10 +1506,9 @@ async function submitMessage() {
     errorText: undefined,
     pending: true,
     thinkingOpen: false,
-    ragSteps: [],
+    thinkingItems: [],
     ragTrace: null,
     sources: [],
-    thinkingText: '',
   })
   scrollBodyToBottom(false, { force: true })
 
@@ -1552,7 +1534,6 @@ async function submitMessage() {
           stoppedByUser: true,
           errorText: undefined,
           thinkingOpen: row.thinkingOpen ?? false,
-          ragSteps: row.ragSteps || [],
           ragTrace: row.ragTrace ?? null,
         }
       }
@@ -1563,7 +1544,6 @@ async function submitMessage() {
         errorText: t('views.agents.chat_msg_stream_error') + `：${error?.message || error}`,
         pending: false,
         thinkingOpen: row.thinkingOpen ?? false,
-        ragSteps: row.ragSteps || [],
         ragTrace: row.ragTrace ?? null,
       }
     }
@@ -1600,10 +1580,9 @@ async function regenerateAssistant(assistantMsg) {
     stoppedByUser: false,
     pending: true,
     thinkingOpen: false,
-    ragSteps: [],
+    thinkingItems: [],
     ragTrace: null,
     sources: [],
-    thinkingText: '',
   }
   scrollBodyToBottom(false, { force: true })
 
@@ -1628,7 +1607,6 @@ async function regenerateAssistant(assistantMsg) {
           stoppedByUser: true,
           errorText: undefined,
           thinkingOpen: row.thinkingOpen ?? false,
-          ragSteps: row.ragSteps || [],
           ragTrace: row.ragTrace ?? null,
         }
       }
@@ -1639,7 +1617,6 @@ async function regenerateAssistant(assistantMsg) {
         errorText: t('views.agents.chat_msg_stream_error') + `：${error?.message || error}`,
         pending: false,
         thinkingOpen: row.thinkingOpen ?? false,
-        ragSteps: row.ragSteps || [],
         ragTrace: row.ragTrace ?? null,
       }
     }
@@ -2240,41 +2217,6 @@ html.dark .agent-chat-thinking-placeholder {
   color: rgba(255, 255, 255, 0.4);
 }
 
-.agent-chat-thinking-text {
-  margin-bottom: 8px;
-}
-
-.agent-chat-thinking-text-label {
-  margin-bottom: 4px;
-  font-size: 12px;
-  font-weight: 500;
-  color: #94a3b8;
-}
-
-.agent-chat-thinking-text-body {
-  font-size: 13px;
-  line-height: 1.6;
-  color: #475569;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.agent-chat-thinking-text-body :deep(p) {
-  margin: 0 0 6px;
-}
-
-.agent-chat-thinking-text-body :deep(p:last-child) {
-  margin-bottom: 0;
-}
-
-html.dark .agent-chat-thinking-text-label {
-  color: rgba(255, 255, 255, 0.4);
-}
-
-html.dark .agent-chat-thinking-text-body {
-  color: rgba(255, 255, 255, 0.65);
-}
-
 .agent-chat-thinking-steps {
   display: flex;
   flex-direction: column;
@@ -2320,6 +2262,36 @@ html.dark .agent-chat-thinking-step-label {
 }
 
 html.dark .agent-chat-thinking-step-detail {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* 过渡文案（思考过程）：与步骤行同一结构，正文独占一行、浅于步骤标签 */
+.agent-chat-thinking-step-body.agent-chat-md {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #64748b;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.agent-chat-thinking-step-body.agent-chat-md :deep(p),
+.agent-chat-thinking-step-body.agent-chat-md :deep(li) {
+  font-size: inherit;
+  color: inherit;
+  line-height: inherit;
+}
+
+.agent-chat-thinking-step-body.agent-chat-md :deep(p) {
+  margin: 0 0 4px;
+}
+
+.agent-chat-thinking-step-body.agent-chat-md :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+html.dark .agent-chat-thinking-step-body.agent-chat-md {
   color: rgba(255, 255, 255, 0.45);
 }
 

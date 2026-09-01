@@ -74,6 +74,7 @@ def init_chat_db() -> None:
         conn.execute(text("ALTER TABLE mg_chat_messages ADD COLUMN IF NOT EXISTS error_text TEXT"))
         conn.execute(text("ALTER TABLE mg_chat_messages ADD COLUMN IF NOT EXISTS sources JSON"))
         conn.execute(text("ALTER TABLE mg_chat_messages ADD COLUMN IF NOT EXISTS thinking_text TEXT"))
+        conn.execute(text("ALTER TABLE mg_chat_messages ADD COLUMN IF NOT EXISTS thinking_items JSON"))
         conn.execute(
             text("ALTER TABLE mg_kb_documents ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64)")
         )

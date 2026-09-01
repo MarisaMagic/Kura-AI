@@ -635,6 +635,7 @@ def chat_with_agent_sync(
                 "image_references": image_references,
                 "sources": merged_sources,
                 "kb_preselect": kb_preselect_meta or None,
+                "thinking_items": [{"type": "step", **s} for s in rag_collector.steps] or None,
             }
         ],
     )
@@ -752,12 +753,15 @@ async def iter_chat_stream_events(
     # 创建输出队列, 收集 RAG 步骤
     output_queue: asyncio.Queue = asyncio.Queue()
     rag_steps_collected: list[dict] = []
+    thinking_items_collected: list[dict] = []
 
     # 创建 RAG 步骤代理, 将 RAG 步骤收集到输出队列
     class _RagStepProxy:
         def put_nowait(self, step: dict) -> None:
             rag_steps_collected.append(step)
-            output_queue.put_nowait({"type": "rag_step", "step": step})
+            item = {"type": "step", **step}
+            thinking_items_collected.append(item)
+            output_queue.put_nowait({"type": "thinking_item", "item": item})
 
     # 设置 RAG 步骤队列（须在构造 to_invoke 之前，便于预注入步骤写入 rag_step）
     set_rag_step_queue(_RagStepProxy())
@@ -860,12 +864,16 @@ async def iter_chat_stream_events(
                     if msg_text_emitted:
                         # 本消息此前作为正文流出的文本实为工具调用前导句, 移交前端迁入思考区
                         thinking_text_parts.append(msg_text_emitted)
+                        move_item = {"type": "text", "text": msg_text_emitted}
+                        thinking_items_collected.append(move_item)
                         if full_response.endswith(msg_text_emitted):
                             full_response = full_response[: -len(msg_text_emitted)]
                         else:
                             pos = full_response.rfind(msg_text_emitted)
                             full_response = full_response[:pos] if pos >= 0 else full_response
-                        await output_queue.put({"type": "thinking_move", "text": msg_text_emitted})
+                        await output_queue.put(
+                            {"type": "thinking_item", "item": move_item, "moved_from_content": True}
+                        )
                         msg_text_emitted = ""
                     if msg.id is not None:
                         msg_moved = True
@@ -873,7 +881,17 @@ async def iter_chat_stream_events(
                 if content:
                     if msg_moved:
                         thinking_text_parts.append(content)
-                        await output_queue.put({"type": "thinking_text", "content": content})
+                        if thinking_items_collected and thinking_items_collected[-1].get("type") == "text":
+                            thinking_items_collected[-1]["text"] += content
+                        else:
+                            thinking_items_collected.append({"type": "text", "text": content})
+                        await output_queue.put(
+                            {
+                                "type": "thinking_item",
+                                "item": {"type": "text", "text": content},
+                                "append": True,
+                            }
+                        )
                     else:
                         full_response += content
                         if msg.id is not None:
@@ -963,6 +981,7 @@ async def iter_chat_stream_events(
         "sources": merged_sources,
         "kb_preselect": kb_preselect_meta or None,
         "thinking_text": "".join(thinking_text_parts) or None,
+        "thinking_items": thinking_items_collected or None,
     }
     if regenerate:
         storage.replace_trailing_assistant(user_id, agent_id, session_id, ai_msg, extra=ai_extra)

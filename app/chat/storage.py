@@ -113,6 +113,7 @@ class ConversationStorage:
             "image_references": row.image_references,
             "sources": row.sources,
             "thinking_text": row.thinking_text,
+            "thinking_items": row.thinking_items,
         }
         if env:
             item["content_json"] = env
@@ -133,6 +134,7 @@ class ConversationStorage:
             "image_references": extra.get("image_references"),
             "sources": extra.get("sources"),
             "thinking_text": extra.get("thinking_text"),
+            "thinking_items": extra.get("thinking_items"),
         }
 
     def _session_query(self, db, user_id: int, agent_id: int, session_id: str):
@@ -196,6 +198,7 @@ class ConversationStorage:
                 image_references=fields["image_references"],
                 sources=fields["sources"],
                 thinking_text=fields["thinking_text"],
+                thinking_items=fields["thinking_items"],
             )
         )
 

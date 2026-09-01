@@ -579,6 +579,7 @@ async def get_chat_session_messages(
             error_text=m.get("error_text"),
             sources=m.get("sources"),
             thinking_text=m.get("thinking_text"),
+            thinking_items=m.get("thinking_items"),
         )
         for m in (resign_message_payload(x) for x in raw)
     ]

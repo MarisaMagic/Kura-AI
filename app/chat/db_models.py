@@ -227,6 +227,7 @@ class ChatMessage(Base):
     image_references: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 图片引用列表
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 知识库来源列表（与回答中 [来源N] 编号对应）
     thinking_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # 工具调用前的过渡文本（思考区内容）
+    thinking_items: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 思考区有序时间线：step/text 交错
 
     session = relationship("ChatSession", back_populates="messages")
 
