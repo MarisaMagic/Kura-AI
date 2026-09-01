@@ -19,8 +19,8 @@ RUN python /tmp/filter_requirements.py \
 COPY app ./app
 COPY run.py ./
 
-# 管理端数据在 PostgreSQL；/app/data 仅存头像/文档/附件等文件
-RUN mkdir -p /app/data /app/app/logs
+# 管理端数据在 PostgreSQL；用户文件（头像/文档/附件）在对象存储 MinIO；/app/app/logs 为日志目录
+RUN mkdir -p /app/app/logs
 
 EXPOSE 9999
 

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import tempfile
+from pathlib import Path
 from typing import Any, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from app.chat.attachment_service import _abs_path, classify_kind, get_attachment_row
+from app.chat.attachment_service import attachment_object_key, classify_kind, get_attachment_row
 from app.chat.tools import emit_rag_step
+from app.core import object_storage as obs
 
 
 class ImageRAGState(TypedDict, total=False):
@@ -26,6 +29,16 @@ class ImageRAGState(TypedDict, total=False):
     rag_trace: Optional[dict[str, Any]]
 
 
+def _cleanup_temp_image(path: Optional[str]) -> None:
+    """删除 resolve 节点下载的临时图片文件（对象存储改造后 resolved_image_path 必为临时文件）。"""
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 def _node_resolve_attachment(state: ImageRAGState) -> ImageRAGState:
     aid = (state.get("attachment_id") or "").strip()
     user_id = state["user_id"]
@@ -37,11 +50,17 @@ def _node_resolve_attachment(state: ImageRAGState) -> ImageRAGState:
     kind = (getattr(row, "kind", None) or "") or classify_kind(row.original_filename or "")
     if kind != "image":
         return {**state, "resolved_image_path": None, "error": "该附件不是图片，无法用于以图检索。"}
-    path = _abs_path(row.stored_relpath)
-    if not os.path.isfile(path):
-        return {**state, "resolved_image_path": None, "error": f"图片文件已丢失或不可读: {path}"}
+    # 附件本体在对象存储：下载为本地临时文件（DashScope embedding 走 file://），末节点负责清理
+    try:
+        raw = obs.read_bytes(attachment_object_key(row.stored_relpath))
+    except obs.ObjectNotFoundError:
+        return {**state, "resolved_image_path": None, "error": f"图片文件已丢失或不可读: {row.stored_relpath}"}
+    suffix = Path(row.original_filename or "").suffix or ".png"
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    with os.fdopen(fd, "wb") as f:
+        f.write(raw)
     emit_rag_step("📷", "以图知识库检索", f"已解析 attachment: {aid[:8]}…")
-    return {**state, "resolved_image_path": path, "error": None}
+    return {**state, "resolved_image_path": tmp_path, "error": None}
 
 
 def _node_retrieve(state: ImageRAGState) -> ImageRAGState:
@@ -74,39 +93,42 @@ def _node_retrieve(state: ImageRAGState) -> ImageRAGState:
 
 
 def _node_assemble_rag_trace(state: ImageRAGState) -> ImageRAGState:
-    docs = state.get("docs") or []
-    meta = state.get("meta") or {}
-    err = state.get("error")
-    if err:
+    try:
+        docs = state.get("docs") or []
+        meta = state.get("meta") or {}
+        err = state.get("error")
+        if err:
+            trace = {
+                "tool_used": True,
+                "tool_name": "search_knowledge_by_image",
+                "kb_scope": state.get("kb_scope"),
+                "attachment_id": state.get("attachment_id"),
+                "focus": state.get("focus"),
+                "error": err,
+                "retrieved_chunks": [],
+                "retrieval_stage": "image_rag",
+            }
+            return {**state, "rag_trace": trace}
         trace = {
             "tool_used": True,
             "tool_name": "search_knowledge_by_image",
             "kb_scope": state.get("kb_scope"),
             "attachment_id": state.get("attachment_id"),
             "focus": state.get("focus"),
-            "error": err,
-            "retrieved_chunks": [],
+            "query": f"(image:{state.get('attachment_id')})",
+            "expanded_query": f"(image:{state.get('attachment_id')})",
+            "retrieved_chunks": docs,
+            "initial_retrieved_chunks": docs,
             "retrieval_stage": "image_rag",
+            "retrieval_mode": meta.get("retrieval_mode"),
+            "rerank_applied": meta.get("rerank_applied"),
+            "rerank_error": meta.get("rerank_error"),
+            "candidate_k": meta.get("candidate_k"),
         }
+        emit_rag_step("✅", "以图检索完成", f"命中 {len(docs)} 个片段")
         return {**state, "rag_trace": trace}
-    trace = {
-        "tool_used": True,
-        "tool_name": "search_knowledge_by_image",
-        "kb_scope": state.get("kb_scope"),
-        "attachment_id": state.get("attachment_id"),
-        "focus": state.get("focus"),
-        "query": f"(image:{state.get('attachment_id')})",
-        "expanded_query": f"(image:{state.get('attachment_id')})",
-        "retrieved_chunks": docs,
-        "initial_retrieved_chunks": docs,
-        "retrieval_stage": "image_rag",
-        "retrieval_mode": meta.get("retrieval_mode"),
-        "rerank_applied": meta.get("rerank_applied"),
-        "rerank_error": meta.get("rerank_error"),
-        "candidate_k": meta.get("candidate_k"),
-    }
-    emit_rag_step("✅", "以图检索完成", f"命中 {len(docs)} 个片段")
-    return {**state, "rag_trace": trace}
+    finally:
+        _cleanup_temp_image(state.get("resolved_image_path"))
 
 
 def build_image_rag_graph():

@@ -49,12 +49,12 @@ class Settings(BaseSettings):
     PROJECT_ROOT: str = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
     BASE_DIR: str = os.path.abspath(os.path.join(PROJECT_ROOT, os.pardir))
     LOGS_ROOT: str = os.path.join(BASE_DIR, "app/logs")
-    # 用户头像本地目录（可通过环境变量 USER_AVATAR_ROOT 覆盖，例如 Linux 上 /data/user_avatar）
-    USER_AVATAR_ROOT: str = os.path.join(BASE_DIR, "data", "user_avatar")
+    # 用户头像在对象存储 bucket 内的 key 前缀（对象存储改造前为本地磁盘目录，语义已变更）
+    USER_AVATAR_ROOT: str = "user_avatar"
     # 浏览器访问路径前缀（与签名媒体路由一致）
     USER_AVATAR_URL_PREFIX: str = "/api/v1/media/user_avatar"
-    # 智能体头像：本地目录（可通过环境变量 USER_AGENT_AVATAR_ROOT 覆盖，例如 /data/user_agents_avatar）
-    USER_AGENT_AVATAR_ROOT: str = os.path.join(BASE_DIR, "data", "user_agents_avatar")
+    # 智能体头像在对象存储 bucket 内的 key 前缀
+    USER_AGENT_AVATAR_ROOT: str = "user_agents_avatar"
     USER_AGENT_AVATAR_URL_PREFIX: str = "/api/v1/media/user_agents_avatar"
     # 须在项目根目录 .env 中设置；勿提交仓库。生成: openssl rand -hex 32
     SECRET_KEY: str
@@ -158,17 +158,27 @@ class Settings(BaseSettings):
     # 同名文档「替换落库」阶段的 Redis 互斥锁 TTL（秒）
     KB_UPLOAD_SWAP_LOCK_TTL_SECONDS: int = 600
 
-    # 智能体知识库文档根目录：data/user_agent_docs/user_{id}/{agent_id}/
-    USER_AGENT_KB_DOCS_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_docs")
-    # 智能体知识库图片根目录：data/user_agent_images/user_{id}/{agent_id}/
-    USER_AGENT_KB_IMAGES_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_images")
+    # 智能体知识库文档在对象存储 bucket 内的 key 前缀：user_agent_docs/user_{id}/{agent_id}/
+    USER_AGENT_KB_DOCS_ROOT: str = "user_agent_docs"
+    # 智能体知识库图片在对象存储 bucket 内的 key 前缀：user_agent_images/user_{id}/{agent_id}/
+    USER_AGENT_KB_IMAGES_ROOT: str = "user_agent_images"
     # 浏览器访问图片路径前缀
     USER_AGENT_KB_IMAGES_URL_PREFIX: str = "/api/v1/media/user_agent_images"
     # 对外可访问的 API 根地址（无尾斜杠）。聊天/知识库图片一律用同源相对路径 /api/v1/media/...，
     # 不拼接此值，以免 http 绝对地址被前端 CSP img-src 拦截。
     PUBLIC_API_BASE: str = ""
-    # 会话对话附件：data/user_agent_uploads/user_{id}/{agent_id}/{session}/
-    USER_AGENT_CHAT_UPLOAD_ROOT: str = os.path.join(BASE_DIR, "data", "user_agent_uploads")
+    # 会话对话附件在对象存储 bucket 内的 key 前缀：user_agent_uploads/user_{id}/{agent_id}/{session}/
+    USER_AGENT_CHAT_UPLOAD_ROOT: str = "user_agent_uploads"
+
+    # ===== 对象存储（MinIO / S3 兼容）；开发与生产统一使用，开发默认指向本机 minio-app 容器 =====
+    # S3 API 地址（不含协议），开发 127.0.0.1:9002；生产 compose 注入 minio-app:9000
+    S3_ENDPOINT: str = "127.0.0.1:9002"
+    S3_ACCESS_KEY: str = "kura_app"
+    # 生产务必通过环境变量覆盖，与 docker-compose 的 MINIO_APP_ROOT_PASSWORD 一致
+    S3_SECRET_KEY: str = "kura_app_dev_only_change_me"
+    S3_BUCKET: str = "kura-user-files"
+    # 是否走 https；本机/内网容器间通信为 false
+    S3_SECURE: bool = False
     # 单次请求：附件个数、单文件大小（字节）、会话附件总大小上限
     CHAT_UPLOAD_MAX_FILES_PER_MESSAGE: int = 5
     CHAT_UPLOAD_MAX_BYTES_PER_FILE: int = 15 * 1024 * 1024

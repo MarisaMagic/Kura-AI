@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from typing import Literal
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from app.chat.attachment_service import _abs_path, classify_kind, get_attachment_row
+from app.chat.attachment_service import attachment_object_key, classify_kind, get_attachment_row
+from app.core import object_storage as obs
 from app.chat.tools import (
     _set_last_rag_context,
     emit_rag_step,
@@ -50,7 +50,7 @@ def make_search_knowledge_by_image_tool(
         kind = (getattr(row, "kind", None) or "") or classify_kind(row.original_filename or "")
         if kind != "image":
             return "错误：该附件不是图片，无法以图检索知识库。"
-        if not os.path.isfile(_abs_path(row.stored_relpath)):
+        if not obs.exists(attachment_object_key(row.stored_relpath)):
             return "错误：图片文件在服务器上不可读，请重新上传。"
 
         if not try_acquire_image_kb_tool_slot(user_id, agent_id, session_id):

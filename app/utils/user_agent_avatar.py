@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import os
+import mimetypes
 import re
 import uuid
 from pathlib import Path
 
 from fastapi import UploadFile
 
+from app.core import object_storage as obs
 from app.settings import settings
 from app.utils.signed_media import KIND_AGENT_AVATAR, sign_media_url
 
@@ -27,9 +28,10 @@ def safe_agent_avatar_extension(filename: str | None) -> str | None:
     return ext if ext in ALLOWED_AGENT_AVATAR_EXTENSIONS else None
 
 
-def user_agent_avatar_dir(username: str) -> str:
+def user_agent_avatar_key_prefix(username: str) -> str:
+    """智能体头像在 bucket 内的 key 前缀（USER_AGENT_AVATAR_ROOT 语义为前缀）。"""
     safe = re.sub(r"[^\w\-.]", "_", username)[:80]
-    return os.path.join(settings.USER_AGENT_AVATAR_ROOT, f"user_{safe}")
+    return obs.join_key(settings.USER_AGENT_AVATAR_ROOT, f"user_{safe}")
 
 
 async def save_uploaded_agent_avatar(username: str, file: UploadFile) -> tuple[str | None, str | None]:
@@ -48,20 +50,12 @@ async def save_uploaded_agent_avatar(username: str, file: UploadFile) -> tuple[s
     except ValueError as e:
         return None, str(e)
     new_name = f"{uuid.uuid4().hex}{ext}"
-    root = user_agent_avatar_dir(username)
-    os.makedirs(root, exist_ok=True)
-    path = os.path.join(root, new_name)
-    with open(path, "wb") as f:
-        f.write(contents)
+    mime = mimetypes.guess_type(file.filename or new_name)[0] or "application/octet-stream"
+    obs.save_bytes(obs.join_key(user_agent_avatar_key_prefix(username), new_name), contents, content_type=mime)
     return new_name, None
 
 
 def remove_agent_avatar_file(username: str, avatar_filename: str | None) -> None:
     if not avatar_filename:
         return
-    path = os.path.join(user_agent_avatar_dir(username), avatar_filename)
-    if os.path.isfile(path):
-        try:
-            os.remove(path)
-        except OSError:
-            pass
+    obs.delete_key(obs.join_key(user_agent_avatar_key_prefix(username), avatar_filename))

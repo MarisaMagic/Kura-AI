@@ -1,5 +1,6 @@
 """
 图片存储服务，用于管理知识库图片的存储、检索和删除。
+图片本体存对象存储（chunk 的 image_path 即相对 IMAGES 前缀的 relpath），本服务只管 PG 元数据与对象删除。
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from loguru import logger
 
 from app.chat.database import SessionLocal
 from app.chat.db_models import KbImage
+from app.core import object_storage as obs
 from app.settings import settings
 
 
@@ -43,6 +45,7 @@ class ImageStore:
         image_height: int = 0,
         image_format: str = "png",
         related_text_ids: Optional[List[str]] = None,
+        file_size: int = 0,
     ) -> KbImage:
         """
         保存图片元数据到数据库
@@ -50,7 +53,7 @@ class ImageStore:
         :param user_id: 用户ID
         :param agent_id: 智能体ID
         :param filename: 文件名
-        :param image_path: 图片存储路径
+        :param image_path: 图片对象相对 IMAGES 前缀的 relpath（user_{uid}/{aid}/{fingerprint}/xxx.png）
         :param page_number: 页码
         :param chunk_id: 关联的向量块ID
         :param parent_chunk_id: 关联的父块ID
@@ -63,21 +66,14 @@ class ImageStore:
         :param image_height: 图片实际高度
         :param image_format: 图片格式
         :param related_text_ids: 关联的文本块ID列表
+        :param file_size: 图片字节数（由上传方在写入对象存储时已知，透传避免再次 stat）
         :return: KbImage
         """
         db = SessionLocal()
         try:
-            # 获取图片文件信息
-            path_obj = Path(image_path)
-            file_size = path_obj.stat().st_size if path_obj.exists() else 0
-            
-            # 计算相对路径
-            images_root = Path(settings.USER_AGENT_KB_IMAGES_ROOT)
-            try:
-                stored_relpath = str(path_obj.relative_to(images_root))
-            except ValueError:
-                stored_relpath = image_path
-            
+            # image_path 即相对 IMAGES 前缀的 relpath（归一为正斜杠）
+            stored_relpath = (image_path or "").replace("\\", "/").lstrip("/")
+
             # 创建图片记录
             image_record = KbImage(
                 id=uuid.uuid4().hex,
@@ -156,6 +152,7 @@ class ImageStore:
                     image_height=image_metadata.get("height", 0),
                     image_format=image_metadata.get("format", "png"),
                     related_text_ids=chunk.get("related_text_ids", []),
+                    file_size=int(image_metadata.get("size_bytes", 0) or 0),
                 )
                 saved_count += 1
             except Exception as e:
@@ -245,15 +242,13 @@ class ImageStore:
             stmt = select(KbImage).where(KbImage.kb_scope == kb_scope)
             images = db.execute(stmt).scalars().all()
             
-            # 删除图片文件
+            # 删除对象存储中的图片对象
             for image in images:
                 try:
-                    image_path = Path(settings.USER_AGENT_KB_IMAGES_ROOT) / image.stored_relpath
-                    if image_path.exists():
-                        image_path.unlink()
+                    obs.delete_key(obs.join_key(settings.USER_AGENT_KB_IMAGES_ROOT, image.stored_relpath))
                 except Exception as e:
-                    logger.warning(f"Failed to delete image file {image.stored_relpath}: {e}")
-            
+                    logger.warning(f"Failed to delete image object {image.stored_relpath}: {e}")
+
             # 删除数据库记录
             stmt = select(KbImage).where(KbImage.kb_scope == kb_scope)
             images = db.execute(stmt).scalars().all()
@@ -272,13 +267,21 @@ class ImageStore:
         finally:
             db.close()
 
-    def delete_images_by_document(self, kb_scope: str, filename: str) -> int:
+    def delete_images_by_document(
+        self,
+        kb_scope: str,
+        filename: str,
+        exclude_rels: Optional[set] = None,
+    ) -> int:
         """
         根据知识库范围和文件名删除图片
         :param kb_scope: 知识库范围
         :param filename: 文件名
+        :param exclude_rels: 删除对象时排除的 relpath 集合（同名替换上传时保护同 key 的新图；
+                             DB 记录仍全删，仅对象删除跳过）
         :return: 删除的数量
         """
+        excluded = {str(r).replace("\\", "/").lstrip("/") for r in (exclude_rels or set())}
         db = SessionLocal()
         try:
             # 先获取要删除的图片列表
@@ -287,16 +290,17 @@ class ImageStore:
                 KbImage.source_document == filename
             )
             images = db.execute(stmt).scalars().all()
-            
-            # 删除图片文件
+
+            # 删除对象存储中的图片对象（跳过本次替换仍在使用的 key）
             for image in images:
+                rel = str(image.stored_relpath or "").replace("\\", "/").lstrip("/")
+                if rel and rel in excluded:
+                    continue
                 try:
-                    image_path = Path(settings.USER_AGENT_KB_IMAGES_ROOT) / image.stored_relpath
-                    if image_path.exists():
-                        image_path.unlink()
+                    obs.delete_key(obs.join_key(settings.USER_AGENT_KB_IMAGES_ROOT, image.stored_relpath))
                 except Exception as e:
-                    logger.warning(f"Failed to delete image file {image.stored_relpath}: {e}")
-            
+                    logger.warning(f"Failed to delete image object {image.stored_relpath}: {e}")
+
             # 删除数据库记录
             count = len(images)
             for image in images:

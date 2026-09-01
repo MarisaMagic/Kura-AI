@@ -1,4 +1,7 @@
-"""媒体文件 HMAC 签名 URL：头像 / 智能体头像 / 知识库图片。"""
+"""媒体文件 HMAC 签名 URL：头像 / 智能体头像 / 知识库图片。
+
+签名机制不变；文件本体存于对象存储，验签后由后端从对象存储流式中转返回。
+"""
 
 from __future__ import annotations
 
@@ -11,8 +14,9 @@ from typing import Any
 from urllib.parse import urlencode, urlsplit
 
 from fastapi import HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 
+from app.core import object_storage as obs
 from app.settings import settings
 
 KIND_USER_AVATAR = "user_avatar"
@@ -33,13 +37,14 @@ _MEDIA_URL_RE = re.compile(
 )
 
 
-def _kind_root(kind: str) -> Path:
+def _kind_prefix(kind: str) -> str:
+    """媒体类型对应的对象 key 前缀（配置项沿用 *_ROOT 名称，语义为 bucket 内前缀）。"""
     if kind == KIND_USER_AVATAR:
-        return Path(settings.USER_AVATAR_ROOT)
+        return settings.USER_AVATAR_ROOT
     if kind == KIND_AGENT_AVATAR:
-        return Path(settings.USER_AGENT_AVATAR_ROOT)
+        return settings.USER_AGENT_AVATAR_ROOT
     if kind == KIND_KB_IMAGE:
-        return Path(settings.USER_AGENT_KB_IMAGES_ROOT)
+        return settings.USER_AGENT_KB_IMAGES_ROOT
     raise HTTPException(status_code=404, detail="未知媒体类型")
 
 
@@ -86,27 +91,29 @@ def verify_media_signature(kind: str, relpath: str, exp: int, sig: str) -> None:
         raise HTTPException(status_code=403, detail="无效的媒体签名")
 
 
-def resolve_media_file(kind: str, relpath: str) -> Path:
+def resolve_media_key(kind: str, relpath: str) -> str:
+    """验签前的路径安全校验：拒绝空路径与 .. 段，返回完整对象 key。"""
     rel = _normalize_relpath(relpath)
     if not rel or ".." in Path(rel).parts:
         raise HTTPException(status_code=403, detail="非法路径")
-    root = _kind_root(kind).resolve()
-    candidate = (root / rel).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise HTTPException(status_code=403, detail="非法路径") from exc
-    if not candidate.is_file():
-        raise HTTPException(status_code=404, detail="文件不存在")
-    return candidate
+    return obs.join_key(_kind_prefix(kind), rel)
 
 
-def serve_signed_media(kind: str, relpath: str, exp: int, sig: str) -> FileResponse:
+def serve_signed_media(kind: str, relpath: str, exp: int, sig: str) -> StreamingResponse:
     verify_media_signature(kind, relpath, exp, sig)
-    path = resolve_media_file(kind, relpath)
-    return FileResponse(
-        path,
-        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=300"},
+    key = resolve_media_key(kind, relpath)
+    try:
+        chunks, size, content_type = obs.stream_object(key)
+    except obs.ObjectNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="文件不存在") from exc
+    return StreamingResponse(
+        chunks,
+        media_type=content_type,
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, max-age=300",
+            "Content-Length": str(size),
+        },
     )
 
 

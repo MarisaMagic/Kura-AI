@@ -81,6 +81,7 @@ MarkupSafe==3.0.2
 marshmallow==3.26.2
 mcp==1.29.1
 mdurl==0.1.2
+minio==7.2.20
 multidict==6.7.1
 murmurhash==1.0.15
 mypy-extensions==1.0.0

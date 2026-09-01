@@ -1,13 +1,11 @@
 """
-会话附件：落盘、校验、读取（供多模态与 read_session_attachment 工具使用）。
+会话附件：对象存储落库、校验、读取（供多模态与 read_session_attachment 工具使用）。
 """
 
 from __future__ import annotations
 
 import mimetypes
-import os
 import re
-import shutil
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +15,7 @@ from sqlalchemy import func
 
 from app.chat.database import SessionLocal
 from app.chat.db_models import ChatAttachment as ChatAttachmentRow
+from app.core import object_storage as obs
 from app.settings import settings
 
 # 支持的上传附件类型
@@ -79,41 +78,27 @@ def allowed_extension(filename: str) -> bool:
     return classify_kind(filename) != "other"
 
 
-def _abs_path(stored_relpath: str) -> str:
+def attachment_object_key(stored_relpath: str) -> str:
     """
-    根据存储路径获取文件绝对路径
-    :param stored_relpath: 存储路径
-    :return: 文件绝对路径
+    由 DB 中的存储相对路径得到对象存储 key
+    :param stored_relpath: 存储相对路径
+    :return: 对象 key
     """
-    root = settings.USER_AGENT_CHAT_UPLOAD_ROOT
-    return os.path.normpath(os.path.join(root, stored_relpath))
+    return obs.join_key(settings.USER_AGENT_CHAT_UPLOAD_ROOT, stored_relpath)
 
 
-def session_upload_dir(user_id: int, agent_id: int, session_id: str) -> str:
-    """
-    根据用户ID、智能体ID、会话ID获取会话上传目录
-    :param user_id: 用户ID
-    :param agent_id: 智能体ID
-    :param session_id: 会话ID
-    :return: 会话上传目录
-    """
-    p = _session_upload_dir_path(user_id, agent_id, session_id)
-    os.makedirs(p, exist_ok=True)
-    return p
-
-
-def _agent_upload_root(user_id: int, agent_id: int) -> str:
-    return os.path.join(
+def _agent_key_prefix(user_id: int, agent_id: int) -> str:
+    return obs.join_key(
         settings.USER_AGENT_CHAT_UPLOAD_ROOT, f"user_{user_id}", f"agent_{agent_id}"
     )
 
 
-def _session_upload_dir_path(user_id: int, agent_id: int, session_id: str) -> str:
-    return os.path.join(_agent_upload_root(user_id, agent_id), _safe_segment(session_id))
+def _session_key_prefix(user_id: int, agent_id: int, session_id: str) -> str:
+    return obs.join_key(_agent_key_prefix(user_id, agent_id), _safe_segment(session_id))
 
 
 def purge_attachments_for_session(user_id: int, agent_id: int, session_id: str) -> None:
-    """删除某会话的附件库记录与磁盘目录。"""
+    """删除某会话的附件库记录与对象存储中的对象。"""
     db = SessionLocal()
     try:
         db.query(ChatAttachmentRow).filter(
@@ -124,11 +109,11 @@ def purge_attachments_for_session(user_id: int, agent_id: int, session_id: str) 
         db.commit()
     finally:
         db.close()
-    shutil.rmtree(_session_upload_dir_path(user_id, agent_id, session_id), ignore_errors=True)
+    obs.delete_prefix(_session_key_prefix(user_id, agent_id, session_id))
 
 
 def purge_attachments_for_agent(user_id: int, agent_id: int) -> None:
-    """删除某智能体下全部会话附件记录与磁盘目录。"""
+    """删除某智能体下全部会话附件记录与对象存储中的对象。"""
     db = SessionLocal()
     try:
         db.query(ChatAttachmentRow).filter(
@@ -138,7 +123,7 @@ def purge_attachments_for_agent(user_id: int, agent_id: int) -> None:
         db.commit()
     finally:
         db.close()
-    shutil.rmtree(_agent_upload_root(user_id, agent_id), ignore_errors=True)
+    obs.delete_prefix(_agent_key_prefix(user_id, agent_id))
 
 
 def get_attachment_row(
@@ -182,11 +167,10 @@ def file_bytes_for_attachment(
     row = get_attachment_row(attachment_id, user_id=user_id, agent_id=agent_id, session_id=session_id)
     if not row:
         return None
-    path = _abs_path(row.stored_relpath)
-    if not os.path.isfile(path):
+    try:
+        return obs.read_bytes(attachment_object_key(row.stored_relpath))
+    except obs.ObjectNotFoundError:
         return None
-    with open(path, "rb") as f:
-        return f.read()
 
 
 def list_session_attachments(user_id: int, agent_id: int, session_id: str) -> list[dict[str, Any]]:
@@ -328,15 +312,11 @@ def save_uploaded_file(
     aid = uuid.uuid4().hex  # 生成附件ID
     kind = classify_kind(name)  # 获取文件类型
     safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", Path(name).name)[:180] or "file"  # 生成安全文件名
-    sub = os.path.join(
+    sub = obs.join_key(
         f"user_{user_id}", f"agent_{agent_id}", _safe_segment(session_id), f"{aid}_{safe_name}"
-    )  # 生成存储路径
-    abs_path = _abs_path(sub)  # 获取文件绝对路径
-    os.makedirs(os.path.dirname(abs_path), exist_ok=True)  # 创建目录
-    with open(abs_path, "wb") as f:  # 写入文件
-        f.write(raw)
-
+    )  # 生成存储相对路径（存入 DB；完整对象 key 由 attachment_object_key 拼前缀）
     mime = guess_mime_from_path(name)  # 获取文件类型
+    obs.save_bytes(attachment_object_key(sub), raw, content_type=mime)  # 写入对象存储
 
     # 写入数据库
     db = SessionLocal()
@@ -461,67 +441,81 @@ def extract_attachment_plaintext(
     row = get_attachment_row(attachment_id, user_id=user_id, agent_id=agent_id, session_id=session_id)
     if not row:
         return None, "错误：附件不存在或无权访问。"
-    path = _abs_path(row.stored_relpath)
-    if not os.path.isfile(path):
-        return None, "错误：附件文件已丢失。"
 
     kind = row.kind
     suf = Path(row.original_filename).suffix.lower()
+    key = attachment_object_key(row.stored_relpath)
+
+    if kind == "image":
+        return None, (
+            "该附件为图片；若已启用多模态视觉，模型可直接理解。否则无法以文本工具读取图片内容。"
+        )
 
     try:
-        if kind == "image":
-            return None, (
-                "该附件为图片；若已启用多模态视觉，模型可直接理解。否则无法以文本工具读取图片内容。"
-            )
-
         if suf in (".txt", ".md"):
-            raw = Path(path).read_bytes()
+            raw = obs.read_bytes(key)
             text = raw.decode("utf-8", errors="replace")
             return AttachmentPlaintextExtract(text=text, page_starts=()), None
-
-        if suf == ".pdf":
-            from langchain_community.document_loaders import PyPDFLoader
-
-            loader = PyPDFLoader(path)
-            docs = loader.load()
-            # 抽取 pdf 中每一页的文本内容
-            parts = [(d.page_content or "").strip() for d in docs]
-            # 计算每一页的文本内容在 text 中的起始字符下标
-            page_starts: list[int] = []
-            acc = 0  # 累加每一页的文本内容的长度，用于计算每一页的文本内容在 text 中的起始字符下标
-            for i, p in enumerate(parts):
-                page_starts.append(acc) # 添加每一页的文本内容在 text 中的起始字符下标
-                acc += len(p) # 累加每一页的文本内容的长度
-                if i + 1 < len(parts): # 如果还有下一页，则添加换行符
-                    acc += 2
-            text = "\n\n".join(parts) # 将每一页的文本内容拼接起来
-            text = (text or "").strip()
-            return AttachmentPlaintextExtract(text=text, page_starts=tuple(page_starts)), None # 返回附件全文抽取结果
-
-        if suf == ".docx":
-            from langchain_community.document_loaders import Docx2txtLoader
-
-            loader = Docx2txtLoader(path)
-            docs = loader.load()
-            text = "\n\n".join((d.page_content or "") for d in docs)
-            text = (text or "").strip()
-            return AttachmentPlaintextExtract(text=text, page_starts=()), None
-
-        if suf == ".csv":
-            import pandas as pd
-
-            df = pd.read_csv(path, nrows=2000)
-            text = df.to_string()
-            return AttachmentPlaintextExtract(text=text, page_starts=()), None
-
-        if suf in (".xlsx", ".xls"):
-            import pandas as pd
-
-            df = pd.read_excel(path, nrows=2000, header=None)
-            text = df.to_string()
-            return AttachmentPlaintextExtract(text=text, page_starts=()), None
+    except obs.ObjectNotFoundError:
+        return None, "错误：附件文件已丢失。"
     except Exception as e:
         return None, f"读取附件失败：{e}"
+
+    # PDF/DOCX/表格解析库要求本地路径：下载到临时文件后解析，退出自动清理
+    try:
+        with obs.download_temp(key, suffix=suf) as path:
+            return _extract_plaintext_from_local(path, suf)
+    except obs.ObjectNotFoundError:
+        return None, "错误：附件文件已丢失。"
+    except Exception as e:
+        return None, f"读取附件失败：{e}"
+
+
+def _extract_plaintext_from_local(
+    path: str, suf: str
+) -> tuple[AttachmentPlaintextExtract | None, str | None]:
+    """从本地文件路径抽取纯文本（对象存储场景下 path 为临时文件）。"""
+    if suf == ".pdf":
+        from langchain_community.document_loaders import PyPDFLoader
+
+        loader = PyPDFLoader(path)
+        docs = loader.load()
+        # 抽取 pdf 中每一页的文本内容
+        parts = [(d.page_content or "").strip() for d in docs]
+        # 计算每一页的文本内容在 text 中的起始字符下标
+        page_starts: list[int] = []
+        acc = 0  # 累加每一页的文本内容的长度，用于计算每一页的文本内容在 text 中的起始字符下标
+        for i, p in enumerate(parts):
+            page_starts.append(acc) # 添加每一页的文本内容在 text 中的起始字符下标
+            acc += len(p) # 累加每一页的文本内容的长度
+            if i + 1 < len(parts): # 如果还有下一页，则添加换行符
+                acc += 2
+        text = "\n\n".join(parts) # 将每一页的文本内容拼接起来
+        text = (text or "").strip()
+        return AttachmentPlaintextExtract(text=text, page_starts=tuple(page_starts)), None # 返回附件全文抽取结果
+
+    if suf == ".docx":
+        from langchain_community.document_loaders import Docx2txtLoader
+
+        loader = Docx2txtLoader(path)
+        docs = loader.load()
+        text = "\n\n".join((d.page_content or "") for d in docs)
+        text = (text or "").strip()
+        return AttachmentPlaintextExtract(text=text, page_starts=()), None
+
+    if suf == ".csv":
+        import pandas as pd
+
+        df = pd.read_csv(path, nrows=2000)
+        text = df.to_string()
+        return AttachmentPlaintextExtract(text=text, page_starts=()), None
+
+    if suf in (".xlsx", ".xls"):
+        import pandas as pd
+
+        df = pd.read_excel(path, nrows=2000, header=None)
+        text = df.to_string()
+        return AttachmentPlaintextExtract(text=text, page_starts=()), None
 
     return None, "不支持的附件类型。"
 

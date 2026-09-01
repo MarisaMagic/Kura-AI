@@ -1,5 +1,4 @@
 import asyncio
-import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -23,6 +22,13 @@ async def lifespan(app: FastAPI):
     from app.log import logger
 
     await init_data()
+    try:
+        from app.core.object_storage import ensure_bucket
+
+        # 对象存储 bucket 初始化（头像/会话附件/知识库文档与图片）；失败时文件功能不可用，其余功能照常
+        await asyncio.to_thread(ensure_bucket)
+    except Exception as e:
+        logger.error("对象存储初始化失败（头像/附件/知识库文件功能将不可用）: %s", e)
     try:
         from app.chat.database import init_chat_db
 
@@ -58,10 +64,6 @@ def create_app() -> FastAPI:
     )
     register_exceptions(app)
     register_routers(app, prefix="/api")
-    os.makedirs(settings.USER_AVATAR_ROOT, exist_ok=True)
-    os.makedirs(settings.USER_AGENT_AVATAR_ROOT, exist_ok=True)
-    os.makedirs(settings.USER_AGENT_CHAT_UPLOAD_ROOT, exist_ok=True)
-    os.makedirs(settings.USER_AGENT_KB_IMAGES_ROOT, exist_ok=True)
     return app
 
 

@@ -1,10 +1,11 @@
-import os
+import mimetypes
 import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, File, Request, UploadFile
 
 from app.controllers.user import user_controller
+from app.core import object_storage as obs
 from app.core.ctx import CTX_USER_ID
 from app.core.dependency import DependAuth
 from app.models.admin import Api, Menu, Role, User
@@ -100,18 +101,10 @@ async def upload_avatar(file: UploadFile = File(...)):
     except ValueError as e:
         return Fail(msg=str(e))
     new_name = f"{uuid.uuid4().hex}{ext}"
-    root = settings.USER_AVATAR_ROOT
     if user_obj.avatar:
-        old_path = os.path.join(root, user_obj.avatar)
-        if os.path.isfile(old_path):
-            try:
-                os.remove(old_path)
-            except OSError:
-                pass
-    os.makedirs(root, exist_ok=True)
-    path = os.path.join(root, new_name)
-    with open(path, "wb") as f:
-        f.write(contents)
+        obs.delete_key(obs.join_key(settings.USER_AVATAR_ROOT, user_obj.avatar))
+    mime = mimetypes.guess_type(file.filename or new_name)[0] or "application/octet-stream"
+    obs.save_bytes(obs.join_key(settings.USER_AVATAR_ROOT, new_name), contents, content_type=mime)
     user_obj.avatar = new_name
     await user_obj.save()
     return Success(data={"avatar": avatar_url_from_filename(new_name)})

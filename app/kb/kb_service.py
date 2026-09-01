@@ -1,11 +1,12 @@
-"""知识库：上传、列表、删除、按智能体清空。"""
+"""知识库：上传、列表、删除、按智能体清空。文档与图片本体存对象存储，PG 仅存元数据。"""
 
 from __future__ import annotations
 
 import hashlib
 import math
+import mimetypes
 import os
-import shutil
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Callable
 from app.chat.cache import cache
 from app.chat.database import SessionLocal
 from app.chat.db_models import KbDocument, KbParentChunk
+from app.core import object_storage as obs
 from app.kb.image_store import get_image_store
 from app.kb.kb_scope import kb_scope_for
 from app.kb.milvus_client import MilvusManager, milvus_escape
@@ -28,15 +30,14 @@ _parent = ParentChunkStore()
 _image_store = get_image_store()
 
 
-def agent_kb_directory(user_id: int, agent_id: int) -> Path:
+def agent_kb_key_prefix(user_id: int, agent_id: int) -> str:
     """
-    每个智能体知识库文档存储的根目录
+    每个智能体知识库文档在 bucket 内的 key 前缀
     :param user_id: 用户ID
     :param agent_id: 智能体ID
-    :return: 智能体知识库文档根目录（data/user_agent_docs/user_{id}/{agent_id}/）
+    :return: 文档 key 前缀（user_agent_docs/user_{id}/{agent_id}）
     """
-    root = Path(settings.USER_AGENT_KB_DOCS_ROOT)
-    return root / f"user_{user_id}" / str(agent_id)
+    return obs.join_key(settings.USER_AGENT_KB_DOCS_ROOT, f"user_{user_id}", str(agent_id))
 
 
 def normalize_display_filename(raw: str) -> str:
@@ -92,13 +93,11 @@ def purge_kb_for_scope(kb_scope: str, user_id: int, agent_id: int) -> None:
         db.close()
     # 4. 删除图片
     _image_store.delete_images_by_kb_scope(kb_scope)
-    # 5. 删除磁盘文件
-    d = agent_kb_directory(user_id, agent_id)
-    if d.is_dir():
-        try:
-            shutil.rmtree(d, ignore_errors=True)
-        except Exception:
-            pass
+    # 5. 删除对象存储中的文档文件
+    try:
+        obs.delete_prefix(agent_kb_key_prefix(user_id, agent_id))
+    except Exception:
+        pass
 
 
 def delete_kb_document(
@@ -107,14 +106,16 @@ def delete_kb_document(
     agent_id: int,
     display_filename: str,
     milvus_manager: MilvusManager | None = None,
+    exclude_image_rels: set[str] | None = None,
 ) -> bool:
     """
-    删除单个智能体的知识库中的单个文档的向量、父块、元数据与磁盘文件。
+    删除单个智能体的知识库中的单个文档的向量、父块、元数据与对象存储文件。
     :param kb_scope: 知识库范围（用户ID + 智能体ID）
     :param user_id: 用户ID
     :param agent_id: 智能体ID
     :param display_filename: 展示文件名
     :param milvus_manager: 指定 Milvus 管理器（上传任务线程传入专用实例，避免跨线程共用单例）；None 用模块级单例
+    :param exclude_image_rels: 删除图片对象时排除的 relpath 集合（同名替换上传时保护同 key 的新图）
     :return: 是否删除成功
     """
     mv = milvus_manager or _milvus
@@ -147,14 +148,12 @@ def delete_kb_document(
         db.commit()
     finally:
         db.close()
-    # 4. 删除图片
-    _image_store.delete_images_by_document(kb_scope, display_filename)
-    # 5. 删除对应的磁盘文件
+    # 4. 删除图片（同名替换场景下跳过本次新图正在使用的 key）
+    _image_store.delete_images_by_document(kb_scope, display_filename, exclude_rels=exclude_image_rels)
+    # 5. 删除对象存储中的对应文档
     if stored:
-        p = agent_kb_directory(user_id, agent_id) / stored
         try:
-            if p.is_file():
-                p.unlink()
+            obs.delete_key(obs.join_key(agent_kb_key_prefix(user_id, agent_id), stored))
         except Exception:
             pass
     return True
@@ -219,13 +218,13 @@ class KbUploadTaskGuard:
             raise KbUploadTaskCancelled()
 
 
-def _document_images_dir(user_id: int, agent_id: int, display_filename: str) -> Path:
-    """某文档提取图片在磁盘上的目录（与 loader 的存储位置一致，用于失败时清理）。"""
-    return (
-        Path(settings.USER_AGENT_KB_IMAGES_ROOT)
-        / f"user_{user_id}"
-        / str(agent_id)
-        / _filename_fingerprint(display_filename)
+def _document_images_key_prefix(user_id: int, agent_id: int, display_filename: str) -> str:
+    """某文档提取图片在 bucket 内的 key 前缀（与 loader 输出子结构一致，用于失败时清理）。"""
+    return obs.join_key(
+        settings.USER_AGENT_KB_IMAGES_ROOT,
+        f"user_{user_id}",
+        str(agent_id),
+        _filename_fingerprint(display_filename),
     )
 
 
@@ -234,16 +233,38 @@ def _swap_lock_key(kb_scope: str, display_filename: str) -> str:
     return f"kb_upload_lock:{kb_scope}:{display_filename}"
 
 
-def _cleanup_upload_assets(path: Path, images_dir: Path) -> None:
-    """删除本次上传的临时文件与解析期提取的图片（失败/中止时调用）。"""
+def _cleanup_upload_assets(doc_key: str | None, images_prefix: str) -> None:
+    """删除本次上传已写入对象存储的产物（失败/中止时调用；均未上传时为空操作，幂等）。"""
     try:
-        path.unlink(missing_ok=True)
+        if doc_key:
+            obs.delete_key(doc_key)
     except Exception:
         pass
     try:
-        shutil.rmtree(images_dir, ignore_errors=True)
+        obs.delete_prefix(images_prefix)
     except Exception:
         pass
+
+
+def _upload_kb_images_and_rewrite_paths(
+    chunks: list[dict], images_tmp_root: Path
+) -> None:
+    """将 loader 抽到临时目录的图片批量上传对象存储，并把 chunk 的 image_path 改写为相对 relpath。
+
+    必须在 write_documents 之前调用（save_images_batch / Milvus 落库均使用改写后的 relpath）。
+    """
+    root = Path(images_tmp_root)
+    for c in chunks:
+        if c.get("content_type") != "image":
+            continue
+        local = (c.get("image_path") or "").strip()
+        if not local:
+            continue
+        p = Path(local)
+        rel = p.relative_to(root).as_posix()  # user_{uid}/{aid}/{fingerprint}/xxx.png
+        mime = mimetypes.guess_type(p.name)[0] or "image/png"
+        obs.save_file(obs.join_key(settings.USER_AGENT_KB_IMAGES_ROOT, rel), str(p), content_type=mime)
+        c["image_path"] = rel
 
 
 def run_ingest_pipeline_sync(
@@ -313,74 +334,86 @@ def run_ingest_pipeline_sync(
     finally:
         db.close()
 
-    # 写盘并解析；此阶段失败只清理本次临时产物，旧文档不动
-    ddir = agent_kb_directory(user_id, agent_id)
-    ddir.mkdir(parents=True, exist_ok=True)
+    # 解析与嵌入均在临时目录完成；全部成功后才上传对象存储并进入替换落库，失败时旧文档原样保留
     stored = f"{uuid.uuid4().hex}_{normalize_display_filename(display_filename).replace('/', '_')}"
-    path = ddir / stored
-    images_dir = _document_images_dir(user_id, agent_id, display_filename)
-    path.write_bytes(content)
+    doc_key = obs.join_key(agent_kb_key_prefix(user_id, agent_id), stored)
+    images_prefix = _document_images_key_prefix(user_id, agent_id, display_filename)
+    doc_mime = mimetypes.guess_type(display_filename)[0] or "application/octet-stream"
 
-    report("parsing", 0, 1)
-    try:
-        chunks = _multimodal_loader.load_document(str(path), display_filename, kb_scope, user_id, agent_id)
-    except Exception as e:
-        _cleanup_upload_assets(path, images_dir)
-        raise ValueError(f"文档处理失败: {e}") from e
-    check.checkpoint()
-    if not chunks:
-        _cleanup_upload_assets(path, images_dir)
-        raise ValueError("文档处理失败，未能提取内容")
-    report("parsing", 1, 1)
+    suffix = Path(display_filename).suffix.lower() or ".bin"
+    with tempfile.TemporaryDirectory(prefix="kura_kb_") as tmpdir:
+        tmp_doc_path = Path(tmpdir) / f"source{suffix}"
+        tmp_doc_path.write_bytes(content)
+        images_tmp_root = Path(tmpdir) / "images"
 
-    parent_docs = [c for c in chunks if int(c.get("chunk_level", 0) or 0) in (1, 2)]
-    leaf_docs = [c for c in chunks if int(c.get("chunk_level", 0) or 0) in (3, 4)]  # L3文本块 + L4图片块
-    if not leaf_docs:
-        _cleanup_upload_assets(path, images_dir)
-        raise ValueError("未生成可检索叶子分块")
-    report("chunking", 1, 1)
-    check.checkpoint()
-
-    text_docs = [c for c in leaf_docs if c.get("content_type") == "text"]
-    image_docs = [c for c in leaf_docs if c.get("content_type") == "image"]
-    text_count = len(text_docs)
-    image_count = len(image_docs)
-
-    # 生成全部向量（最易超时的阶段；任务线程使用专用 Milvus 实例，避免跨线程共用单例）
-    bs = max(1, int(settings.EMBEDDING_BATCH_SIZE or 10))
-    job_milvus = MilvusManager()
-    job_milvus.init_collection()
-    job_writer = MultimodalMilvusWriter(milvus_manager=job_milvus)
-
-    text_batches = math.ceil(len(text_docs) / bs) if text_docs else 0
-    calls_total = max(1, text_batches + image_count)
-    text_batch_done = 0
-    images_ticked = 0
-
-    def embed_progress(stage: str, done: int, total: int) -> None:
-        nonlocal text_batch_done
+        report("parsing", 0, 1)
+        try:
+            chunks = _multimodal_loader.load_document(
+                str(tmp_doc_path), display_filename, kb_scope, user_id, agent_id,
+                images_root_dir=str(images_tmp_root),
+            )
+        except Exception as e:
+            _cleanup_upload_assets(None, images_prefix)
+            raise ValueError(f"文档处理失败: {e}") from e
         check.checkpoint()
-        if stage == "text_embedding":
-            # writer 的 done 是已完成文本条数，折算为批数
-            text_batch_done = math.ceil(int(done) / bs)
-        current = text_batch_done + (int(done) if stage == "image_embedding" else 0)
-        report("embedding", current, calls_total)
+        if not chunks:
+            _cleanup_upload_assets(None, images_prefix)
+            raise ValueError("文档处理失败，未能提取内容")
+        report("parsing", 1, 1)
 
-    def embed_tick() -> None:
-        nonlocal images_ticked
+        parent_docs = [c for c in chunks if int(c.get("chunk_level", 0) or 0) in (1, 2)]
+        leaf_docs = [c for c in chunks if int(c.get("chunk_level", 0) or 0) in (3, 4)]  # L3文本块 + L4图片块
+        if not leaf_docs:
+            _cleanup_upload_assets(None, images_prefix)
+            raise ValueError("未生成可检索叶子分块")
+        report("chunking", 1, 1)
         check.checkpoint()
-        images_ticked += 1
-        report("embedding", text_batch_done + images_ticked, calls_total)
 
-    try:
-        text_emb, image_emb = job_writer.embed_documents(
-            leaf_docs, batch_size=bs, progress_cb=embed_progress, tick_cb=embed_tick
-        )
-    except Exception:
-        # 嵌入阶段失败：旧数据原样保留（尚未进入替换），只清理本次产物
-        _cleanup_upload_assets(path, images_dir)
-        raise
-    check.checkpoint()
+        text_docs = [c for c in leaf_docs if c.get("content_type") == "text"]
+        image_docs = [c for c in leaf_docs if c.get("content_type") == "image"]
+        text_count = len(text_docs)
+        image_count = len(image_docs)
+
+        # 生成全部向量（最易超时的阶段；任务线程使用专用 Milvus 实例，避免跨线程共用单例）
+        bs = max(1, int(settings.EMBEDDING_BATCH_SIZE or 10))
+        job_milvus = MilvusManager()
+        job_milvus.init_collection()
+        job_writer = MultimodalMilvusWriter(milvus_manager=job_milvus)
+
+        text_batches = math.ceil(len(text_docs) / bs) if text_docs else 0
+        calls_total = max(1, text_batches + image_count)
+        text_batch_done = 0
+        images_ticked = 0
+
+        def embed_progress(stage: str, done: int, total: int) -> None:
+            nonlocal text_batch_done
+            check.checkpoint()
+            if stage == "text_embedding":
+                # writer 的 done 是已完成文本条数，折算为批数
+                text_batch_done = math.ceil(int(done) / bs)
+            current = text_batch_done + (int(done) if stage == "image_embedding" else 0)
+            report("embedding", current, calls_total)
+
+        def embed_tick() -> None:
+            nonlocal images_ticked
+            check.checkpoint()
+            images_ticked += 1
+            report("embedding", text_batch_done + images_ticked, calls_total)
+
+        try:
+            text_emb, image_emb = job_writer.embed_documents(
+                leaf_docs, batch_size=bs, progress_cb=embed_progress, tick_cb=embed_tick
+            )
+        except Exception:
+            # 嵌入阶段失败：旧数据原样保留（尚未进入替换），对象存储尚无本次产物
+            _cleanup_upload_assets(None, images_prefix)
+            raise
+        check.checkpoint()
+
+        # 全部向量生成成功：上传图片与文档本体到对象存储；图片 chunk 的 image_path 改写为相对 relpath
+        _upload_kb_images_and_rewrite_paths(chunks, images_tmp_root)
+        obs.save_bytes(doc_key, content, content_type=doc_mime)
+    # 临时目录（文档副本 + 抽取图片）随 with 退出自动清理
 
     # 替换落库临界区（同名并发上传互斥，后完成者生效；纯写入、无嵌入调用，数秒内完成）
     lock_key = _swap_lock_key(kb_scope, display_filename)
@@ -395,8 +428,18 @@ def run_ingest_pipeline_sync(
         check.checkpoint()
         report("writing", done, total)
 
+    # 本次新图的 relpath 集合：同名替换时旧记录中同 key 的图片对象不得删除（新旧内容相同的图）
+    new_image_rels = {
+        str(c.get("image_path")).strip()
+        for c in chunks
+        if c.get("content_type") == "image" and str(c.get("image_path") or "").strip()
+    }
+
     try:
-        delete_kb_document(kb_scope, user_id, agent_id, display_filename, milvus_manager=job_milvus)
+        delete_kb_document(
+            kb_scope, user_id, agent_id, display_filename,
+            milvus_manager=job_milvus, exclude_image_rels=new_image_rels,
+        )
         _parent.upsert_documents(parent_docs)
         job_writer.write_documents(
             leaf_docs,
@@ -423,8 +466,8 @@ def run_ingest_pipeline_sync(
         finally:
             db.close()
     except Exception:
-        # 临界区内失败：旧数据此刻已删，尽力清理本次半成品（窄窗口残余风险，同名重传即自愈）
-        _cleanup_upload_assets(path, images_dir)
+        # 临界区内失败：旧数据此刻已删，尽力清理本次已上传对象（窄窗口残余风险，同名重传即自愈）
+        _cleanup_upload_assets(doc_key, images_prefix)
         try:
             delete_kb_document(kb_scope, user_id, agent_id, display_filename, milvus_manager=job_milvus)
         except Exception:

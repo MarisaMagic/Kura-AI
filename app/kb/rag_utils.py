@@ -12,6 +12,7 @@ import requests
 from langchain.chat_models import init_chat_model
 from loguru import logger
 
+from app.core import object_storage as obs
 from app.kb.multimodal_embedding import get_multimodal_embedding_service
 from app.kb.milvus_client import (
     MilvusManager,
@@ -91,8 +92,8 @@ def _rerank_endpoint() -> str:
 
 def _kb_image_data_uri(doc: dict) -> str:
     """
-    将图片块的本地文件读为 base64 Data URI（DashScope 多模态 rerank 的 image 输入）。
-    仅 jpeg/png 参与；文件缺失、超限或非支持格式时返回空串（该图不参与重排）。
+    将图片块从对象存储读为 base64 Data URI（DashScope 多模态 rerank 的 image 输入）。
+    仅 jpeg/png 参与；对象缺失、超限或非支持格式时返回空串（该图不参与重排）。
     :param doc: 图片块文档
     :return: data:image/{fmt};base64,... 或空串
     """
@@ -105,15 +106,12 @@ def _kb_image_data_uri(doc: dict) -> str:
         fmt = "jpeg"
     if fmt not in ("jpeg", "png"):
         return ""
-    path = Path(settings.USER_AGENT_KB_IMAGES_ROOT) / rel
     try:
-        if not path.is_file():
-            return ""
-        max_bytes = max(1, int(getattr(settings, "RERANK_MAX_IMAGE_BYTES", 4 * 1024 * 1024) or 0))
-        raw = path.read_bytes()
-        if len(raw) > max_bytes:
-            return ""
-    except OSError:
+        raw = obs.read_bytes(obs.join_key(settings.USER_AGENT_KB_IMAGES_ROOT, rel))
+    except Exception:
+        return ""
+    max_bytes = max(1, int(getattr(settings, "RERANK_MAX_IMAGE_BYTES", 4 * 1024 * 1024) or 0))
+    if len(raw) > max_bytes:
         return ""
     return f"data:image/{fmt};base64,{base64.b64encode(raw).decode('ascii')}"
 

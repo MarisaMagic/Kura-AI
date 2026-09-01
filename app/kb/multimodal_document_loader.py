@@ -208,6 +208,7 @@ class MultimodalDocumentLoader:
         agent_id: int,
         kb_scope: str,
         filename: str,
+        images_root_dir: str,
     ) -> List[Dict[str, Any]]:
         """
         从 PDF 中提取真实的图片对象（使用 PyMuPDF），并获取图片位置信息
@@ -216,12 +217,13 @@ class MultimodalDocumentLoader:
         :param agent_id: 智能体ID
         :param kb_scope: 知识库范围
         :param filename: 文件名
+        :param images_root_dir: 图片输出根目录（调用方提供的临时目录；子结构 user_{uid}/{aid}/{fingerprint}/ 与对象 key 一致）
         :return: 图片信息列表
         """
         images = []
         try:
-            # 创建图片存储目录
-            images_dir = Path(settings.USER_AGENT_KB_IMAGES_ROOT) / f"user_{user_id}" / str(agent_id) / _filename_fingerprint(filename)
+            # 创建图片输出目录（临时目录内保持与对象 key 相同的相对结构）
+            images_dir = Path(images_root_dir) / f"user_{user_id}" / str(agent_id) / _filename_fingerprint(filename)
             images_dir.mkdir(parents=True, exist_ok=True)
             
             # 使用 PyMuPDF 打开 PDF
@@ -277,8 +279,10 @@ class MultimodalDocumentLoader:
                             position_width = image_width
                             position_height = image_height
                         
-                        # 生成图片文件名
-                        image_filename = f"page_{page_num + 1:04d}_img_{img_index + 1:04d}.{image_ext}"
+                        # 生成图片文件名：带内容哈希后缀，避免同名文档替换上传时新旧图片 key 冲突
+                        # （否则临界区删除旧图会误删同 key 的新图）
+                        content_tag = hashlib.sha256(image_bytes).hexdigest()[:8]
+                        image_filename = f"page_{page_num + 1:04d}_img_{img_index + 1:04d}_{content_tag}.{image_ext}"
                         image_path = images_dir / image_filename
                         
                         # 保存图片
@@ -292,6 +296,7 @@ class MultimodalDocumentLoader:
                             "file_type": "PDF",
                             "page_number": page_num,
                             "stored_path": str(image_path),
+                            "size_bytes": len(image_bytes),
                             "width": image_width,
                             "height": image_height,
                             "format": image_ext,
@@ -325,6 +330,7 @@ class MultimodalDocumentLoader:
         agent_id: int,
         kb_scope: str,
         filename: str,
+        images_root_dir: str,
     ) -> List[Dict[str, Any]]:
         """
         从 DOCX 中提取图片
@@ -333,15 +339,16 @@ class MultimodalDocumentLoader:
         :param agent_id: 智能体ID
         :param kb_scope: 知识库范围
         :param filename: 文件名
+        :param images_root_dir: 图片输出根目录（调用方提供的临时目录；子结构与对象 key 一致）
         :return: 图片信息列表
         """
         images = []
         try:
             import docx
             from PIL import Image
-            
-            # 创建图片存储目录
-            images_dir = Path(settings.USER_AGENT_KB_IMAGES_ROOT) / f"user_{user_id}" / str(agent_id) / _filename_fingerprint(filename)
+
+            # 创建图片输出目录（临时目录内保持与对象 key 相同的相对结构）
+            images_dir = Path(images_root_dir) / f"user_{user_id}" / str(agent_id) / _filename_fingerprint(filename)
             images_dir.mkdir(parents=True, exist_ok=True)
             
             # 打开 DOCX 文件
@@ -366,8 +373,9 @@ class MultimodalDocumentLoader:
                                 break
                         
                         if image_data:
-                            # 保存图片
-                            image_path = images_dir / f"para_{para_idx:04d}_run_{run_idx:04d}_img_{image_idx:04d}.png"
+                            # 保存图片（文件名带内容哈希后缀，避免同名文档替换上传时新旧图片 key 冲突）
+                            content_tag = hashlib.sha256(image_data).hexdigest()[:8]
+                            image_path = images_dir / f"para_{para_idx:04d}_run_{run_idx:04d}_img_{image_idx:04d}_{content_tag}.png"
                             with open(image_path, 'wb') as f:
                                 f.write(image_data)
                             
@@ -387,6 +395,7 @@ class MultimodalDocumentLoader:
                                 "file_type": "Word",
                                 "page_number": para_idx + 1,  # 使用段落索引作为页码
                                 "stored_path": str(image_path),
+                                "size_bytes": len(image_data),
                                 "width": width,
                                 "height": height,
                                 "format": img_format,
@@ -784,14 +793,16 @@ class MultimodalDocumentLoader:
         kb_scope: str,
         user_id: int,
         agent_id: int,
+        images_root_dir: str,
     ) -> list[dict]:
         """
         加载文档，进行三级分块和图片提取
-        :param file_path: 文件路径
+        :param file_path: 文件路径（调用方负责的本地文件，通常为临时文件）
         :param filename: 文件名
         :param kb_scope: 知识库范围
         :param user_id: 用户ID
         :param agent_id: 智能体ID
+        :param images_root_dir: 图片输出根目录（调用方提供的临时目录；子结构与对象 key 一致）
         :return: 分块后的文档列表
         """
         # 根据文件名确定文档类型
@@ -804,12 +815,12 @@ class MultimodalDocumentLoader:
             doc_type = "PDF"
             loader = PyPDFLoader(file_path)
             # 从 PDF 中提取图片（带位置信息）
-            images = self._extract_images_from_pdf(file_path, user_id, agent_id, kb_scope, filename)
+            images = self._extract_images_from_pdf(file_path, user_id, agent_id, kb_scope, filename, images_root_dir)
         elif file_lower.endswith((".docx", ".doc")):
             doc_type = "Word"
             loader = Docx2txtLoader(file_path)
             # 从 DOCX 中提取图片
-            images = self._extract_images_from_docx(file_path, user_id, agent_id, kb_scope, filename)
+            images = self._extract_images_from_docx(file_path, user_id, agent_id, kb_scope, filename, images_root_dir)
         elif file_lower.endswith((".xlsx", ".xls")):
             doc_type = "Excel"
             # 逐 sheet 转 Markdown 表格，sheet 序号作 page_number
