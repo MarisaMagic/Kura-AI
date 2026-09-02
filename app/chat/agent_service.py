@@ -10,7 +10,6 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any, AsyncIterator
 
-from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import (
@@ -27,7 +26,11 @@ from app.chat.attachment_tools import make_session_attachment_tools
 from app.chat.memory_archive import schedule_archive_session_memory
 from app.chat.memory_tool import make_search_session_memory_tool
 from app.chat.memory_turns import apply_sliding_window_turns
-from app.chat.message_codec import expand_messages_for_model, msg_content_to_str
+from app.chat.message_codec import (
+    expand_messages_for_model,
+    msg_content_to_str,
+    strip_image_urls_after_tools,
+)
 from app.chat.storage import storage
 from app.chat.tools import (
     emit_rag_step,
@@ -206,12 +209,12 @@ def _run_kb_document_preselect_with_context(
 
 
 _WEB_SEARCH_DISCIPLINE = (
-    "联网搜索作答纪律：回答必须仅依据 web_search / fetch_url 工具的返回内容与多轮对话上下文；"
+    "联网搜索纪律：需要实时、最新或需查证的公开信息时再调用 web_search / fetch_url；"
     "用户给出 http(s) 链接时优先调用 fetch_url；搜到结果后若需精读某一页也用 fetch_url。"
+    "凭已有对话或当前消息中的图片/附件即可作答时，不必为了搜索而搜索。"
     "凡引用搜索或读页内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），并保证引用的 URL 与工具返回逐字一致。"
     "当工具返回明确提示失败或无结果（TOOL_CALL_LIMIT_REACHED / WEB_SEARCH_NO_RESULTS / FETCH_URL_FAILED / 联网搜索出错）"
-    "或本轮禁用（TOOL_DISABLED_THIS_TURN）时，"
-    "必须如实告知用户「联网搜索未找到相关内容」或「未能打开该链接」并可建议换个问法重试，"
+    "时，必须如实告知用户「联网搜索未找到相关内容」或「未能打开该链接」并可建议换个问法重试，"
     "不得编造搜索结果、页面正文、实时数据或来源链接；"
     "注意区分搜索结论与你的一般常识推断，后者不得冒充联网检索结果。"
 )
@@ -257,8 +260,9 @@ def _format_turn_context_block(
     session_attachment_hint: str,
     memory_inject: str | None,
     mcp_approval_note: str | None,
+    image_caption: str | None = None,
 ) -> str:
-    """拼装仅本回合有效、作为独立 Human 追加的上下文（不落库）。"""
+    """拼装仅本回合有效、将并入最后一条 Human 的上下文（不落库）。"""
     parts: list[str] = ["【本轮上下文（仅本回合有效）】"]
     if use_web_search:
         parts.append(
@@ -277,6 +281,15 @@ def _format_turn_context_block(
     hint = (session_attachment_hint or "").strip()
     if hint:
         parts.append(hint)
+    caption = (image_caption or "").strip()
+    if caption:
+        max_chars = max(200, int(getattr(settings, "CHAT_VISION_CAPTION_MAX_CHARS", 1200) or 1200))
+        if len(caption) > max_chars:
+            caption = caption[:max_chars] + "…（已截断）"
+        parts.append(
+            "【本回合图片内容理解（由视觉模型预读，仅供检索与作答参考；"
+            "若与用户问题矛盾，以用户补充说明为准）】\n\n" + caption
+        )
     if (memory_inject or "").strip():
         parts.append(
             "【本回合根据用户最新输入自动检索的较早会话摘录（仅供参考；"
@@ -289,13 +302,23 @@ def _format_turn_context_block(
 
 
 def _append_turn_context_message(messages: list, block: str) -> list:
-    """本轮上下文作为最后一条独立 Human（不改写历史、不落库）。无 Human 则不插入。"""
+    """本轮上下文追加进最后一条 Human（不落库、不新增第二条 user）。无 Human 则不插入。"""
     text = (block or "").strip()
     if not text:
         return list(messages)
-    if not any(isinstance(m, HumanMessage) for m in messages):
-        return list(messages)
-    return list(messages) + [HumanMessage(content=text)]
+    out = list(messages)
+    for i in range(len(out) - 1, -1, -1):
+        if not isinstance(out[i], HumanMessage):
+            continue
+        content = out[i].content
+        if isinstance(content, str):
+            out[i] = HumanMessage(content=content + "\n\n" + text)
+        elif isinstance(content, list):
+            out[i] = HumanMessage(content=list(content) + [{"type": "text", "text": text}])
+        else:
+            out[i] = HumanMessage(content=str(content) + "\n\n" + text)
+        return out
+    return out
 
 
 def _mcp_approval_note(
@@ -333,12 +356,17 @@ def _prepare_to_invoke_messages(
     document_filter: list[str] | None,
     session_attachment_hint: str,
     mcp_approval_note: str | None = None,
+    path_ids: list[int] | None = None,
+    image_caption: str | None = None,
 ) -> list:
     """
-    压缩或滑动窗口 → 可选会话记忆预检索 → 展开多模态（仅本轮 Human 带图）→ 本轮上下文独立消息。
+    压缩或滑动窗口 → 可选会话记忆预检索 → 展开多模态（仅本轮 Human 带图）→ 本轮上下文并入最后一条 Human。
+    path_ids 为 messages 对应的存储行 id（等长），供压缩与记忆按分支定位。
+    image_caption 非空时（两阶段读图）：不再展开图片，描述随本轮上下文注入，agent 全程纯文本。
     """
     from app.chat.compact import build_compacted_model_messages
     from app.chat.memory_search import proactive_session_memory_inject_text
+    from app.chat.memory_turns import turn_keys_of
     from app.chat.tools import emit_rag_step
 
     llm_cfg = _sub_llm_config_from_ua(ua)
@@ -349,7 +377,14 @@ def _prepare_to_invoke_messages(
             agent_id=agent_id,
             session_id=session_id,
             llm_config=llm_cfg,
-            system_chars=len(_compose_system_prompt(ua)),
+            system_chars=len(
+                _compose_system_prompt(
+                    ua,
+                    use_knowledge_retrieval=use_knowledge_retrieval,
+                    use_web_search=use_web_search,
+                )
+            ),
+            path_ids=path_ids,
         )
     else:
         viewed = apply_sliding_window_turns(messages)
@@ -359,15 +394,18 @@ def _prepare_to_invoke_messages(
         agent_id=agent_id,
         session_id=session_id,
         llm_config=llm_cfg,
+        path_turn_keys=turn_keys_of(messages, path_ids) or None,
     )
     if inj:
         emit_rag_step("📌", "会话记忆预注入", "已附加较早轮次摘录")
+    has_caption = bool((image_caption or "").strip())
     expanded = expand_messages_for_model(
         viewed,
         user_id=user_id,
         agent_id=agent_id,
         session_id=session_id,
-        images_on_last_human_only=True,
+        images_on_last_human_only=not has_caption,
+        expand_images=not has_caption,
     )
     turn_block = _format_turn_context_block(
         use_knowledge_retrieval=use_knowledge_retrieval,
@@ -376,24 +414,143 @@ def _prepare_to_invoke_messages(
         session_attachment_hint=session_attachment_hint,
         memory_inject=inj,
         mcp_approval_note=mcp_approval_note,
+        image_caption=image_caption,
     )
     return _append_turn_context_message(expanded, turn_block)
 
 
-def _compose_system_prompt(ua: UserAgent) -> str:
-    """
-    稳定系统提示：人设 + 联网/知识库纪律（跨轮不变；本轮开关写在独立旁路 Human）。
-    """
+def _compose_system_prompt(
+    ua: UserAgent,
+    *,
+    use_knowledge_retrieval: bool = False,
+    use_web_search: bool = False,
+) -> str:
+    """人设 + 本轮启用的检索纪律（agent 按请求构建）。"""
     parts: list[str] = []
     base = (ua.system_prompt or "").strip()
     if base:
         parts.append(base)
     else:
         parts.append("You are a helpful assistant.")
-    parts.append(_WEB_SEARCH_DISCIPLINE)
-    parts.append(_KB_IMAGE_DISCIPLINE)
-    parts.append(_KB_ANSWER_DISCIPLINE)
+    if use_web_search:
+        parts.append(_WEB_SEARCH_DISCIPLINE)
+    if use_knowledge_retrieval:
+        parts.append(_KB_IMAGE_DISCIPLINE)
+        parts.append(_KB_ANSWER_DISCIPLINE)
     return "\n\n".join(parts)
+
+
+def _human_content_has_image_ref(content: Any) -> bool:
+    if not isinstance(content, list):
+        return False
+    return any(isinstance(b, dict) and b.get("type") == "image_ref" for b in content)
+
+
+def _emit_understanding_image_step(messages: list[BaseMessage]) -> None:
+    last_human = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
+    if last_human and _human_content_has_image_ref(last_human.content):
+        emit_rag_step("🖼️", "正在理解图片", "已附加图片，等待模型分析")
+
+
+def _should_run_vision_caption(
+    messages: list[BaseMessage],
+    ua: UserAgent,
+    *,
+    use_knowledge_retrieval: bool,
+    use_web_search: bool,
+    has_mcp_tools: bool,
+) -> bool:
+    """两阶段读图触发条件：本轮带图 + 支持视觉 + 启用了检索类工具 + 配置开启。"""
+    if not getattr(settings, "CHAT_VISION_CAPTION_ENABLED", True):
+        return False
+    if not bool(getattr(ua, "supports_vision", False)):
+        return False
+    if not (use_web_search or use_knowledge_retrieval or has_mcp_tools):
+        return False
+    last_human = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
+    return bool(last_human and _human_content_has_image_ref(last_human.content))
+
+
+def _wrap_model_strip_images_after_tools(model: Any) -> Any:
+    """每次模型调用前：若已有 ToolMessage 则去掉 image_url。bind_tools 仍共用同一实例。"""
+
+    def _prep(messages: Any) -> Any:
+        if isinstance(messages, list) and messages and isinstance(messages[0], BaseMessage):
+            return strip_image_urls_after_tools(messages)
+        return messages
+
+    orig_generate = getattr(model, "_generate", None)
+    if orig_generate is not None:
+
+        def _generate(messages, *args, **kwargs):
+            return orig_generate(_prep(messages), *args, **kwargs)
+
+        model._generate = _generate
+
+    orig_agenerate = getattr(model, "_agenerate", None)
+    if orig_agenerate is not None:
+
+        async def _agenerate(messages, *args, **kwargs):
+            return await orig_agenerate(_prep(messages), *args, **kwargs)
+
+        model._agenerate = _agenerate
+
+    orig_stream = getattr(model, "_stream", None)
+    if orig_stream is not None:
+
+        def _stream(messages, *args, **kwargs):
+            return orig_stream(_prep(messages), *args, **kwargs)
+
+        model._stream = _stream
+
+    orig_astream = getattr(model, "_astream", None)
+    if orig_astream is not None:
+
+        async def _astream(messages, *args, **kwargs):
+            async for chunk in orig_astream(_prep(messages), *args, **kwargs):
+                yield chunk
+
+        model._astream = _astream
+
+    return model
+
+
+def _try_strip_images_middleware() -> Any | None:
+    try:
+        from langchain.agents.middleware import AgentMiddleware
+    except ImportError:
+        return None
+
+    def _rewrite_request(request: Any) -> Any:
+        messages = getattr(request, "messages", None)
+        if not messages:
+            return request
+        stripped = strip_image_urls_after_tools(messages)
+        if stripped is messages:
+            return request
+        override = getattr(request, "override", None)
+        if callable(override):
+            try:
+                return override(messages=stripped)
+            except TypeError:
+                pass
+        try:
+            request.messages = stripped
+        except Exception:
+            pass
+        return request
+
+    class _StripImagesAfterTools(AgentMiddleware):
+        def wrap_model_call(self, request, handler):
+            return handler(_rewrite_request(request))
+
+        async def awrap_model_call(self, request, handler):
+            return await handler(_rewrite_request(request))
+
+    try:
+        return _StripImagesAfterTools()
+    except Exception:
+        return None
 
 
 def _sort_tools(tools: list[Any]) -> list[Any]:
@@ -408,6 +565,8 @@ def build_model_and_agent(
     *,
     knowledge_base_document_filter: list[str] | None = None,
     extra_tools: list[Any] | None = None,
+    use_knowledge_retrieval: bool = True,
+    use_web_search: bool = False,
 ) -> tuple[Any, Any]:
     """
     构建模型和智能体。检索工具始终挂载（本轮禁用由工具函数返回 TOOL_DISABLED_THIS_TURN）。
@@ -430,6 +589,7 @@ def build_model_and_agent(
         stream_usage=True,
         **pinned_kwargs,
     )
+    model = _wrap_model_strip_images_after_tools(model)
     kb_scope = kb_scope_for(ua.user_id, ua.id)
     llm_config = _sub_llm_config_from_ua(ua)
     tools: list[Any] = []
@@ -450,11 +610,26 @@ def build_model_and_agent(
     if extra_tools:
         tools.extend(extra_tools)
     tools = _sort_tools(tools)
-    agent = create_agent(
-        model=model,
-        tools=tools,
-        system_prompt=_compose_system_prompt(ua),
+    from langchain.agents import create_agent
+
+    system_prompt = _compose_system_prompt(
+        ua,
+        use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
     )
+    agent_kwargs: dict[str, Any] = {
+        "model": model,
+        "tools": tools,
+        "system_prompt": system_prompt,
+    }
+    middleware = _try_strip_images_middleware()
+    if middleware is not None:
+        try:
+            agent = create_agent(**agent_kwargs, middleware=[middleware])
+        except (TypeError, Exception):
+            agent = create_agent(**agent_kwargs)
+    else:
+        agent = create_agent(**agent_kwargs)
     return agent, model
 
 
@@ -546,6 +721,8 @@ def chat_with_agent_sync(
         session_id,
         knowledge_base_document_filter=retrieval_filter if use_knowledge_retrieval else None,
         extra_tools=mcp_tools,
+        use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
     )
 
     human_content = build_storable_human_content(
@@ -560,6 +737,12 @@ def chat_with_agent_sync(
     human_msg = HumanMessage(content=human_content)
     messages.append(human_msg)
     storage.append_messages(user_id, agent_id, session_id, [human_msg])
+
+    # 当前路径各消息对应的存储行 id，供压缩/记忆按 turn_key 定位
+    path_records = storage.get_session_messages(user_id, agent_id, session_id)
+    path_ids: list[int] | None = [int(r.get("message_id") or 0) for r in path_records]
+    if len(path_ids) != len(messages):
+        path_ids = None
 
     class _SyncRagStepCollector:
         def __init__(self) -> None:
@@ -576,6 +759,35 @@ def chat_with_agent_sync(
         emit_rag_step("🧩", "MCP 工具已加载", f"{len(mcp_tools)} 个工具")
     for err in mcp_errors:
         emit_rag_step("⚠️", f"MCP 服务「{err['name']}」不可用", err["error"][:120])
+    _emit_understanding_image_step(messages)
+
+    # 两阶段读图（同步路径）：先无工具看图出描述，失败回退单阶段带图调用
+    image_caption: str | None = None
+    if _should_run_vision_caption(
+        messages,
+        ua,
+        use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
+        has_mcp_tools=bool(mcp_tools),
+    ):
+        from app.chat.vision_caption import generate_image_caption
+
+        caption_human = next(m for m in reversed(messages) if isinstance(m, HumanMessage))
+        try:
+            caption_text = generate_image_caption(
+                ua,
+                caption_human,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+            )
+        except Exception:
+            caption_text = ""
+        if caption_text:
+            image_caption = caption_text
+            emit_rag_step("🖼️", "图片理解完成", f"已预读图片内容（{len(caption_text)} 字）")
+        else:
+            emit_rag_step("⚠️", "图片理解失败", "改为直接带图问答")
 
     to_invoke = _prepare_to_invoke_messages(
         messages,
@@ -591,6 +803,8 @@ def chat_with_agent_sync(
         mcp_approval_note=_mcp_approval_note(
             mcp_approved_pending_id, user_id=user_id, agent_id=agent_id, session_id=session_id
         ),
+        path_ids=path_ids,
+        image_caption=image_caption,
     )
     caught_exc: Exception | None = None
     response_content = ""
@@ -618,6 +832,14 @@ def chat_with_agent_sync(
     error_text = str(caught_exc) if caught_exc else None
 
     # 助手落库仅用纯文本；image_references 放 extra，避免多模态块写入历史导致下游 API（如智谱 1210）再次请求失败
+    # thinking_items：步骤 + 两阶段读图的描述文本（插在「正在理解图片」步骤之后，保持交错顺序）
+    thinking_items = [{"type": "step", **s} for s in rag_collector.steps]
+    if image_caption:
+        insert_at = next(
+            (i + 1 for i, it in enumerate(thinking_items) if it.get("label") == "正在理解图片"),
+            len(thinking_items),
+        )
+        thinking_items.insert(insert_at, {"type": "text", "text": image_caption})
     ai_msg = AIMessage(content=response_content)
     messages.append(ai_msg)
     storage.append_messages(
@@ -633,7 +855,7 @@ def chat_with_agent_sync(
                 "image_references": image_references,
                 "sources": merged_sources,
                 "kb_preselect": kb_preselect_meta or None,
-                "thinking_items": [{"type": "step", **s} for s in rag_collector.steps] or None,
+                "thinking_items": thinking_items or None,
             }
         ],
     )
@@ -664,6 +886,7 @@ async def iter_chat_stream_events(
     use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
     regenerate: bool = False,
+    target_message_id: int | None = None,
     cancel_check: Callable[[], bool] | None = None,
     mcp_approved_pending_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
@@ -671,18 +894,18 @@ async def iter_chat_stream_events(
     异步对话：产出与 SSE 中 `data: {...}` 相同结构的 dict 事件（供直连 SSE 与后台 Job 复用）。
     最后依次产出 trace（若有）、写入存储后产出 done。
     :param ua: 智能体
-    :param user_text: 用户文本（regenerate 时仅作校验用，模型输入以存储中最后一条用户消息为准）
+    :param user_text: 用户文本（regenerate 时仅作校验用，模型输入以存储中目标用户消息为准）
     :param user_id: 用户 ID
     :param agent_id: 智能体 ID
     :param session_id: 会话 ID
     :param use_knowledge_retrieval: 是否启用知识库检索
     :param use_web_search: 是否启用联网搜索工具（与知识库检索互斥）
-    :param regenerate: 为 True 时不追加用户消息，移除末尾助手消息后基于当前历史重答
+    :param regenerate: 为 True 时不追加用户消息，在目标助手消息的父用户消息下生成新版本
+    :param target_message_id: regenerate 时要重写的助手消息 ID；缺省为当前路径末尾助手消息
     :param cancel_check: 若返回 True 则协作停止生成（如同步读 Redis 取消标记）
     :return: 异步迭代器
     """
     attachment_ids = attachment_ids or []
-    messages = storage.load(user_id, agent_id, session_id)
 
     # 清空 RAG 上下文, 重置工具调用守卫
     get_last_rag_context(clear=True)
@@ -690,26 +913,38 @@ async def iter_chat_stream_events(
     set_turn_tool_policy(use_knowledge_retrieval=use_knowledge_retrieval, use_web_search=use_web_search)
     set_approved_mcp_pending_id(mcp_approved_pending_id)
 
+    # 重新生成的目标助手消息 id：显式传 target_message_id 时按它定位（MCP 续跑原地覆盖它）；
+    # 未指定时回退为当前路径末尾的助手消息
+    regen_target_ai_id: int | None = None
     if regenerate:
-        if not messages:
+        if target_message_id:
+            regen_target_ai_id = int(target_message_id)
+        else:
+            path_records = storage.get_session_messages(user_id, agent_id, session_id)
+            target_rec = next((r for r in reversed(path_records) if r.get("type") == "ai"), None)
+            if target_rec is not None:
+                regen_target_ai_id = int(target_rec.get("message_id") or 0) or None
+
+        if not regen_target_ai_id:
             yield {"type": "error", "content": "没有可重新生成的对话"}
             yield {"type": "done", "cancelled": False}
             return
-        while messages and isinstance(messages[-1], AIMessage):
-            messages.pop()
-        if not messages or not isinstance(messages[-1], HumanMessage):
-            yield {"type": "error", "content": "无法重新生成：没有可配对的用户消息"}
+        ctx = storage.get_regenerate_context(user_id, agent_id, session_id, regen_target_ai_id)
+        if ctx is None:
+            yield {"type": "error", "content": "无法重新生成：目标回复不存在或不属于当前会话"}
             yield {"type": "done", "cancelled": False}
             return
-        last_human_text = msg_content_to_str(messages[-1].content).strip()
+        messages, last_human_text, regen_path_ids = ctx
         req_text = (user_text or "").strip()
-        if req_text and req_text != last_human_text:
+        if req_text and req_text != last_human_text.strip():
             yield {
                 "type": "error",
-                "content": "重新生成失败：请求文案与当前最后一条用户消息不一致，请刷新后重试",
+                "content": "重新生成失败：请求文案与目标提问不一致，请刷新后重试",
             }
             yield {"type": "done", "cancelled": False}
             return
+    else:
+        messages = storage.load(user_id, agent_id, session_id)
 
     if regenerate:
         preselect_query = msg_content_to_str(messages[-1].content).strip()
@@ -746,6 +981,8 @@ async def iter_chat_stream_events(
         session_id,
         knowledge_base_document_filter=retrieval_filter if use_knowledge_retrieval else None,
         extra_tools=mcp_tools,
+        use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
     )
 
     # 创建输出队列, 收集 RAG 步骤
@@ -785,9 +1022,82 @@ async def iter_chat_stream_events(
         # 生成完成前即落库用户消息，刷新后仍可从历史会话看到提问（助手在结束时再写入）
         await asyncio.to_thread(storage.append_messages, user_id, agent_id, session_id, [human_msg])
 
+    # 当前上下文各消息对应的存储行 id（与 messages 等长对齐），供压缩/记忆按 turn_key 定位
+    if regenerate:
+        path_ids: list[int] | None = regen_path_ids
+    else:
+        path_records = storage.get_session_messages(user_id, agent_id, session_id)
+        path_ids = [int(r.get("message_id") or 0) for r in path_records]
+        if len(path_ids) != len(messages):
+            path_ids = None
+
     memory_query = (user_text or "").strip()
     if regenerate:
         memory_query = msg_content_to_str(messages[-1].content).strip()
+
+    # 先 flush 已排队步骤（MCP 加载结果等），随后的两阶段读图事件直接产出，
+    # 保证思考区顺序与实时性（队列事件要到生成阶段才被消费）
+    while not output_queue.empty():
+        yield output_queue.get_nowait()
+
+    image_caption: str | None = None
+    last_human_msg = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
+    if last_human_msg is not None and _human_content_has_image_ref(last_human_msg.content):
+
+        def _image_step_event(icon: str, label: str, detail: str = "") -> dict:
+            step = {"icon": icon, "label": label, "detail": detail}
+            rag_steps_collected.append(step)
+            item = {"type": "step", **step}
+            thinking_items_collected.append(item)
+            return {"type": "thinking_item", "item": item}
+
+        yield _image_step_event("🖼️", "正在理解图片", "已附加图片，等待模型分析")
+
+        if _should_run_vision_caption(
+            messages,
+            ua,
+            use_knowledge_retrieval=use_knowledge_retrieval,
+            use_web_search=use_web_search,
+            has_mcp_tools=bool(mcp_tools),
+        ):
+            from app.chat.vision_caption import iter_image_caption_chunks
+
+            caption_parts: list[str] = []
+            caption_ok = False
+            try:
+                async for text in iter_image_caption_chunks(
+                    ua,
+                    last_human_msg,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                ):
+                    if cancel_check and await asyncio.to_thread(cancel_check):
+                        get_last_rag_context(clear=True)
+                        get_pending_mcp_confirmations(clear=True)
+                        set_rag_step_queue(None)
+                        yield {"type": "cancelled"}
+                        yield {"type": "done", "cancelled": True}
+                        return
+                    caption_parts.append(text)
+                    if thinking_items_collected and thinking_items_collected[-1].get("type") == "text":
+                        thinking_items_collected[-1]["text"] += text
+                    else:
+                        thinking_items_collected.append({"type": "text", "text": text})
+                    yield {
+                        "type": "thinking_item",
+                        "item": {"type": "text", "text": text},
+                        "append": True,
+                    }
+                caption_ok = True
+            except Exception:
+                caption_ok = False
+            caption = "".join(caption_parts).strip()
+            if caption_ok and caption:
+                image_caption = caption
+                yield _image_step_event("🖼️", "图片理解完成", f"已预读图片内容（{len(caption)} 字）")
+            else:
+                yield _image_step_event("⚠️", "图片理解失败", "改为直接带图问答")
 
     to_invoke = await asyncio.to_thread(
         _prepare_to_invoke_messages,
@@ -804,6 +1114,8 @@ async def iter_chat_stream_events(
         mcp_approval_note=_mcp_approval_note(
             mcp_approved_pending_id, user_id=user_id, agent_id=agent_id, session_id=session_id
         ),
+        path_ids=path_ids,
+        image_caption=image_caption,
     )
 
     # 初始化响应内容
@@ -982,7 +1294,21 @@ async def iter_chat_stream_events(
         "thinking_items": thinking_items_collected or None,
     }
     if regenerate:
-        storage.replace_trailing_assistant(user_id, agent_id, session_id, ai_msg, extra=ai_extra)
+        # MCP 确认续跑原地覆盖目标助手消息；普通重生成插入兄弟版本并选中新版本
+        saved = False
+        if regen_target_ai_id is not None:
+            if mcp_approved_pending_id:
+                saved = storage.update_assistant_in_place(
+                    user_id, agent_id, session_id, regen_target_ai_id, ai_msg, extra=ai_extra
+                )
+            else:
+                saved = storage.insert_assistant_version(
+                    user_id, agent_id, session_id, regen_target_ai_id, ai_msg, extra=ai_extra
+                )
+        if not saved:
+            yield {"type": "error", "content": "重新生成失败：目标回复已被移除，请刷新后重试"}
+            yield {"type": "done", "cancelled": False}
+            return
     else:
         storage.append_messages(
             user_id, agent_id, session_id, [ai_msg], extra_message_data=[ai_extra]
@@ -1005,6 +1331,7 @@ async def chat_with_agent_stream(
     use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
     regenerate: bool = False,
+    target_message_id: int | None = None,
     mcp_approved_pending_id: str | None = None,
 ) -> AsyncIterator[str]:
     """
@@ -1016,7 +1343,8 @@ async def chat_with_agent_stream(
     :param session_id: 会话 ID
     :param use_knowledge_retrieval: 是否启用知识库检索
     :param use_web_search: 是否启用联网搜索工具（与知识库检索互斥）
-    :param regenerate: 是否重新生成最后一轮助手回复
+    :param regenerate: 是否重新生成助手回复
+    :param target_message_id: regenerate 时要重写的助手消息 ID；缺省为当前路径末尾助手消息
     :return: 异步迭代器
     """
     async for ev in iter_chat_stream_events(
@@ -1029,6 +1357,7 @@ async def chat_with_agent_stream(
         use_web_search=use_web_search,
         attachment_ids=attachment_ids,
         regenerate=regenerate,
+        target_message_id=target_message_id,
         mcp_approved_pending_id=mcp_approved_pending_id,
     ):
         yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"

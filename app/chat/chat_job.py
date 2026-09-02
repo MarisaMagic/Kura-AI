@@ -49,6 +49,17 @@ def is_job_cancel_requested(job_id: str) -> bool:
     return bool(raw)
 
 
+def get_running_session_job(user_id: int, agent_id: int, session_id: str) -> dict | None:
+    """返回该会话当前 running 的 Job 元数据；无则 None（用于切分支前的冲突检查）。"""
+    existing = cache.get_json(_active_key(user_id, agent_id, session_id))
+    if not isinstance(existing, dict) or not existing.get("job_id"):
+        return None
+    meta = get_job_meta(str(existing["job_id"]))
+    if meta and meta.get("status") == "running":
+        return meta
+    return None
+
+
 def _release_active_key(user_id: int, agent_id: int, session_id: str, job_id: str) -> None:
     """
     释放会话占用锁：仅当锁仍指向该 job 时才删除，
@@ -131,6 +142,7 @@ async def create_chat_job(
     use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
     regenerate: bool = False,
+    target_message_id: int | None = None,
     mcp_approved_pending_id: str | None = None,
 ) -> tuple[str, bool]:
     """
@@ -162,6 +174,8 @@ async def create_chat_job(
         "session_id": session_id,
         "status": "running",
         "error": None,
+        "regenerate": bool(regenerate),
+        "target_message_id": target_message_id,
     }
     # 存储 Job 元数据，放入事件循环绑定的线程池里执行
     await asyncio.to_thread(cache.set_json, _meta_key(job_id), meta, _ttl())
@@ -181,6 +195,7 @@ async def create_chat_job(
             use_web_search=use_web_search,
             attachment_ids=aids,
             regenerate=regenerate,
+            target_message_id=target_message_id,
             mcp_approved_pending_id=mcp_approved_pending_id,
         )
     )
@@ -198,6 +213,7 @@ async def _run_chat_job(
     use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
     regenerate: bool = False,
+    target_message_id: int | None = None,
     mcp_approved_pending_id: str | None = None,
 ) -> None:
     from app.controllers.user_agent_recent import touch_recent_agent
@@ -225,6 +241,7 @@ async def _run_chat_job(
             use_web_search=use_web_search,
             attachment_ids=attachment_ids or [],
             regenerate=regenerate,
+            target_message_id=target_message_id,
             cancel_check=lambda jid=job_id: is_job_cancel_requested(jid),
             mcp_approved_pending_id=mcp_approved_pending_id,
         ):

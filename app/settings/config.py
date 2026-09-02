@@ -191,6 +191,14 @@ class Settings(BaseSettings):
     CHAT_UPLOAD_MAX_BYTES_PER_FILE: int = 15 * 1024 * 1024
     CHAT_UPLOAD_MAX_SESSION_BYTES: int = 80 * 1024 * 1024
     CHAT_UPLOAD_MAX_ATTACHMENTS_PER_SESSION: int = 80
+    # 发给视觉模型的图：仅压 payload，不改对象存储原图
+    CHAT_VISION_MAX_EDGE: int = 1568
+    CHAT_VISION_JPEG_QUALITY: int = 80
+    CHAT_VISION_MAX_BYTES: int = 400 * 1024
+    # 两阶段读图：带图且启用检索类工具时，先无工具看图出描述，再纯文本 agent
+    CHAT_VISION_CAPTION_ENABLED: bool = True
+    CHAT_VISION_CAPTION_TIMEOUT_SECONDS: int = 60
+    CHAT_VISION_CAPTION_MAX_CHARS: int = 1200
 
     # RAG：可选单独指定打分模型；未设置则与智能体对话模型相同
     RAG_GRADE_MODEL: typing.Optional[str] = None

@@ -194,6 +194,8 @@
       "chat_button_send": "Send",
       "chat_button_stop": "Stop",
       "chat_regenerate_tooltip": "Regenerate this reply",
+      "chat_version_prev_tooltip": "Previous version",
+      "chat_version_next_tooltip": "Next version",
       "chat_button_restart": "Restart chat",
       "chat_kb_retrieval": "Knowledge retrieval",
       "chat_web_search": "Web search",

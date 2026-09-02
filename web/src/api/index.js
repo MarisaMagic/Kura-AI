@@ -69,6 +69,13 @@ export default {
     request.get(`/user-agent/chat/sessions/${encodeURIComponent(sessionId)}`, {
       params: { agent_id: agentId },
     }),
+  /** 切换助手回复版本（消息树分支），返回切换后当前路径的消息列表 */
+  selectAgentChatBranch: (agentId, sessionId, assistantMessageId) =>
+    request.post(
+      `/user-agent/chat/sessions/${encodeURIComponent(sessionId)}/branch/select`,
+      { assistant_message_id: assistantMessageId },
+      { params: { agent_id: agentId } }
+    ),
   /** 会话附件上传（先上传再发消息，返回 data.id 作为 attachment_ids） */
   uploadChatAttachment: (agentId, sessionId, file) => {
     const fd = new FormData()

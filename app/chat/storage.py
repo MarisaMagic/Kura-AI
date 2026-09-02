@@ -26,33 +26,39 @@ class ConversationStorage:
     def _build_session_info_dict(self, db, s: ChatSessionRow) -> dict:
         """
         由会话 ORM 行生成列表项（预览与计数），供全量列表与分页列表复用。
+        预览与计数基于当前选中路径，避免跨分支取到其它分支的消息。
         """
-        count = db.query(ChatMessageRow).filter(ChatMessageRow.session_ref_id == s.id).count()
-        last_human = (
-            db.query(ChatMessageRow)
-            .filter(
-                ChatMessageRow.session_ref_id == s.id,
-                ChatMessageRow.message_type == "human",
+        rows = (
+            db.query(
+                ChatMessageRow.id,
+                ChatMessageRow.parent_id,
+                ChatMessageRow.selected_child_id,
+                ChatMessageRow.message_type,
+                ChatMessageRow.content,
+                ChatMessageRow.content_json,
             )
-            .order_by(desc(ChatMessageRow.id))
-            .first()
+            .filter(ChatMessageRow.session_ref_id == s.id)
+            .order_by(ChatMessageRow.id.asc())
+            .all()
         )
+        path = self._walk_path(rows)
         preview = ""
-        if last_human:
-            if last_human.content_json and isinstance(last_human.content_json, dict):
-                env = last_human.content_json
-                lc = env.get("lc")
-                preview = msg_content_to_str(lc).strip()
-            elif (last_human.content or "").strip():
-                preview = (last_human.content or "").strip()
+        for r in reversed(path):
+            if r.message_type != "human":
+                continue
+            if r.content_json and isinstance(r.content_json, dict):
+                preview = msg_content_to_str(r.content_json.get("lc")).strip()
+            elif (r.content or "").strip():
+                preview = (r.content or "").strip()
             preview = preview.replace("\n", " ")
             if len(preview) > 120:
                 preview = preview[:120] + "…"
+            break
         return {
             "session_id": s.session_id,
             "agent_id": s.agent_id,
             "updated_at": s.updated_at.isoformat(),
-            "message_count": count,
+            "message_count": len(path),
             "last_user_preview": preview,
         }
 
@@ -104,6 +110,8 @@ class ConversationStorage:
         """将消息 ORM 行转为 API / Redis 使用的字典。"""
         env = row.content_json if isinstance(row.content_json, dict) else None
         item = {
+            "message_id": row.id,
+            "parent_id": row.parent_id,
             "type": row.message_type,
             "content": row.content,
             "timestamp": row.timestamp.isoformat(),
@@ -118,6 +126,54 @@ class ConversationStorage:
         if env:
             item["content_json"] = env
         return item
+
+    @staticmethod
+    def _walk_path(rows: list) -> list:
+        """
+        从根（parent_id 为空的首条消息）沿 selected_child_id 解析当前路径。
+        指针缺失或悬空时回退到 id 最小的子节点；无根时退化为按 id 全量线性序列（数据异常兜底）。
+        """
+        if not rows:
+            return []
+        by_id = {r.id: r for r in rows}
+        children: dict[int, list] = {}
+        roots = []
+        for r in rows:
+            if r.parent_id is None:
+                roots.append(r)
+            else:
+                children.setdefault(r.parent_id, []).append(r)
+        if not roots:
+            return sorted(rows, key=lambda r: r.id)
+        node = min(roots, key=lambda r: r.id)
+        path = []
+        seen = set()
+        while node is not None and node.id not in seen:
+            seen.add(node.id)
+            path.append(node)
+            nxt = by_id.get(node.selected_child_id) if node.selected_child_id else None
+            if nxt is None:
+                kids = children.get(node.id, [])
+                nxt = min(kids, key=lambda r: r.id) if kids else None
+            node = nxt
+        return path
+
+    @staticmethod
+    def _version_meta(rows: list, path: list) -> dict[int, tuple[int, int, list[int]]]:
+        """路径上每个 AI 节点在同父兄弟中的 (version_index, version_count, sibling_ids)。"""
+        ai_by_parent: dict[int, list] = {}
+        for r in rows:
+            if r.message_type == "ai" and r.parent_id is not None:
+                ai_by_parent.setdefault(r.parent_id, []).append(r)
+        meta: dict[int, tuple[int, int, list[int]]] = {}
+        for node in path:
+            if node.message_type != "ai" or node.parent_id is None:
+                continue
+            sibs = sorted(ai_by_parent.get(node.parent_id, []), key=lambda r: r.id)
+            ids = [s.id for s in sibs]
+            idx = ids.index(node.id) + 1 if node.id in ids else len(ids)
+            meta[node.id] = (idx, len(ids), ids)
+        return meta
 
     @staticmethod
     def _parse_extra(extra: dict | None) -> dict:
@@ -179,37 +235,68 @@ class ConversationStorage:
                 session.metadata_json = metadata
         return session
 
-    def _insert_message_row(self, db, session: ChatSessionRow, msg, extra: dict | None, now: datetime) -> None:
+    def _insert_message_row(
+        self,
+        db,
+        session: ChatSessionRow,
+        msg,
+        extra: dict | None,
+        now: datetime,
+        parent_id: int | None = None,
+    ) -> ChatMessageRow:
         fields = self._parse_extra(extra)
         envelope = serialize_message_envelope(msg)
         preview = msg_content_to_str(getattr(msg, "content", ""))
         if len(preview) > 65500:
             preview = preview[:65500] + "…"
-        db.add(
-            ChatMessageRow(
-                session_ref_id=session.id,
-                message_type=msg.type,
-                content=preview,
-                content_json=envelope,
-                timestamp=now,
-                rag_trace=fields["rag_trace"],
-                rag_steps=fields["rag_steps"],
-                error_text=fields["error_text"],
-                image_references=fields["image_references"],
-                sources=fields["sources"],
-                thinking_text=fields["thinking_text"],
-                thinking_items=fields["thinking_items"],
-            )
+        row = ChatMessageRow(
+            session_ref_id=session.id,
+            parent_id=parent_id,
+            message_type=msg.type,
+            content=preview,
+            content_json=envelope,
+            timestamp=now,
+            rag_trace=fields["rag_trace"],
+            rag_steps=fields["rag_steps"],
+            error_text=fields["error_text"],
+            image_references=fields["image_references"],
+            sources=fields["sources"],
+            thinking_text=fields["thinking_text"],
+            thinking_items=fields["thinking_items"],
         )
+        db.add(row)
+        return row
 
     def _load_message_records(self, db, session: ChatSessionRow) -> list[dict]:
+        """加载当前选中路径上的消息记录（附带版本信息），而非全树按 id 排序。"""
         rows = (
             db.query(ChatMessageRow)
             .filter(ChatMessageRow.session_ref_id == session.id)
             .order_by(ChatMessageRow.id.asc())
             .all()
         )
-        return [self._row_to_record(row) for row in rows]
+        path = self._walk_path(rows)
+        vmeta = self._version_meta(rows, path)
+        records = []
+        for row in path:
+            rec = self._row_to_record(row)
+            vidx, vcnt, sib = vmeta.get(row.id, (1, 1, [row.id]))
+            rec["version_index"] = vidx
+            rec["version_count"] = vcnt
+            rec["sibling_ids"] = sib
+            records.append(rec)
+        return records
+
+    def _current_leaf_row(self, db, session_ref_id: int) -> ChatMessageRow | None:
+        """当前路径的叶子消息行；无任何消息时返回 None。"""
+        rows = (
+            db.query(ChatMessageRow)
+            .filter(ChatMessageRow.session_ref_id == session_ref_id)
+            .order_by(ChatMessageRow.id.asc())
+            .all()
+        )
+        path = self._walk_path(rows)
+        return path[-1] if path else None
 
     def _commit_and_refresh_caches(
         self,
@@ -250,45 +337,187 @@ class ConversationStorage:
         try:
             session = self._get_or_create_session(db, user_id, agent_id, session_id, metadata)
             now = datetime.utcnow()
+            parent = self._current_leaf_row(db, session.id)
             extras = extra_message_data or []
             for idx, msg in enumerate(new_messages):
                 extra = extras[idx] if idx < len(extras) else None
-                self._insert_message_row(db, session, msg, extra, now)
+                row = self._insert_message_row(
+                    db, session, msg, extra, now, parent_id=parent.id if parent else None
+                )
+                db.flush()
+                if parent is not None:
+                    parent.selected_child_id = row.id
+                parent = row
             self._commit_and_refresh_caches(db, session, user_id, agent_id, session_id)
         finally:
             db.close()
 
-    def replace_trailing_assistant(
+    def insert_assistant_version(
         self,
         user_id: int,
         agent_id: int,
         session_id: str,
+        target_ai_id: int,
         ai_message,
         extra: dict | None = None,
         metadata: dict | None = None,
-    ) -> None:
+    ) -> bool:
         """
-        重新生成：删除末尾连续的 ai 行后插入新的助手消息（带新 extras），更早轮次不动。
+        重新生成：在目标助手消息的父用户消息下插入兄弟版本并选中新版本，旧分支完整保留。
+        :return: 目标非法（不属于本会话 / 非 ai / 无父用户消息）时返回 False
         """
         db = SessionLocal()
         try:
             session = self._get_or_create_session(db, user_id, agent_id, session_id, metadata)
+            target = (
+                db.query(ChatMessageRow).filter(ChatMessageRow.id == int(target_ai_id)).first()
+            )
+            if (
+                not target
+                or target.session_ref_id != session.id
+                or target.message_type != "ai"
+                or target.parent_id is None
+            ):
+                return False
+            parent = (
+                db.query(ChatMessageRow).filter(ChatMessageRow.id == target.parent_id).first()
+            )
+            if not parent or parent.message_type != "human":
+                return False
+            row = self._insert_message_row(
+                db, session, ai_message, extra, datetime.utcnow(), parent_id=parent.id
+            )
+            db.flush()
+            parent.selected_child_id = row.id
+            self._commit_and_refresh_caches(db, session, user_id, agent_id, session_id)
+            return True
+        finally:
+            db.close()
+
+    def update_assistant_in_place(
+        self,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        target_ai_id: int,
+        ai_message,
+        extra: dict | None = None,
+        metadata: dict | None = None,
+    ) -> bool:
+        """
+        原地覆盖目标助手消息内容与 extras（MCP 高危确认续跑用，不产生新版本）。
+        :return: 目标非法时返回 False
+        """
+        db = SessionLocal()
+        try:
+            session = self._get_or_create_session(db, user_id, agent_id, session_id, metadata)
+            row = (
+                db.query(ChatMessageRow).filter(ChatMessageRow.id == int(target_ai_id)).first()
+            )
+            if not row or row.session_ref_id != session.id or row.message_type != "ai":
+                return False
+            fields = self._parse_extra(extra)
+            preview = msg_content_to_str(getattr(ai_message, "content", ""))
+            if len(preview) > 65500:
+                preview = preview[:65500] + "…"
+            row.content = preview
+            row.content_json = serialize_message_envelope(ai_message)
+            row.timestamp = datetime.utcnow()
+            row.rag_trace = fields["rag_trace"]
+            row.rag_steps = fields["rag_steps"]
+            row.error_text = fields["error_text"]
+            row.image_references = fields["image_references"]
+            row.sources = fields["sources"]
+            row.thinking_text = fields["thinking_text"]
+            row.thinking_items = fields["thinking_items"]
+            self._commit_and_refresh_caches(db, session, user_id, agent_id, session_id)
+            return True
+        finally:
+            db.close()
+
+    def select_branch(
+        self,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        assistant_id: int,
+    ) -> list[dict] | None:
+        """
+        切换助手消息版本：把目标 AI 设为其父用户消息的选中分支。
+        :return: 切换后的当前路径记录；目标非法或会话不存在时返回 None
+        """
+        db = SessionLocal()
+        try:
+            session = self._session_query(db, user_id, agent_id, session_id).with_for_update().first()
+            if not session:
+                return None
+            row = (
+                db.query(ChatMessageRow).filter(ChatMessageRow.id == int(assistant_id)).first()
+            )
+            if (
+                not row
+                or row.session_ref_id != session.id
+                or row.message_type != "ai"
+                or row.parent_id is None
+            ):
+                return None
+            parent = (
+                db.query(ChatMessageRow).filter(ChatMessageRow.id == row.parent_id).first()
+            )
+            if not parent or parent.message_type != "human":
+                return None
+            parent.selected_child_id = row.id
+            self._commit_and_refresh_caches(db, session, user_id, agent_id, session_id)
+            return self.get_session_messages(user_id, agent_id, session_id)
+        finally:
+            db.close()
+
+    def get_regenerate_context(
+        self,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        target_ai_id: int,
+    ) -> tuple[list, str, list[int]] | None:
+        """
+        重新生成上下文：(根到目标 AI 的父用户消息为止的 LangChain 消息列表, 该用户消息纯文本, 对应行 id 列表)。
+        目标非法时返回 None。
+        """
+        db = SessionLocal()
+        try:
+            session = self._session_query(db, user_id, agent_id, session_id).first()
+            if not session:
+                return None
             rows = (
                 db.query(ChatMessageRow)
                 .filter(ChatMessageRow.session_ref_id == session.id)
-                .order_by(ChatMessageRow.id.desc())
+                .order_by(ChatMessageRow.id.asc())
                 .all()
             )
-            trailing: list[ChatMessageRow] = []
-            for row in rows:
-                if row.message_type == "ai":
-                    trailing.append(row)
-                else:
-                    break
-            for row in trailing:
-                db.delete(row)
-            self._insert_message_row(db, session, ai_message, extra, datetime.utcnow())
-            self._commit_and_refresh_caches(db, session, user_id, agent_id, session_id)
+            by_id = {r.id: r for r in rows}
+            target = by_id.get(int(target_ai_id))
+            if not target or target.message_type != "ai" or target.parent_id is None:
+                return None
+            human = by_id.get(target.parent_id)
+            if not human or human.message_type != "human":
+                return None
+            chain = []
+            node = human
+            seen = set()
+            while node is not None and node.id not in seen:
+                seen.add(node.id)
+                chain.append(node)
+                node = by_id.get(node.parent_id) if node.parent_id else None
+            chain.reverse()
+            records = [self._row_to_record(r) for r in chain]
+            messages = self._to_langchain_messages(records)
+            if not messages:
+                return None
+            return (
+                messages,
+                msg_content_to_str(getattr(messages[-1], "content", "")),
+                [int(r["message_id"]) for r in records],
+            )
         finally:
             db.close()
 
@@ -312,6 +541,19 @@ class ConversationStorage:
         cache.set_json(self._messages_cache_key(user_id, agent_id, session_id), records)
         # 将消息列表转换为 LangChain 消息列表并返回
         return self._to_langchain_messages(records)
+
+    def load_path_with_ids(self, user_id: int, agent_id: int, session_id: str) -> list[tuple[int, object]]:
+        """
+        当前路径的 (消息行 id, LangChain 消息) 列表。
+        行 id 即消息的稳定身份（turn_key 取用户消息行 id），供记忆归档与压缩跨分支定位。
+        """
+        records = self.get_session_messages(user_id, agent_id, session_id)
+        out: list[tuple[int, object]] = []
+        for rec in records:
+            msgs = self._to_langchain_messages([rec])
+            if msgs:
+                out.append((int(rec.get("message_id") or 0), msgs[0]))
+        return out
 
     def list_session_infos(self, user_id: int, agent_id: int) -> list[dict]:
         """

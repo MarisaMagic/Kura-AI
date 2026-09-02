@@ -28,7 +28,11 @@ class ChatRequest(BaseModel):
     attachment_ids: list[str] = Field(default_factory=list, description="本会话已上传附件 ID 列表")
     regenerate: bool = Field(
         False,
-        description="为 True 时重新生成最后一轮助手回复（不新增用户消息；附件以存储中的最后一条用户消息为准）",
+        description="为 True 时重新生成助手回复（不新增用户消息；附件以存储中的对应用户消息为准）",
+    )
+    target_message_id: Optional[int] = Field(
+        None,
+        description="regenerate 时要重写的助手消息 ID；缺省时回退为当前路径末尾的助手消息",
     )
     mcp_approved_pending_id: Optional[str] = Field(
         None,
@@ -106,6 +110,12 @@ class McpConfirmRequest(BaseModel):
     approve: bool = True
 
 
+class BranchSelectRequest(BaseModel):
+    """切换助手回复版本：把目标助手消息设为其父用户消息下的选中分支。"""
+
+    assistant_message_id: int = Field(..., description="要切换到的助手消息 ID")
+
+
 class ChatResponse(BaseModel):
     """
     智能体对话响应
@@ -123,6 +133,7 @@ class ChatResponse(BaseModel):
 class MessageInfo(BaseModel):
     """
     消息信息
+    :param message_id: 消息行 ID（消息树中的稳定身份）
     :param type: 消息类型
     :param content: 消息内容（文本预览）
     :param content_json: LangChain 消息整块 JSON（多模态 image_ref 等）
@@ -132,7 +143,11 @@ class MessageInfo(BaseModel):
     :param error_text: 助手消息生成失败时的错误说明（可选，用于历史展示）
     :param thinking_text: 工具调用前的过渡文本（可选，用于历史回放思考区）
     :param thinking_items: 思考区有序时间线（step/text 交错，可选，用于历史回放）
+    :param version_index: 助手消息在同父兄弟版本中的序号（从 1 起）
+    :param version_count: 同父兄弟版本总数
+    :param sibling_ids: 同父兄弟版本的消息 ID（按版本序号排序，含自身）
     """
+    message_id: Optional[int] = None
     type: str
     content: Any = ""
     content_json: Optional[dict[str, Any]] = None
@@ -143,6 +158,9 @@ class MessageInfo(BaseModel):
     sources: Optional[list[dict[str, Any]]] = None
     thinking_text: Optional[str] = None
     thinking_items: Optional[list[dict[str, Any]]] = None
+    version_index: int = 1
+    version_count: int = 1
+    sibling_ids: Optional[list[int]] = None
 
 
 class SessionMessagesResponse(BaseModel):

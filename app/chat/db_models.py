@@ -201,6 +201,8 @@ class ChatMessage(Base):
     聊天消息模型
     id: 主键
     session_ref_id: 会话ID (外键, 关联到 mg_chat_sessions.id, 级联删除)
+    parent_id: 父消息ID (自引用, 构成会话内消息树; 根消息为空)
+    selected_child_id: 当前选中的子消息ID (沿它解析当前分支路径; 叶子为空)
     message_type: 消息类型
     content: 消息内容 (文本)
     content_json: LangChain 消息整块 JSON（含多模态 image_ref 等），优先于 content 回放
@@ -217,6 +219,10 @@ class ChatMessage(Base):
     session_ref_id: Mapped[int] = mapped_column(
         ForeignKey("mg_chat_sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    parent_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("mg_chat_messages.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    selected_child_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     message_type: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)

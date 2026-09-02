@@ -78,6 +78,51 @@ def init_chat_db() -> None:
         conn.execute(
             text("ALTER TABLE mg_kb_documents ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64)")
         )
+        # 消息树：parent_id / selected_child_id（存量线性会话回填为单链树）
+        conn.execute(
+            text("ALTER TABLE mg_chat_messages ADD COLUMN IF NOT EXISTS parent_id INTEGER")
+        )
+        conn.execute(
+            text("ALTER TABLE mg_chat_messages ADD COLUMN IF NOT EXISTS selected_child_id INTEGER")
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_mg_chat_messages_parent_id "
+                "ON mg_chat_messages (parent_id)"
+            )
+        )
+        # 回填 parent_id：仅处理仍为空且存在前驱行的存量线性数据；
+        # 树模式下非根消息插入时必然已带 parent_id，不会被误改
+        conn.execute(
+            text(
+                """
+                WITH ordered AS (
+                    SELECT id,
+                           LAG(id) OVER (PARTITION BY session_ref_id ORDER BY id) AS prev_id
+                    FROM mg_chat_messages
+                )
+                UPDATE mg_chat_messages m
+                SET parent_id = o.prev_id
+                FROM ordered o
+                WHERE m.id = o.id
+                  AND m.parent_id IS NULL
+                  AND o.prev_id IS NOT NULL
+                """
+            )
+        )
+        # 回填 selected_child_id：仅处理仍为空且确有子行的存量数据（线性时每行至多一个子行）
+        conn.execute(
+            text(
+                """
+                UPDATE mg_chat_messages p
+                SET selected_child_id = (
+                    SELECT MAX(c.id) FROM mg_chat_messages c WHERE c.parent_id = p.id
+                )
+                WHERE p.selected_child_id IS NULL
+                  AND EXISTS (SELECT 1 FROM mg_chat_messages c WHERE c.parent_id = p.id)
+                """
+            )
+        )
 
 
 def get_db_session() -> Session:

@@ -267,6 +267,40 @@
                         "
                         class="agent-chat-assistant-actions"
                       >
+                        <span
+                          v-if="(m.versionCount || 1) > 1"
+                          class="agent-chat-version-switch"
+                        >
+                          <n-button
+                            quaternary
+                            circle
+                            size="small"
+                            class="agent-chat-copy-btn"
+                            :disabled="sending || switchingBranch || (m.versionIndex || 1) <= 1"
+                            :aria-label="$t('views.agents.chat_version_prev_tooltip')"
+                            @click="switchAssistantVersion(m, -1)"
+                          >
+                            <TheIcon icon="mdi:chevron-left" :size="16" />
+                          </n-button>
+                          <span class="agent-chat-version-label">
+                            {{ m.versionIndex || 1 }}/{{ m.versionCount }}
+                          </span>
+                          <n-button
+                            quaternary
+                            circle
+                            size="small"
+                            class="agent-chat-copy-btn"
+                            :disabled="
+                              sending ||
+                              switchingBranch ||
+                              (m.versionIndex || 1) >= (m.versionCount || 1)
+                            "
+                            :aria-label="$t('views.agents.chat_version_next_tooltip')"
+                            @click="switchAssistantVersion(m, 1)"
+                          >
+                            <TheIcon icon="mdi:chevron-right" :size="16" />
+                          </n-button>
+                        </span>
                         <n-tooltip :show-arrow="false" placement="top">
                           <template #trigger>
                             <n-button
@@ -274,7 +308,7 @@
                               circle
                               size="small"
                               class="agent-chat-copy-btn"
-                              :disabled="sending"
+                              :disabled="sending || switchingBranch || !m.messageId"
                               :aria-label="$t('views.agents.chat_regenerate_tooltip')"
                               @click="regenerateAssistant(m)"
                             >
@@ -488,6 +522,8 @@ const activeJobId = ref(null)
 const activeAssistantIdx = ref(-1)
 /** 用户主动停止时置 true，避免 catch 里按网络错误处理 */
 const streamStoppedByUser = ref(false)
+/** 版本切换请求进行中（防止并发切换与生成中切换） */
+const switchingBranch = ref(false)
 /** 开启时允许后端注册知识库检索工具；关闭则仅通用知识（按会话持久化，新会话默认关） */
 const useKnowledgeRetrieval = ref(false)
 /** 开启时允许后端注册联网搜索工具（与知识库检索互斥；按会话持久化，新会话默认关） */
@@ -704,7 +740,12 @@ function pendingJobStorageKey(agentId, sid) {
 function savePendingChatJob(agentId, sid, payload) {
   try {
     if (agentId && sid && payload?.job_id) {
-      sessionStorage.setItem(pendingJobStorageKey(agentId, sid), JSON.stringify(payload))
+      // 合并写入：保留 regenerate / target_message_id 等创建期字段，seq 流式推进不丢失它们
+      const prev = readPendingChatJob(agentId, sid) || {}
+      sessionStorage.setItem(
+        pendingJobStorageKey(agentId, sid),
+        JSON.stringify({ ...prev, ...payload })
+      )
     }
   } catch {
     /* ignore */
@@ -922,6 +963,7 @@ async function postChatJobAndConsumeStream({
   attachmentIds,
   assistantIdx,
   mcpApprovedPendingId = null,
+  targetMessageId = null,
 }) {
   let jobId
   let startSeq = 0
@@ -946,6 +988,7 @@ async function postChatJobAndConsumeStream({
           use_web_search: useWebSearch.value,
           attachment_ids: attachmentIds,
           regenerate,
+          target_message_id: targetMessageId || undefined,
           mcp_approved_pending_id: mcpApprovedPendingId || undefined,
         }),
         signal: ac.signal,
@@ -982,7 +1025,12 @@ async function postChatJobAndConsumeStream({
       const body = await postRes.json()
       jobId = body.data?.job_id
       if (!jobId) throw new Error('未返回 job_id')
-      savePendingChatJob(agentId, sessionId.value, { job_id: jobId, seq: 0 })
+      savePendingChatJob(agentId, sessionId.value, {
+        job_id: jobId,
+        seq: 0,
+        regenerate: !!regenerate,
+        target_message_id: targetMessageId || null,
+      })
     }
 
     activeJobId.value = jobId
@@ -1051,7 +1099,31 @@ async function maybeResumePendingChatJob() {
   let idx = -1
   // 复用当前页里「仍在生成」的助手气泡时，只需从已收条数继续拉；刷新后从接口重载历史时没有未落库的助手行，会走 else 新建空气泡，必须从 Redis 下标 0 重放，否则会丢掉 pj.seq 之前的已生成内容。
   const reuseAssistantRow = last?.role === 'assistant' && last?.pending
-  if (reuseAssistantRow) {
+  if (!reuseAssistantRow && pj.regenerate && pj.target_message_id) {
+    // 重新生成中的刷新：历史里还是旧版本，替换目标行为空气泡并截断其后，从下标 0 重放
+    const tIdx = messages.value.findIndex(
+      (m) => m.role === 'assistant' && m.messageId === pj.target_message_id
+    )
+    if (tIdx !== -1) {
+      const row = messages.value[tIdx]
+      messages.value = messages.value.slice(0, tIdx + 1)
+      messages.value[tIdx] = {
+        ...row,
+        content: '',
+        errorText: undefined,
+        stoppedByUser: false,
+        pending: true,
+        thinkingOpen: true,
+        thinkingItems: [],
+        ragTrace: null,
+        sources: [],
+      }
+      idx = tIdx
+    }
+  }
+  if (idx !== -1) {
+    // 重新生成占位已就位
+  } else if (reuseAssistantRow) {
     idx = messages.value.length - 1
   } else {
     const assistantId = `a-resume-${Date.now()}`
@@ -1093,6 +1165,13 @@ async function maybeResumePendingChatJob() {
     const decoder = new TextDecoder()
     if (!reader) return
     await readChatJobSseStream(reader, decoder, idx, pj.job_id, agentId, sinceSeq)
+    if (
+      pj.regenerate &&
+      !streamStoppedByUser.value &&
+      !messages.value[idx]?.mcpConfirmations?.length
+    ) {
+      await reloadSessionMessages(agentId)
+    }
     await recentAgentsStore.touch(agentId)
   } catch (e) {
     console.warn('resume job stream:', e)
@@ -1106,33 +1185,75 @@ async function maybeResumePendingChatJob() {
   }
 }
 
+function mapHistoryRow(row, i) {
+  const role = row.type === 'human' ? 'user' : 'assistant'
+  const base = {
+    id: row.message_id ? `hist-${row.message_id}` : `hist-${i}-${row.timestamp}`,
+    messageId: row.message_id ?? null,
+    role,
+    content: userContentFromHistoryRow(row),
+    pending: false,
+    thinkingOpen: row.type === 'human' ? undefined : false,
+    thinkingItems: buildThinkingItemsFromRow(row),
+    ragTrace: row.rag_trace || null,
+    errorText: row.error_text || undefined,
+    sources: Array.isArray(row.sources) ? row.sources : [],
+    versionIndex: row.version_index || 1,
+    versionCount: row.version_count || 1,
+    siblingIds: Array.isArray(row.sibling_ids) ? row.sibling_ids : [],
+  }
+  if (role === 'user') {
+    const att = attachmentsFromHistoryRow(row)
+    if (att) base.attachments = att
+  }
+  return base
+}
+
 async function loadMessagesForSession(agentId, sid) {
   const res = await api.getAgentChatSessionMessages(agentId, sid)
   const rows = res.data?.messages || []
-  const list = rows.map((row, i) => {
-    const role = row.type === 'human' ? 'user' : 'assistant'
-    const base = {
-      id: `hist-${i}-${row.timestamp}`,
-      role,
-      content: userContentFromHistoryRow(row),
-      pending: false,
-      thinkingOpen: row.type === 'human' ? undefined : false,
-      thinkingItems: buildThinkingItemsFromRow(row),
-      ragTrace: row.rag_trace || null,
-      errorText: row.error_text || undefined,
-      sources: Array.isArray(row.sources) ? row.sources : [],
-    }
-    if (role === 'user') {
-      const att = attachmentsFromHistoryRow(row)
-      if (att) base.attachments = att
-    }
-    return base
-  })
+  const list = rows.map(mapHistoryRow)
   messages.value = list
   sessionId.value = sid
   sessionPhase.value = list.length > 0 ? 'chat' : 'intro'
   await nextTick()
   scrollBodyToBottom(false, { force: true })
+}
+
+/** 重新拉取当前分支消息（拿到真实 messageId 与版本信息），用于发送/重生成完成后对齐本地行 */
+async function reloadSessionMessages(agentId) {
+  if (!agentId || !sessionId.value) return
+  try {
+    const res = await api.getAgentChatSessionMessages(agentId, sessionId.value)
+    const rows = res.data?.messages || []
+    messages.value = rows.map(mapHistoryRow)
+    await nextTick()
+    scrollBodyToBottom(false, { force: true })
+  } catch (e) {
+    console.warn('reload session messages:', e)
+  }
+}
+
+async function switchAssistantVersion(assistantMsg, delta) {
+  if (sending.value || switchingBranch.value) return
+  const ids = assistantMsg.siblingIds || []
+  const targetIdx = (assistantMsg.versionIndex || 1) - 1 + delta
+  if (targetIdx < 0 || targetIdx >= ids.length) return
+  const targetId = ids[targetIdx]
+  const agentId = Number(route.params.agentId)
+  if (!getToken() || !Number.isFinite(agentId) || !sessionId.value) return
+  switchingBranch.value = true
+  try {
+    const res = await api.selectAgentChatBranch(agentId, sessionId.value, targetId)
+    const rows = res.data?.messages || []
+    messages.value = rows.map(mapHistoryRow)
+    await nextTick()
+    scrollBodyToBottom(false, { force: true })
+  } catch (error) {
+    window.$message?.error(`${error?.message || error}`)
+  } finally {
+    switchingBranch.value = false
+  }
 }
 
 const hasIntroOpeningText = computed(() => {
@@ -1523,6 +1644,11 @@ async function submitMessage() {
       attachmentIds,
       assistantIdx: idx,
     })
+    // 完成后重拉当前分支：新行拿到真实 messageId，才能重新生成/切版本
+    // （存在待确认的 MCP 调用时跳过重拉，避免确认按钮被历史行覆盖丢失）
+    if (!streamStoppedByUser.value && !messages.value[idx]?.mcpConfirmations?.length) {
+      await reloadSessionMessages(agentId)
+    }
   } catch (error) {
     clearPendingChatJob(agentId, sessionId.value)
     if (streamStoppedByUser.value) {
@@ -1556,12 +1682,13 @@ async function submitMessage() {
 }
 
 async function regenerateAssistant(assistantMsg) {
-  if (sending.value) return
+  if (sending.value || switchingBranch.value) return
   const token = getToken()
   if (!token) {
     window.$message?.warning(t('views.agents.chat_msg_need_login'))
     return
   }
+  if (!assistantMsg.messageId) return
   const assistantIdx = messages.value.findIndex((x) => x.id === assistantMsg.id)
   if (assistantIdx <= 0) return
   const prev = messages.value[assistantIdx - 1]
@@ -1573,6 +1700,8 @@ async function regenerateAssistant(assistantMsg) {
     return
   }
 
+  // 本地截断目标行之后的所有行（旧分支仍完整保留在后端，可通过版本切换找回）
+  messages.value = messages.value.slice(0, assistantIdx + 1)
   messages.value[assistantIdx] = {
     ...assistantMsg,
     content: '',
@@ -1595,7 +1724,13 @@ async function regenerateAssistant(assistantMsg) {
       message: '',
       attachmentIds: [],
       assistantIdx,
+      targetMessageId: assistantMsg.messageId,
     })
+    // 完成后重拉当前分支：拿到新版本的真实 messageId 与版本号
+    // （存在待确认的 MCP 调用时跳过重拉，避免确认按钮被历史行覆盖丢失）
+    if (!streamStoppedByUser.value && !messages.value[assistantIdx]?.mcpConfirmations?.length) {
+      await reloadSessionMessages(agentId)
+    }
   } catch (error) {
     clearPendingChatJob(agentId, sessionId.value)
     if (streamStoppedByUser.value) {
@@ -1655,6 +1790,7 @@ async function resumeApprovedMcp(assistantMsg, pendingId) {
       attachmentIds: [],
       assistantIdx,
       mcpApprovedPendingId: pendingId,
+      targetMessageId: assistantMsg.messageId || null,
     })
   } catch (error) {
     const cur = messages.value[assistantIdx]
@@ -2064,6 +2200,21 @@ html.dark .agent-chat-intro-avatar {
 
 .agent-chat-copy-btn {
   color: var(--n-text-color-3);
+}
+
+.agent-chat-version-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 4px;
+}
+
+.agent-chat-version-label {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+  min-width: 30px;
+  text-align: center;
+  user-select: none;
 }
 
 .agent-chat-feed-list {

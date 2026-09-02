@@ -7,7 +7,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
 
 def msg_content_to_str(content: Any) -> str:
@@ -98,6 +98,101 @@ def envelope_to_langchain_message(envelope: dict[str, Any]) -> BaseMessage:
     return HumanMessage(content=lc)
 
 
+def _prepare_vision_image_bytes(raw: bytes, *, mime: str | None = None) -> tuple[bytes, str]:
+    """
+    将原图缩边并压成 JPEG，仅供发给视觉模型；失败则原样返回。
+    :return: (bytes, mime)
+    """
+    fallback_mime = (mime or "image/png").strip() or "image/png"
+    if not raw:
+        return raw, fallback_mime
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        from app.settings import settings
+
+        max_edge = max(64, int(getattr(settings, "CHAT_VISION_MAX_EDGE", 1568) or 1568))
+        quality = max(30, min(95, int(getattr(settings, "CHAT_VISION_JPEG_QUALITY", 80) or 80)))
+        max_bytes = max(10 * 1024, int(getattr(settings, "CHAT_VISION_MAX_BYTES", 400 * 1024) or 400 * 1024))
+
+        img = Image.open(BytesIO(raw))
+        img.load()
+        if getattr(img, "n_frames", 1) > 1:
+            img.seek(0)
+        if img.mode in ("RGBA", "LA", "P"):
+            rgba = img.convert("RGBA")
+            bg = Image.new("RGB", rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.split()[-1] if rgba.mode == "RGBA" else None)
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+
+        width, height = img.size
+        longest = max(width, height)
+        if longest > max_edge:
+            scale = max_edge / float(longest)
+            img = img.resize(
+                (max(1, int(width * scale)), max(1, int(height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+
+        def _encode(q: int) -> bytes:
+            buf = BytesIO()
+            img.save(buf, format="JPEG", quality=q, optimize=True)
+            return buf.getvalue()
+
+        out = _encode(quality)
+        q = quality
+        while len(out) > max_bytes and q > 40:
+            q = max(40, q - 10)
+            out = _encode(q)
+        return out, "image/jpeg"
+    except Exception:
+        return raw, fallback_mime
+
+
+def _image_url_placeholder(block: dict[str, Any]) -> dict[str, Any]:
+    fn = ""
+    inner = block.get("image_url")
+    if isinstance(inner, dict):
+        fn = str(inner.get("filename") or "").strip()
+    if not fn:
+        fn = str(block.get("filename") or "").strip()
+    label = f"[图片 {fn}]" if fn else "[图片]"
+    return {"type": "text", "text": label}
+
+
+def strip_image_urls_after_tools(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """
+    本轮已出现 ToolMessage 时，把 Human 里的 image_url 换成短占位，避免后续 ReAct 再传原图。
+    无工具结果则原样返回（可同一列表对象）。
+    """
+    if not any(isinstance(m, ToolMessage) for m in messages):
+        return messages
+    out: list[BaseMessage] = []
+    changed_any = False
+    for m in messages:
+        if not isinstance(m, HumanMessage) or not isinstance(m.content, list):
+            out.append(m)
+            continue
+        new_blocks: list[Any] = []
+        changed = False
+        for block in m.content:
+            if isinstance(block, dict) and block.get("type") == "image_url":
+                new_blocks.append(_image_url_placeholder(block))
+                changed = True
+            else:
+                new_blocks.append(block)
+        if changed:
+            changed_any = True
+            out.append(HumanMessage(content=new_blocks))
+        else:
+            out.append(m)
+    return out if changed_any else messages
+
+
 def expand_human_image_refs(
     content: Any,
     *,
@@ -140,8 +235,12 @@ def expand_human_image_refs(
             import base64
 
             mime = block.get("mime") or "image/png"
-            b64 = base64.b64encode(raw).decode("ascii")
-            new_blocks.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+            payload, out_mime = _prepare_vision_image_bytes(raw, mime=str(mime))
+            b64 = base64.b64encode(payload).decode("ascii")
+            image_url: dict[str, Any] = {"url": f"data:{out_mime};base64,{b64}"}
+            if fn:
+                image_url["filename"] = fn
+            new_blocks.append({"type": "image_url", "image_url": image_url, "filename": fn})
         else:
             new_blocks.append(copy.deepcopy(block))
     return new_blocks
@@ -154,10 +253,12 @@ def expand_messages_for_model(
     agent_id: int,
     session_id: str,
     images_on_last_human_only: bool = False,
+    expand_images: bool = True,
 ) -> list:
     """
     调用模型前展开 human 消息中的 image_ref。
     images_on_last_human_only=True 时仅最后一条 Human 展开为 data URL。
+    expand_images=False 时全部 image_ref 变占位文本（两阶段读图：agent 阶段不见图）。
     """
     last_human_i = None
     if images_on_last_human_only:
@@ -168,15 +269,15 @@ def expand_messages_for_model(
     out: list = []
     for i, m in enumerate(messages):
         if isinstance(m, HumanMessage):
-            expand_images = True
-            if images_on_last_human_only:
-                expand_images = i == last_human_i
+            expand = expand_images
+            if expand and images_on_last_human_only:
+                expand = i == last_human_i
             expanded = expand_human_image_refs(
                 m.content,
                 user_id=user_id,
                 agent_id=agent_id,
                 session_id=session_id,
-                expand_images=expand_images,
+                expand_images=expand,
             )
             out.append(HumanMessage(content=expanded))
         else:

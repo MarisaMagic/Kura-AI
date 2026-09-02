@@ -44,6 +44,34 @@ def group_turns(body: list[BaseMessage]) -> list[list[BaseMessage]]:
     return turns
 
 
+def group_turn_pairs(body_pairs: list[tuple[int, BaseMessage]]) -> list[list[tuple[int, BaseMessage]]]:
+    """
+    按「轮」切分带行 id 的消息对（不含前缀 System）。
+    一轮 = 一条用户 Human 及其后直到下一条 Human 前的所有消息；轮首元素即该轮 turn_key 载体。
+    """
+    turns: list[list[tuple[int, BaseMessage]]] = []
+    cur: list[tuple[int, BaseMessage]] | None = None
+    for rid, m in body_pairs:
+        if isinstance(m, HumanMessage):
+            cur = []
+            turns.append(cur)
+        if cur is not None:
+            cur.append((rid, m))
+    return turns
+
+
+def turn_keys_of(messages: list[BaseMessage], path_ids: list[int] | None) -> list[int]:
+    """
+    当前路径各轮的稳定身份（turn_key = 轮首用户消息的数据库行 id）。
+    path_ids 与 messages 不等长时返回空列表（调用方回退旧逻辑）。
+    """
+    if not path_ids or len(path_ids) != len(messages):
+        return []
+    prefix, body = split_system_prefix(messages)
+    pairs = list(zip(path_ids[len(prefix):], body))
+    return [t[0][0] for t in group_turn_pairs(pairs) if t]
+
+
 def apply_sliding_window_turns(messages: list[BaseMessage]) -> list[BaseMessage]:
     """
     仅保留最近 N 轮对话（不含前缀 System）；轮数不足 N 则原样返回。

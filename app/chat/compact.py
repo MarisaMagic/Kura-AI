@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 COMPACT_TITLE = "【会话压缩摘要】"
 _META_SUMMARY = "compact_summary"
 _META_UNTIL = "compact_until_turn_index"
+_META_STATES = "compact_states"
+_MAX_STATES = 4
 _SUMMARIZE_INPUT_MAX_CHARS = 60000
 _SUMMARY_MAX_CHARS = 4000
 
@@ -64,16 +66,58 @@ def verbatim_keep_from_index(until_turn_index: int, turn_count: int) -> int:
     return min(until_turn_index + 1, turn_count)
 
 
+def load_compact_states(metadata: dict | None, path_turn_keys: list[int] | None = None) -> list[dict]:
+    """
+    读取压缩状态列表（每条 = 一段已摘要的路径前缀）。
+    存量单状态（compact_summary + compact_until_turn_index）在给出当前路径 turn_key 序列时惰性映射。
+    """
+    meta = metadata if isinstance(metadata, dict) else {}
+    states = meta.get(_META_STATES)
+    if isinstance(states, list):
+        return [
+            {"covered_turn_keys": [int(k) for k in s.get("covered_turn_keys") or []], "summary": str(s.get("summary") or "")}
+            for s in states
+            if isinstance(s, dict) and isinstance(s.get("covered_turn_keys"), list)
+        ]
+    summary, until = load_compact_state(meta)
+    if summary and until >= 0 and path_turn_keys and len(path_turn_keys) > until:
+        return [{"covered_turn_keys": [int(k) for k in path_turn_keys[: until + 1]], "summary": summary}]
+    return []
+
+
+def match_compact_state(states: list[dict], path_turn_keys: list[int]) -> tuple[str, int]:
+    """
+    在压缩状态列表中选取 covered_turn_keys 为当前路径最长前缀的那条。
+    返回 (摘要文本, 已压缩轮数)；无匹配返回 ("", 0)。
+    """
+    best_summary, best_n = "", 0
+    for s in states:
+        covered = s.get("covered_turn_keys") or []
+        n = len(covered)
+        if n <= best_n or n > len(path_turn_keys):
+            continue
+        if list(covered) == [int(k) for k in path_turn_keys[:n]]:
+            best_summary, best_n = str(s.get("summary") or ""), n
+    return best_summary, best_n
+
+
 def verbatim_keep_from_for_session(
     user_id: int,
     agent_id: int,
     session_id: str,
     turn_count: int | None = None,
+    path_turn_keys: list[int] | None = None,
 ) -> int:
-    """当前原文窗口起始轮次（不含已压缩轮）。turn_count 未知时只根据 metadata。"""
+    """当前原文窗口起始轮次（不含已压缩轮）。给出路径 turn_key 时按分支前缀匹配，否则按旧下标。"""
     from app.chat.storage import storage
 
-    _, until = load_compact_state(storage.get_session_metadata(user_id, agent_id, session_id))
+    meta = storage.get_session_metadata(user_id, agent_id, session_id)
+    if path_turn_keys is not None:
+        _, covered = match_compact_state(load_compact_states(meta, path_turn_keys), path_turn_keys)
+        if turn_count is not None:
+            return min(covered, turn_count)
+        return covered
+    _, until = load_compact_state(meta)
     if turn_count is None:
         return until + 1 if until >= 0 else 0
     return verbatim_keep_from_index(until, turn_count)
@@ -181,11 +225,14 @@ def build_compacted_model_messages(
     session_id: str,
     llm_config: dict[str, Any],
     system_chars: int,
+    path_ids: list[int] | None = None,
 ) -> list[BaseMessage]:
     """
     构建送给主模型的压缩视图（不修改 storage 中的原文）。
     达阈值时用子智能体摘要被挤出窗口的轮次，写入 session metadata 后跨轮原样重放。
+    给出 path_ids 时按 turn_key 前缀匹配压缩状态：共享前缀跨分支复用，分叉后各走各的摘要。
     """
+    from app.chat.memory_turns import turn_keys_of
     from app.chat.storage import storage
     from app.chat.tools import emit_rag_step
 
@@ -194,9 +241,16 @@ def build_compacted_model_messages(
     if not turns:
         return list(messages)
 
+    turn_keys = turn_keys_of(messages, path_ids)
+
     meta = storage.get_session_metadata(user_id, agent_id, session_id)
-    summary, until = load_compact_state(meta)
-    keep_from = verbatim_keep_from_index(until, len(turns))
+    states: list[dict] = []
+    if turn_keys:
+        states = load_compact_states(meta, turn_keys)
+        summary, keep_from = match_compact_state(states, turn_keys)
+    else:
+        summary, until = load_compact_state(meta)
+        keep_from = verbatim_keep_from_index(until, len(turns))
     keep_chars = max(1000, int(getattr(settings, "CHAT_COMPACT_KEEP_CHARS", 24000) or 24000))
     trigger = max(keep_chars + 1, int(getattr(settings, "CHAT_COMPACT_TRIGGER_CHARS", 80000) or 80000))
 
@@ -216,15 +270,25 @@ def build_compacted_model_messages(
             dropped_text = _turns_plain(dropped)
             new_summary = _run_summarizer(summary, dropped_text, llm_config)
             if new_summary:
-                until = new_keep - 1
                 summary = new_summary
                 keep_from = new_keep
-                storage.patch_session_metadata(
-                    user_id,
-                    agent_id,
-                    session_id,
-                    {_META_SUMMARY: summary, _META_UNTIL: until},
-                )
+                if turn_keys:
+                    covered = [int(k) for k in turn_keys[:new_keep]]
+                    states = [s for s in states if s.get("covered_turn_keys") != covered]
+                    states.append({"covered_turn_keys": covered, "summary": new_summary})
+                    storage.patch_session_metadata(
+                        user_id,
+                        agent_id,
+                        session_id,
+                        {_META_STATES: states[-_MAX_STATES:]},
+                    )
+                else:
+                    storage.patch_session_metadata(
+                        user_id,
+                        agent_id,
+                        session_id,
+                        {_META_SUMMARY: summary, _META_UNTIL: new_keep - 1},
+                    )
                 emit_rag_step("📦", "会话压缩", f"已摘要较早对话，原文自轮次 {keep_from} 起")
             else:
                 # 压缩失败：本轮只截断原文窗口，不更新 metadata

@@ -69,12 +69,12 @@ def retrieve_session_memory_hits(
     session_id: str,
     llm_config: dict[str, Any],
     top_k: int,
-    turn_index_lt: int | None = None,
+    allowed_turn_keys: list[int] | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """
     混合检索会话记忆；返回 (结果列表, 重写后的检索串)。
     无命中或不可用时结果为空列表，重写串仍可能非空。
-    turn_index_lt：只检索该轮次之前的记忆（原文窗口内的轮次不搜）。
+    allowed_turn_keys：只检索这些轮次的记忆（当前路径上的已归档轮；空列表表示无可检索轮次）。
     """
     empty: list[dict[str, Any]] = []
     if not (settings.EMBEDDING_API_KEY or "").strip():
@@ -82,7 +82,7 @@ def retrieve_session_memory_hits(
     q = (query or "").strip()
     if not q:
         return empty, ""
-    if turn_index_lt is not None and int(turn_index_lt) <= 0:
+    if allowed_turn_keys is not None and not allowed_turn_keys:
         return empty, ""
 
     mem_scope = memory_scope_for(user_id, agent_id, session_id)  # 获取会话记忆的隔离键, 只能检索当前会话的记忆
@@ -96,16 +96,16 @@ def retrieve_session_memory_hits(
         dense, sparse = embedder.get_all_embeddings([search_q[:8000]])  # 将当前查询转换为密集向量和稀疏向量
         milvus = get_chat_memory_milvus()
         milvus.init_collection()
-        flt = memory_filter_expr(mem_scope, turn_index_lt=turn_index_lt)
+        flt = memory_filter_expr(mem_scope, turn_keys=allowed_turn_keys)
         hits = milvus.hybrid_retrieve(  # 混合检索, 检索 top_k 个与当前查询最相似的记忆
             dense[0],
             sparse[0],
             top_k=max(1, top_k),
             filter_expr=flt,
         )
-        if turn_index_lt is not None:
-            cap = int(turn_index_lt)
-            hits = [h for h in hits if int(h.get("turn_index", -1) or -1) < cap]
+        if allowed_turn_keys is not None:
+            allowed = {int(k) for k in allowed_turn_keys}
+            hits = [h for h in hits if int(h.get("turn_key", -1) or -1) in allowed]
         return hits, rewritten
     except Exception:
         logger.exception("retrieve_session_memory_hits failed")
@@ -135,9 +135,9 @@ def search_session_memory(
         return ("会话记忆检索不可用：未配置嵌入服务。", trace)
 
     top_k = max(1, int(getattr(settings, "CHAT_MEMORY_SEARCH_TOP_K", 5) or 5))
-    from app.chat.compact import verbatim_keep_from_for_session
+    from app.chat.memory_archive import archived_turn_keys_on_path
 
-    keep_from = verbatim_keep_from_for_session(user_id, agent_id, session_id)
+    allowed_keys = archived_turn_keys_on_path(user_id, agent_id, session_id)
     hits, rewritten = retrieve_session_memory_hits(
         query.strip(),
         user_id=user_id,
@@ -145,7 +145,7 @@ def search_session_memory(
         session_id=session_id,
         llm_config=llm_config,
         top_k=top_k,
-        turn_index_lt=keep_from,
+        allowed_turn_keys=allowed_keys,
     )
     trace["rewritten_query"] = rewritten
 
@@ -168,6 +168,7 @@ def proactive_session_memory_inject_text(
     agent_id: int,
     session_id: str,
     llm_config: dict[str, Any],
+    path_turn_keys: list[int] | None = None,
 ) -> str | None:
     """
     用本轮用户输入预检索，返回可拼入 System 的摘录正文；无命中或关闭功能时返回 None。
@@ -190,9 +191,9 @@ def proactive_session_memory_inject_text(
         return None
 
     top_k = max(1, int(getattr(settings, "CHAT_MEMORY_PROACTIVE_TOP_K", 3) or 3))
-    from app.chat.compact import verbatim_keep_from_for_session
+    from app.chat.memory_archive import archived_turn_keys_on_path
 
-    keep_from = verbatim_keep_from_for_session(user_id, agent_id, session_id)
+    allowed_keys = archived_turn_keys_on_path(user_id, agent_id, session_id, path_turn_keys)
     hits, _rew = retrieve_session_memory_hits(
         q,
         user_id=user_id,
@@ -200,7 +201,7 @@ def proactive_session_memory_inject_text(
         session_id=session_id,
         llm_config=llm_config,
         top_k=top_k,
-        turn_index_lt=keep_from,
+        allowed_turn_keys=allowed_keys,
     )
     if not hits:
         return None

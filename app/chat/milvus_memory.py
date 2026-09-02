@@ -16,12 +16,32 @@ def _text_varchar_max() -> int:
     return max(512, int(getattr(settings, "CHAT_MEMORY_MILVUS_TEXT_MAX_LENGTH", 8192) or 8192))
 
 
-def memory_filter_expr(memory_scope: str, *, turn_index_lt: int | None = None) -> str:
+def memory_filter_expr(memory_scope: str, *, turn_keys: list[int] | None = None) -> str:
+    """
+    会话记忆检索过滤：按会话隔离；给定 turn_keys 时只命中这些轮次（当前路径上的已归档轮）。
+    turn_keys 为空列表时命中不到任何行（-1 是不存在的 turn_key）。
+    """
     esc = milvus_escape(memory_scope)
     expr = f'memory_scope == "{esc}"'
-    if turn_index_lt is not None:
-        expr += f" && turn_index < {int(turn_index_lt)}"
+    if turn_keys is not None:
+        keys = ",".join(str(int(k)) for k in turn_keys) or "-1"
+        expr += f" && turn_key in [{keys}]"
     return expr
+
+
+def _read_collection_field_names(client: MilvusClient, collection_name: str) -> set[str]:
+    """从 describe_collection 解析字段名集合，失败返回空集合。"""
+    try:
+        info = client.describe_collection(collection_name=collection_name)
+    except Exception:
+        return set()
+    if not isinstance(info, dict):
+        return set()
+    return {
+        str(f.get("name"))
+        for f in (info.get("fields") or [])
+        if isinstance(f, dict) and f.get("name")
+    }
 
 
 def _read_collection_dense_dim(client: MilvusClient, collection_name: str) -> int | None:
@@ -81,14 +101,15 @@ class ChatMemoryMilvusManager:
         client = self._get_client()
         if client.has_collection(self.collection_name):
             current = _read_collection_dense_dim(client, self.collection_name)
-            if current == dense_dim:
+            field_names = _read_collection_field_names(client, self.collection_name)
+            if current == dense_dim and "turn_key" in field_names:
                 return
-            if current is not None and current != dense_dim:
+            if current is not None:
                 logging.getLogger(__name__).warning(
-                    "会话记忆 Milvus 集合 %s 的 dense_embedding 维度为 %s，与 EMBEDDING_DIM=%s 不一致，将删除后按新维度重建（历史记忆向量会清空）",
+                    "会话记忆 Milvus 集合 %s 的 schema 与当前定义不一致（维度=%s，含 turn_key=%s），将删除后重建（历史记忆向量会清空，后续按 PG 原文惰性重归档）",
                     self.collection_name,
                     current,
-                    dense_dim,
+                    "turn_key" in field_names,
                 )
                 self.drop_collection()
             else:
@@ -104,6 +125,7 @@ class ChatMemoryMilvusManager:
         schema.add_field("memory_scope", DataType.VARCHAR, max_length=256)
         schema.add_field("text", DataType.VARCHAR, max_length=_text_varchar_max())
         schema.add_field("turn_index", DataType.INT64)
+        schema.add_field("turn_key", DataType.INT64)
         schema.add_field("chunk_index", DataType.INT64)
         schema.add_field("chunk_id", DataType.VARCHAR, max_length=512)
 
@@ -150,7 +172,7 @@ class ChatMemoryMilvusManager:
         filter_expr: str,
         rrf_k: int = 60,
     ) -> list[dict]:
-        output_fields = ["text", "turn_index", "chunk_index", "chunk_id", "memory_scope"]
+        output_fields = ["text", "turn_index", "turn_key", "chunk_index", "chunk_id", "memory_scope"]
         dense_search = AnnSearchRequest(
             data=[dense_embedding],
             anns_field="dense_embedding",
@@ -181,6 +203,7 @@ class ChatMemoryMilvusManager:
                         "id": hit.get("id"),
                         "text": hit.get("text", ""),
                         "turn_index": int(hit.get("turn_index", 0) or 0),
+                        "turn_key": int(hit.get("turn_key", 0) or 0),
                         "chunk_index": int(hit.get("chunk_index", 0) or 0),
                         "chunk_id": hit.get("chunk_id", ""),
                         "memory_scope": hit.get("memory_scope", ""),

@@ -17,6 +17,7 @@ from app.chat.chat_job import (
     cancel_active_session_job,
     create_chat_job,
     get_job_meta,
+    get_running_session_job,
     iter_job_sse_events,
     request_chat_job_cancel,
     verify_job_owner,
@@ -30,6 +31,7 @@ from app.core.dependency import AuthControl
 from app.models import User
 from app.mcp_client.tool_policy import approve_mcp_confirmation
 from app.schemas.agent_chat import (
+    BranchSelectRequest,
     ChatAttachmentUploadResponse,
     ChatJobCreateResponse,
     ChatRequest,
@@ -230,6 +232,7 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
                 use_web_search=request.use_web_search,
                 attachment_ids=request.attachment_ids or None,
                 regenerate=request.regenerate,
+                target_message_id=request.target_message_id,
                 mcp_approved_pending_id=request.mcp_approved_pending_id,
             ):
                 yield chunk
@@ -281,6 +284,7 @@ async def create_chat_job_endpoint(request: ChatRequest, current_user: User = De
         use_web_search=request.use_web_search,
         attachment_ids=request.attachment_ids or None,
         regenerate=request.regenerate,
+        target_message_id=request.target_message_id,
         mcp_approved_pending_id=request.mcp_approved_pending_id,
     )
     if is_dup:
@@ -539,9 +543,34 @@ async def list_chat_sessions_all(
     return Success(data=body.model_dump())
 
 
+def _to_message_infos(raw: list[dict]) -> list[MessageInfo]:
+    """存储记录 → MessageInfo 列表（重签多模态 URL，附带版本信息）。"""
+    from app.utils.signed_media import resign_message_payload
+
+    return [
+        MessageInfo(
+            message_id=m.get("message_id"),
+            type=m["type"],
+            content=m.get("content", ""),
+            content_json=m.get("content_json"),
+            timestamp=m["timestamp"],
+            rag_trace=m.get("rag_trace"),
+            rag_steps=m.get("rag_steps"),
+            error_text=m.get("error_text"),
+            sources=m.get("sources"),
+            thinking_text=m.get("thinking_text"),
+            thinking_items=m.get("thinking_items"),
+            version_index=int(m.get("version_index") or 1),
+            version_count=int(m.get("version_count") or 1),
+            sibling_ids=m.get("sibling_ids"),
+        )
+        for m in (resign_message_payload(x) for x in raw)
+    ]
+
+
 @router.get(
     "/chat/sessions/{session_id}",
-    summary="获取某会话的全部消息",
+    summary="获取某会话当前分支的消息",
     tags=["智能体模块"],
 )
 async def get_chat_session_messages(
@@ -550,7 +579,7 @@ async def get_chat_session_messages(
     current_user: User = Depends(AuthControl.is_authed),
 ):
     """
-    获取某会话的全部消息
+    获取某会话当前选中分支（路径）上的消息
     用户打开会话页面，前端调用此 API 展示历史会话消息，展示用户和智能体历史对话内容。
     :param session_id: 会话ID
     :param agent_id: 智能体 ID
@@ -564,26 +593,42 @@ async def get_chat_session_messages(
     # 如果智能体不存在或无权限访问，则返回404错误
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
-    # 获取会话消息，通过 PostgreSQL 和 Redis 缓存获取
+    # 获取会话消息（当前路径），通过 PostgreSQL 和 Redis 缓存获取
     raw = storage.get_session_messages(user_id, agent_id, session_id)
-    from app.utils.signed_media import resign_message_payload
+    return Success(data=SessionMessagesResponse(messages=_to_message_infos(raw)).model_dump())
 
-    messages = [
-        MessageInfo(
-            type=m["type"],
-            content=m.get("content", ""),
-            content_json=m.get("content_json"),
-            timestamp=m["timestamp"],
-            rag_trace=m.get("rag_trace"),
-            rag_steps=m.get("rag_steps"),
-            error_text=m.get("error_text"),
-            sources=m.get("sources"),
-            thinking_text=m.get("thinking_text"),
-            thinking_items=m.get("thinking_items"),
-        )
-        for m in (resign_message_payload(x) for x in raw)
-    ]
-    return Success(data=SessionMessagesResponse(messages=messages).model_dump())
+
+@router.post(
+    "/chat/sessions/{session_id}/branch/select",
+    summary="切换助手回复版本（消息树分支）",
+    tags=["智能体模块"],
+)
+async def select_chat_branch(
+    session_id: str,
+    request: BranchSelectRequest,
+    agent_id: int = Query(..., description="智能体 ID"),
+    current_user: User = Depends(AuthControl.is_authed),
+):
+    """
+    切换助手回复版本：把目标助手消息设为其父用户消息下的选中分支，返回切换后当前路径的消息列表。
+    :param session_id: 会话ID
+    :param request: 包含目标助手消息 ID
+    :param agent_id: 智能体 ID
+    :param current_user: 当前用户
+    :return: Success
+    """
+    user_id = current_user.id
+    ua = await user_agent_controller.get_accessible(agent_id, user_id)
+    # 如果智能体不存在或无权限访问，则返回404错误
+    if not ua:
+        raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
+    sid = (session_id or "").strip()
+    if get_running_session_job(user_id, agent_id, sid):
+        raise HTTPException(status_code=409, detail="该会话有进行中的生成任务，请等待完成或停止后再切换版本")
+    records = storage.select_branch(user_id, agent_id, sid, request.assistant_message_id)
+    if records is None:
+        raise HTTPException(status_code=400, detail="目标回复不存在或不属于当前会话")
+    return Success(data=SessionMessagesResponse(messages=_to_message_infos(records)).model_dump())
 
 
 @router.delete(
