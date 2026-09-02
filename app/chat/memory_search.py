@@ -69,23 +69,20 @@ def retrieve_session_memory_hits(
     session_id: str,
     llm_config: dict[str, Any],
     top_k: int,
+    turn_index_lt: int | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """
     混合检索会话记忆；返回 (结果列表, 重写后的检索串)。
     无命中或不可用时结果为空列表，重写串仍可能非空。
-    :param query: 查询
-    :param user_id: 用户ID
-    :param agent_id: 智能体ID
-    :param session_id: 会话ID
-    :param llm_config: LLM配置
-    :param top_k: 返回的记忆数量
-    :return: 结果列表和重写后的检索串
+    turn_index_lt：只检索该轮次之前的记忆（原文窗口内的轮次不搜）。
     """
     empty: list[dict[str, Any]] = []
     if not (settings.EMBEDDING_API_KEY or "").strip():
         return empty, ""
     q = (query or "").strip()
     if not q:
+        return empty, ""
+    if turn_index_lt is not None and int(turn_index_lt) <= 0:
         return empty, ""
 
     mem_scope = memory_scope_for(user_id, agent_id, session_id)  # 获取会话记忆的隔离键, 只能检索当前会话的记忆
@@ -99,13 +96,16 @@ def retrieve_session_memory_hits(
         dense, sparse = embedder.get_all_embeddings([search_q[:8000]])  # 将当前查询转换为密集向量和稀疏向量
         milvus = get_chat_memory_milvus()
         milvus.init_collection()
-        flt = memory_filter_expr(mem_scope)  # 获取会话记忆的过滤表达式, 只能检索当前会话的记忆
+        flt = memory_filter_expr(mem_scope, turn_index_lt=turn_index_lt)
         hits = milvus.hybrid_retrieve(  # 混合检索, 检索 top_k 个与当前查询最相似的记忆
             dense[0],
             sparse[0],
             top_k=max(1, top_k),
             filter_expr=flt,
         )
+        if turn_index_lt is not None:
+            cap = int(turn_index_lt)
+            hits = [h for h in hits if int(h.get("turn_index", -1) or -1) < cap]
         return hits, rewritten
     except Exception:
         logger.exception("retrieve_session_memory_hits failed")
@@ -135,6 +135,9 @@ def search_session_memory(
         return ("会话记忆检索不可用：未配置嵌入服务。", trace)
 
     top_k = max(1, int(getattr(settings, "CHAT_MEMORY_SEARCH_TOP_K", 5) or 5))
+    from app.chat.compact import verbatim_keep_from_for_session
+
+    keep_from = verbatim_keep_from_for_session(user_id, agent_id, session_id)
     hits, rewritten = retrieve_session_memory_hits(
         query.strip(),
         user_id=user_id,
@@ -142,6 +145,7 @@ def search_session_memory(
         session_id=session_id,
         llm_config=llm_config,
         top_k=top_k,
+        turn_index_lt=keep_from,
     )
     trace["rewritten_query"] = rewritten
 
@@ -186,6 +190,9 @@ def proactive_session_memory_inject_text(
         return None
 
     top_k = max(1, int(getattr(settings, "CHAT_MEMORY_PROACTIVE_TOP_K", 3) or 3))
+    from app.chat.compact import verbatim_keep_from_for_session
+
+    keep_from = verbatim_keep_from_for_session(user_id, agent_id, session_id)
     hits, _rew = retrieve_session_memory_hits(
         q,
         user_id=user_id,
@@ -193,6 +200,7 @@ def proactive_session_memory_inject_text(
         session_id=session_id,
         llm_config=llm_config,
         top_k=top_k,
+        turn_index_lt=keep_from,
     )
     if not hits:
         return None

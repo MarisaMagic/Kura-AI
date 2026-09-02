@@ -258,7 +258,7 @@ def _format_turn_context_block(
     memory_inject: str | None,
     mcp_approval_note: str | None,
 ) -> str:
-    """拼装仅本回合有效、挂在最后一条 Human 末尾的上下文（不落库）。"""
+    """拼装仅本回合有效、作为独立 Human 追加的上下文（不落库）。"""
     parts: list[str] = ["【本轮上下文（仅本回合有效）】"]
     if use_web_search:
         parts.append(
@@ -288,28 +288,14 @@ def _format_turn_context_block(
     return "\n\n".join(parts)
 
 
-def _append_text_to_last_human(messages: list, block: str) -> list:
-    """把文本接到最后一条 Human（字符串拼接或多模态 text 块）。无 Human 则原样返回。"""
+def _append_turn_context_message(messages: list, block: str) -> list:
+    """本轮上下文作为最后一条独立 Human（不改写历史、不落库）。无 Human 则不插入。"""
     text = (block or "").strip()
     if not text:
         return list(messages)
-    last_i = None
-    for i in range(len(messages) - 1, -1, -1):
-        if isinstance(messages[i], HumanMessage):
-            last_i = i
-            break
-    if last_i is None:
+    if not any(isinstance(m, HumanMessage) for m in messages):
         return list(messages)
-    content = messages[last_i].content
-    if isinstance(content, str):
-        new_content: Any = content + "\n\n" + text
-    elif isinstance(content, list):
-        new_content = list(content) + [{"type": "text", "text": text}]
-    else:
-        new_content = str(content) + "\n\n" + text
-    out = list(messages)
-    out[last_i] = HumanMessage(content=new_content)
-    return out
+    return list(messages) + [HumanMessage(content=text)]
 
 
 def _mcp_approval_note(
@@ -349,13 +335,24 @@ def _prepare_to_invoke_messages(
     mcp_approval_note: str | None = None,
 ) -> list:
     """
-    滑动窗口 → 可选会话记忆预检索 → 展开多模态 → 本轮上下文接到最后一条 Human。
+    压缩或滑动窗口 → 可选会话记忆预检索 → 展开多模态（仅本轮 Human 带图）→ 本轮上下文独立消息。
     """
+    from app.chat.compact import build_compacted_model_messages
     from app.chat.memory_search import proactive_session_memory_inject_text
     from app.chat.tools import emit_rag_step
 
-    windowed = apply_sliding_window_turns(messages)
     llm_cfg = _sub_llm_config_from_ua(ua)
+    if getattr(settings, "CHAT_USE_SESSION_MEMORY", True) and getattr(settings, "CHAT_COMPACT_ENABLED", True):
+        viewed = build_compacted_model_messages(
+            messages,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            llm_config=llm_cfg,
+            system_chars=len(_compose_system_prompt(ua)),
+        )
+    else:
+        viewed = apply_sliding_window_turns(messages)
     inj = proactive_session_memory_inject_text(
         (user_query_for_memory or "").strip(),
         user_id=user_id,
@@ -366,10 +363,11 @@ def _prepare_to_invoke_messages(
     if inj:
         emit_rag_step("📌", "会话记忆预注入", "已附加较早轮次摘录")
     expanded = expand_messages_for_model(
-        windowed,
+        viewed,
         user_id=user_id,
         agent_id=agent_id,
         session_id=session_id,
+        images_on_last_human_only=True,
     )
     turn_block = _format_turn_context_block(
         use_knowledge_retrieval=use_knowledge_retrieval,
@@ -379,12 +377,12 @@ def _prepare_to_invoke_messages(
         memory_inject=inj,
         mcp_approval_note=mcp_approval_note,
     )
-    return _append_text_to_last_human(expanded, turn_block)
+    return _append_turn_context_message(expanded, turn_block)
 
 
 def _compose_system_prompt(ua: UserAgent) -> str:
     """
-    稳定系统提示：人设 + 联网/知识库纪律（跨轮不变；本轮开关写在最后一条 Human）。
+    稳定系统提示：人设 + 联网/知识库纪律（跨轮不变；本轮开关写在独立旁路 Human）。
     """
     parts: list[str] = []
     base = (ua.system_prompt or "").strip()

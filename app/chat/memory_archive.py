@@ -72,7 +72,7 @@ def _format_ai_message(msg: AIMessage) -> str:
     return f"助手: {text}"
 
 
-def _turn_to_text(turn: list[BaseMessage]) -> str:
+def turn_to_text(turn: list[BaseMessage]) -> str:
     """
     将轮次转换为文本
     :param turn: 轮次
@@ -134,11 +134,8 @@ def _get_or_create_cursor(db: Any, session_ref_id: int) -> ChatMemoryCursor:
 
 def archive_session_memory(user_id: int, agent_id: int, session_id: str) -> None:
     """
-    将超出窗口的轮次增量写入 Milvus，并更新 mg_chat_memory_cursor。
-    :param user_id: 用户ID
-    :param agent_id: 智能体ID
-    :param session_id: 会话ID
-    :return: None
+    将已离开原文窗口的轮次增量写入 Milvus，并更新 mg_chat_memory_cursor。
+    原文窗口由会话压缩 metadata（compact_until_turn_index）决定，摘要本身不入库。
     """
     if not getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
         return
@@ -152,11 +149,13 @@ def archive_session_memory(user_id: int, agent_id: int, session_id: str) -> None
 
     _, body = split_system_prefix(messages)  # 将消息体按系统消息分组, 返回系统消息列表和非系统消息列表。
     turns = group_turns(body)  # 将消息体按用户轮次分组（不含前缀 System）。
-    window = max(1, int(getattr(settings, "CHAT_MEMORY_WINDOW_TURNS", 10) or 10))  # 获取会话记忆窗口大小
-    if len(turns) <= window:
+    if not turns:
         return
 
-    max_archivable = len(turns) - window - 1  # 计算可归档的最大轮次索引
+    from app.chat.compact import verbatim_keep_from_for_session
+
+    keep_from = verbatim_keep_from_for_session(user_id, agent_id, session_id, len(turns))
+    max_archivable = keep_from - 1  # 仅归档已离开原文窗口的轮次
     if max_archivable < 0:
         return
 
@@ -193,7 +192,7 @@ def archive_session_memory(user_id: int, agent_id: int, session_id: str) -> None
         # 遍历可归档的轮次, 将轮次转换为文本, 并分块插入到 Milvus 中
         for turn_idx in range(start, max_archivable + 1):
             turn = turns[turn_idx]
-            full_text = _turn_to_text(turn) # 将轮次转换为文本
+            full_text = turn_to_text(turn) # 将轮次转换为文本
             sub_chunks = _chunk_text(full_text, max_chunk) # 将文本分块
             if not sub_chunks:
                 continue

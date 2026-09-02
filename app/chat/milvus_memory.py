@@ -16,9 +16,12 @@ def _text_varchar_max() -> int:
     return max(512, int(getattr(settings, "CHAT_MEMORY_MILVUS_TEXT_MAX_LENGTH", 8192) or 8192))
 
 
-def memory_filter_expr(memory_scope: str) -> str:
+def memory_filter_expr(memory_scope: str, *, turn_index_lt: int | None = None) -> str:
     esc = milvus_escape(memory_scope)
-    return f'memory_scope == "{esc}"'
+    expr = f'memory_scope == "{esc}"'
+    if turn_index_lt is not None:
+        expr += f" && turn_index < {int(turn_index_lt)}"
+    return expr
 
 
 def _read_collection_dense_dim(client: MilvusClient, collection_name: str) -> int | None:

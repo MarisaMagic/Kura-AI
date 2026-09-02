@@ -572,4 +572,43 @@ class ConversationStorage:
         return len(pairs)
 
 
+    def get_session_metadata(self, user_id: int, agent_id: int, session_id: str) -> dict:
+        """读取会话 metadata_json；会话不存在时返回空 dict。"""
+        db = SessionLocal()
+        try:
+            session = self._session_query(db, user_id, agent_id, session_id).first()
+            if not session:
+                return {}
+            meta = session.metadata_json
+            return dict(meta) if isinstance(meta, dict) else {}
+        finally:
+            db.close()
+
+    def patch_session_metadata(
+        self,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        patch: dict,
+    ) -> None:
+        """合并写入会话 metadata_json（不覆盖未出现在 patch 中的键）。"""
+        from sqlalchemy.orm.attributes import flag_modified
+
+        if not patch:
+            return
+        db = SessionLocal()
+        try:
+            session = self._get_or_create_session(db, user_id, agent_id, session_id)
+            meta = dict(session.metadata_json) if isinstance(session.metadata_json, dict) else {}
+            meta.update(patch)
+            session.metadata_json = meta
+            flag_modified(session, "metadata_json")
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+
 storage = ConversationStorage()

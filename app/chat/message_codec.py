@@ -104,16 +104,11 @@ def expand_human_image_refs(
     user_id: int,
     agent_id: int,
     session_id: str,
+    expand_images: bool = True,
 ) -> Any:
     """
-    对 image_ref 用 attachment_id 调 file_bytes_for_attachment 从磁盘读出原始字节，再 Base64 编码，拼成 OpenAI 兼容的 image_url（data URL）。
-    用于调用模型前展开历史与本轮 human 消息中的 image_ref。
-    智能体底层 LLM 收到「文本块 + image_url 块」的多模态输入，由模型做视觉理解。
-    :param content: 消息内容
-    :param user_id: 用户ID
-    :param agent_id: 智能体ID
-    :param session_id: 会话ID
-    :return: 展开后的消息内容
+    对 image_ref：默认读盘后编成 OpenAI 兼容 data URL。
+    expand_images=False 时改为短占位，避免历史图撑满上下文。
     """
     if isinstance(content, str):
         return content
@@ -125,11 +120,18 @@ def expand_human_image_refs(
     new_blocks: list[Any] = []
     for block in content:
         if isinstance(block, dict) and block.get("type") == "file_ref":
-            # 仅用于存库与前端展示；模型侧通过会话附件工具与系统提示访问文档
             continue
         if isinstance(block, dict) and block.get("type") == "image_ref":
             aid = str(block.get("attachment_id") or "").strip()
             if not aid:
+                continue
+            fn = (block.get("filename") or "").strip()
+            if not expand_images:
+                label = f"[图片 attachment_id={aid}"
+                if fn:
+                    label += f" filename={fn}"
+                label += "]"
+                new_blocks.append({"type": "text", "text": label})
                 continue
             raw = file_bytes_for_attachment(aid, user_id=user_id, agent_id=agent_id, session_id=session_id)
             if not raw:
@@ -145,20 +147,36 @@ def expand_human_image_refs(
     return new_blocks
 
 
-def expand_messages_for_model(messages: list[BaseMessage], *, user_id: int, agent_id: int, session_id: str) -> list:
+def expand_messages_for_model(
+    messages: list[BaseMessage],
+    *,
+    user_id: int,
+    agent_id: int,
+    session_id: str,
+    images_on_last_human_only: bool = False,
+) -> list:
     """
     调用模型前展开 human 消息中的 image_ref。
-    :param messages: 消息列表
-    :param user_id: 用户ID
-    :param agent_id: 智能体ID
-    :param session_id: 会话ID
-    :return: 展开后的消息列表
+    images_on_last_human_only=True 时仅最后一条 Human 展开为 data URL。
     """
+    last_human_i = None
+    if images_on_last_human_only:
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], HumanMessage):
+                last_human_i = i
+                break
     out: list = []
-    for m in messages:
+    for i, m in enumerate(messages):
         if isinstance(m, HumanMessage):
+            expand_images = True
+            if images_on_last_human_only:
+                expand_images = i == last_human_i
             expanded = expand_human_image_refs(
-                m.content, user_id=user_id, agent_id=agent_id, session_id=session_id
+                m.content,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                expand_images=expand_images,
             )
             out.append(HumanMessage(content=expanded))
         else:

@@ -133,9 +133,16 @@ class Settings(BaseSettings):
     CHAT_MEMORY_MILVUS_TEXT_MAX_LENGTH: int = 8192
     # 为 True 时启动 init 会先 drop 再建会话记忆 collection。另：init 时若现有集合的 dense 维与 EMBEDDING_DIM 不一致会自动 drop 重建（无需手开此项）
     CHAT_MEMORY_MILVUS_RECREATE_ON_INIT: bool = False
-    # 启用：最近 N 轮进上下文 + 远期归档检索工具
+    # 启用：远期归档检索 + 按字符预算压缩进上下文（替代「只留最近 N 轮」滑动窗口）
     CHAT_USE_SESSION_MEMORY: bool = True
-    CHAT_MEMORY_WINDOW_TURNS: int = 10
+    CHAT_MEMORY_WINDOW_TURNS: int = 10  # 仅当 CHAT_COMPACT_ENABLED=false 时作为滑动窗口轮数
+    CHAT_COMPACT_ENABLED: bool = True
+    # 估算 prompt（tools 粗估 + system + 摘要 + 原文 + 回包余量）达到该字符数则触发压缩
+    CHAT_COMPACT_TRIGGER_CHARS: int = 80000
+    # 压缩后保留的最近原文（字符）；须明显小于 trigger
+    CHAT_COMPACT_KEEP_CHARS: int = 24000
+    CHAT_COMPACT_HEADROOM_CHARS: int = 12000
+    CHAT_COMPACT_TOOLS_ESTIMATE_CHARS: int = 8000
     # 单块归档字符上限（略小于原默认，减轻单条向量上下文过长）
     CHAT_MEMORY_CHUNK_MAX_CHARS: int = 1400
     CHAT_MEMORY_SEARCH_TOP_K: int = 5

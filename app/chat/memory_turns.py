@@ -47,8 +47,7 @@ def group_turns(body: list[BaseMessage]) -> list[list[BaseMessage]]:
 def apply_sliding_window_turns(messages: list[BaseMessage]) -> list[BaseMessage]:
     """
     仅保留最近 N 轮对话（不含前缀 System）；轮数不足 N 则原样返回。
-    :param messages: 消息列表
-    :return: 消息列表
+    主路径已改为按字符预算压缩（CHAT_COMPACT_ENABLED）；本函数仅作关闭压缩时的回退。
     """
     if not getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
         return list(messages)
