@@ -283,6 +283,16 @@ class Settings(BaseSettings):
     # fetch_url 独立配额与抽文长度
     WEB_SEARCH_FETCH_MAX_CALLS_PER_TURN: int = 3
     WEB_SEARCH_FETCH_MAX_CHARS: int = 4000
+    # 文字搜图（web_image_search）：召回条数、回答里给现成 Markdown 的条数、每轮调用上限
+    WEB_IMAGE_SEARCH_MAX_RESULTS: int = 6
+    WEB_IMAGE_SEARCH_MARKDOWN_COUNT: int = 4
+    WEB_IMAGE_SEARCH_MAX_CALLS_PER_TURN: int = 2
+    # 先多召回再按来源/尺寸筛选；长边小于该值且宽高已知时视为缩略图（全是缩略图则仍保留）
+    WEB_IMAGE_SEARCH_CANDIDATE_COUNT: int = 18
+    WEB_IMAGE_SEARCH_MIN_EDGE: int = 240
+    # 搜图多模态重排（复用知识库 RERANK_*；模型须含 vl-rerank，否则跳过）
+    WEB_IMAGE_RERANK_ENABLED: bool = True
+    WEB_IMAGE_SIZE_BLEND: float = 0.15
 
     @property
     def chat_database_url(self) -> str:

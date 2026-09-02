@@ -288,6 +288,11 @@ class CaptionPrepareTests(unittest.TestCase):
         self.assertIn("不要编造", _CAPTION_SYSTEM_PROMPT)
         self.assertIn("不要调用任何工具", _CAPTION_SYSTEM_PROMPT)
 
+    def test_caption_prompt_asks_searchable_names(self):
+        self.assertIn("专名", _CAPTION_SYSTEM_PROMPT)
+        self.assertIn("外观标签", _CAPTION_SYSTEM_PROMPT)
+        self.assertIn("不要编造名称", _CAPTION_SYSTEM_PROMPT)
+
 
 if __name__ == "__main__":
     unittest.main()

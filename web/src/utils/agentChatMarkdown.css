@@ -70,6 +70,14 @@ html.dark .agent-chat-md :not(pre) > code {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.agent-chat-md img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: 8px;
+  margin: 8px 0;
+}
+
 /* 点击引用胶囊跳转后，来源 chip 的反馈动画（由 index.vue 动态追加 .kcite-flash） */
 @keyframes kcite-ring {
   0% {

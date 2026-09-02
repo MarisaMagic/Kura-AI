@@ -56,6 +56,15 @@ md.renderer.rules.kura_citation = (tokens, idx, _options, env) => {
   return `<sup class="kcite-group">${badges.join('<span class="kcite-sep">,</span>')}</sup>`
 }
 
+// 外链图（B 站 / 微博等）常按 Referer 防盗链；不带当前页 Referer 才能显示。
+const defaultImageRender =
+  md.renderer.rules.image ||
+  ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options))
+md.renderer.rules.image = (tokens, idx, options, env, self) => {
+  tokens[idx].attrSet('referrerpolicy', 'no-referrer')
+  return defaultImageRender(tokens, idx, options, env, self)
+}
+
 // 知识库/头像等签名媒体：把 http(s)://host/api/v1/media/... 收成同源相对路径，
 // 以通过 CSP img-src 'self'（绝对 http://127.0.0.1:9999 会被拦截）。
 const MEDIA_PATH_RE =
@@ -69,6 +78,7 @@ export function toSameOriginMediaUrl(url) {
   return m ? m[1] : raw
 }
 
+// 只认知识库签名媒体路径 /api/v1/media/...；外链 https 图（联网搜图）不当作坏链回退。
 function firstMediaImageUrl(sources) {
   if (!Array.isArray(sources)) return null
   for (const s of sources) {
@@ -96,6 +106,8 @@ export function rewriteMediaUrlsInText(text, sources) {
     if (replaced) return line
     const target = String(inner || '').trim()
     if (new RegExp(`^${MEDIA_PATH_RE.source}$`, 'i').test(target)) return line
+    // 只修知识库坏链；不要把 https:// 外链图改写成 /api/v1/media/
+    if (/^https:\/\//i.test(target)) return line
     replaced = true
     return `${indent}![${alt || '知识库图片'}](${fallback})`
   })
@@ -121,5 +133,6 @@ export function renderAgentChatMarkdown(text, sources) {
   const raw = md.render(rewritten, { kuraSources })
   return DOMPurify.sanitize(raw, {
     USE_PROFILES: { html: true },
+    ADD_ATTR: ['referrerpolicy'],
   })
 }
