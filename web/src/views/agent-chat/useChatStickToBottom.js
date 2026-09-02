@@ -13,8 +13,16 @@ export function useChatStickToBottom(bodyScrollRef) {
   const stickToBottom = ref(true)
   const scrollAtBottom = ref(true)
 
+  function resolveEl() {
+    const v = bodyScrollRef.value
+    if (!v) return null
+    if (typeof v.getScrollEl === 'function') return v.getScrollEl()
+    if (v instanceof HTMLElement) return v
+    return v.$el instanceof HTMLElement ? v.$el : null
+  }
+
   function measureGap() {
-    const el = bodyScrollRef.value
+    const el = resolveEl()
     if (!el) return 0
     return el.scrollHeight - el.scrollTop - el.clientHeight
   }
@@ -25,7 +33,7 @@ export function useChatStickToBottom(bodyScrollRef) {
 
   /** 只更新按钮显隐，不改粘底意图（用于程序化滚底之后） */
   function updateScrollBottomState() {
-    const el = bodyScrollRef.value
+    const el = resolveEl()
     if (!el) {
       scrollAtBottom.value = true
       return
@@ -35,7 +43,7 @@ export function useChatStickToBottom(bodyScrollRef) {
 
   /** 用户滚动：同时更新粘底与「是否在底部」 */
   function onBodyScroll() {
-    const el = bodyScrollRef.value
+    const el = resolveEl()
     if (!el) {
       scrollAtBottom.value = true
       stickToBottom.value = true
@@ -54,7 +62,7 @@ export function useChatStickToBottom(bodyScrollRef) {
     if (force) stickToBottom.value = true
     nextTick(() => {
       if (!force && !stickToBottom.value) return
-      const el = bodyScrollRef.value
+      const el = resolveEl()
       if (!el) {
         nextTick(() => updateScrollBottomState())
         return

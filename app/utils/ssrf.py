@@ -138,3 +138,85 @@ def validate_public_http_url(url: str, *, allow_private: bool | None = None) -> 
 
 def assert_public_http_url(url: str, *, allow_private: bool | None = None) -> str:
     return validate_public_http_url(url, allow_private=allow_private).url
+
+
+# 图片/来源页交给浏览器或第三方拉图：只做语法 + 主机黑名单，不 DNS 解析。
+_IMAGE_UNSAFE_CHARS = frozenset(" \t\r\n)\"'<>")
+
+
+def _is_decimal_ipv4_hostname(host: str) -> bool:
+    if not host.isdigit():
+        return False
+    try:
+        n = int(host)
+    except ValueError:
+        return False
+    return 0 <= n <= 0xFFFFFFFF
+
+
+def _syntactic_http_host(url: str, *, schemes: tuple[str, ...]) -> tuple[str, str]:
+    """校验协议/userinfo 并取出主机名；不解析 DNS。"""
+    raw = (url or "").strip()
+    if not raw:
+        raise UnsafeUrlError("URL 为空")
+    if any(ch in raw for ch in "\r\n"):
+        raise UnsafeUrlError("URL 不得包含换行")
+    try:
+        parsed = urlparse(raw)
+    except ValueError as exc:
+        raise UnsafeUrlError("URL 无法解析") from exc
+    if parsed.scheme not in schemes:
+        raise UnsafeUrlError("URL 协议不支持")
+    if parsed.username or parsed.password:
+        raise UnsafeUrlError("URL 不得包含用户名或密码")
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host:
+        raise UnsafeUrlError("URL 缺少主机名")
+    return raw, host
+
+
+def assert_safe_https_image_url(url: str) -> str:
+    """公开 https 图片 URL：禁止空白/Markdown 破坏符、userinfo、字面量 IP、本机主机名。"""
+    raw = (url or "").strip()
+    if any(ch in raw for ch in _IMAGE_UNSAFE_CHARS):
+        raise UnsafeUrlError("图片 URL 含非法字符")
+    raw, host = _syntactic_http_host(raw, schemes=("https",))
+    if _hostname_is_literal_ip(host) is not None or _is_decimal_ipv4_hostname(host):
+        raise UnsafeUrlError("禁止指向 IP 地址的图片 URL")
+    if host in _BLOCKED_HOSTS:
+        raise UnsafeUrlError("禁止指向内网或本机的 URL")
+    return raw
+
+
+def is_safe_https_image_url(url: str) -> bool:
+    try:
+        assert_safe_https_image_url(url)
+        return True
+    except (UnsafeUrlError, ValueError):
+        return False
+
+
+def assert_safe_http_page_url(url: str) -> str:
+    """http(s) 来源页：禁止换行/空白、userinfo、内网字面量 IP、本机主机名。"""
+    raw = (url or "").strip()
+    if any(ch in raw for ch in " \t"):
+        raise UnsafeUrlError("URL 不得包含空白")
+    raw, host = _syntactic_http_host(raw, schemes=("http", "https"))
+    literal = _hostname_is_literal_ip(host)
+    if literal is not None and _is_blocked_ip(literal):
+        raise UnsafeUrlError("禁止指向内网或本机的 URL")
+    if _is_decimal_ipv4_hostname(host):
+        ip = ipaddress.IPv4Address(int(host))
+        if _is_blocked_ip(ip):
+            raise UnsafeUrlError("禁止指向内网或本机的 URL")
+    if host in _BLOCKED_HOSTS:
+        raise UnsafeUrlError("禁止指向内网或本机的 URL")
+    return raw
+
+
+def is_safe_http_page_url(url: str) -> bool:
+    try:
+        assert_safe_http_page_url(url)
+        return True
+    except (UnsafeUrlError, ValueError):
+        return False

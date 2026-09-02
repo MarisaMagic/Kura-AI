@@ -220,10 +220,19 @@ html.dark .agent-chat-intro-avatar {
 }
 
 /* —— 信息流（助手左对齐；用户右对齐气泡）—— */
-.agent-chat-feed {
+.agent-chat-feed:not(.agent-chat-feed--virtual) {
   max-width: var(--agent-chat-column-max);
   margin: 0 auto;
   padding-bottom: 16px;
+}
+
+.agent-chat-feed.agent-chat-feed--virtual {
+  max-width: none;
+  width: 100%;
+  margin: 0;
+  padding-bottom: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .agent-chat-assistant-actions {

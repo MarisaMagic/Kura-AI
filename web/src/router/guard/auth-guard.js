@@ -1,9 +1,12 @@
-import { getToken, isNullOrWhitespace } from '@/utils'
+import { getToken, isNullOrWhitespace, tryRefreshToken } from '@/utils'
 
 const WHITE_LIST = ['/login', '/register', '/404']
 export function createAuthGuard(router) {
   router.beforeEach(async (to) => {
-    const token = getToken()
+    let token = getToken()
+    if (isNullOrWhitespace(token) && !WHITE_LIST.includes(to.path)) {
+      token = await tryRefreshToken()
+    }
 
     /** 没有token的情况 */
     if (isNullOrWhitespace(token)) {

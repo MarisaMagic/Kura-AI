@@ -6,10 +6,7 @@
 from __future__ import annotations
 
 import base64
-import math
 import os
-import re
-from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,15 +33,6 @@ class MultimodalEmbeddingService:
         # 设置 DashScope API Key
         if self.api_key:
             dashscope.api_key = self.api_key
-        
-        # BM25 参数
-        self.k1 = 1.5
-        self.b = 0.75
-        self._vocab: dict[str, int] = {}
-        self._vocab_counter = 0
-        self._doc_freq: Counter[str] = Counter()
-        self._total_docs = 0
-        self._avg_doc_len = 1.0
 
     def get_text_embeddings(self, texts: list[str], request_timeout: int | None = None) -> list[list[float]]:
         """
@@ -255,109 +243,6 @@ class MultimodalEmbeddingService:
             embeddings.extend(image_embeddings)
         
         return embeddings
-
-    def tokenize(self, text: str) -> list[str]:
-        """
-        分词
-        :param text: 文本
-        :return: 分词列表
-        """
-        text = text.lower()
-        tokens: list[str] = []
-        chinese_pattern = re.compile(r"[\u4e00-\u9fff]")
-        english_pattern = re.compile(r"[a-zA-Z]+")
-        i = 0
-        while i < len(text):
-            char = text[i]
-            if chinese_pattern.match(char):
-                tokens.append(char)
-                i += 1
-            elif english_pattern.match(char):
-                match = english_pattern.match(text[i:])
-                if match:
-                    tokens.append(match.group())
-                    i += len(match.group())
-            else:
-                i += 1
-        return tokens
-
-    def fit_corpus(self, texts: list[str]) -> None:
-        """
-        训练语料库（用于 BM25 稀疏向量）
-        :param texts: 文本列表
-        :return: None
-        """
-        self._total_docs = len(texts)
-        total_len = 0
-        for text in texts:
-            tokens = self.tokenize(text)
-            total_len += len(tokens)
-            for token in set(tokens):
-                self._doc_freq[token] += 1
-                if token not in self._vocab:
-                    self._vocab[token] = self._vocab_counter
-                    self._vocab_counter += 1
-        self._avg_doc_len = total_len / self._total_docs if self._total_docs > 0 else 1.0
-
-    def get_sparse_embedding(self, text: str) -> dict[int, float]:
-        """
-        获取稀疏向量（BM25 算法）
-        :param text: 文本
-        :return: 稀疏向量
-        """
-        tokens = self.tokenize(text)
-        doc_len = len(tokens)
-        tf = Counter(tokens)
-        sparse_vector: dict[int, float] = {}
-        for token, freq in tf.items():
-            if token not in self._vocab:
-                self._vocab[token] = self._vocab_counter
-                self._vocab_counter += 1
-            idx = self._vocab[token]
-            df = self._doc_freq.get(token, 0)
-            if df == 0:
-                idf = math.log((self._total_docs + 1) / 1)
-            else:
-                idf = math.log((self._total_docs - df + 0.5) / (df + 0.5) + 1)
-            numerator = freq * (self.k1 + 1)
-            denominator = freq + self.k1 * (1 - self.b + self.b * doc_len / max(self._avg_doc_len, 1.0))
-            score = idf * numerator / denominator
-            if score > 0:
-                sparse_vector[idx] = float(score)
-        return sparse_vector
-
-    def get_sparse_embeddings(self, texts: list[str]) -> list[dict[int, float]]:
-        """
-        获取稀疏向量列表
-        :param texts: 文本列表
-        :return: 稀疏向量列表
-        """
-        return [self.get_sparse_embedding(t) for t in texts]
-
-    def get_all_embeddings(
-        self,
-        texts: list[str] | None = None,
-        image_paths: list[str] | None = None,
-    ) -> tuple[list[list[float]], list[dict[int, float]]]:
-        """
-        获取密集向量和稀疏向量
-        :param texts: 文本列表
-        :param image_paths: 图片路径列表
-        :return: 密集向量和稀疏向量
-        """
-        dense = []
-        sparse = []
-        
-        if texts:
-            dense.extend(self.get_text_embeddings(texts))
-            sparse.extend(self.get_sparse_embeddings(texts))
-        
-        if image_paths:
-            dense.extend(self.get_image_embeddings(image_paths))
-            # 图片块无文本稀疏向量，占位为空字典
-            sparse.extend([{} for _ in image_paths])
-        
-        return dense, sparse
 
 
 # 全局多模态嵌入服务实例

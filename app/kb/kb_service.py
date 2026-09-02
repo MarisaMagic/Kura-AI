@@ -24,6 +24,8 @@ from app.kb.multimodal_milvus_writer import MultimodalMilvusWriter
 from app.kb.parent_chunk_store import ParentChunkStore
 from app.settings import settings
 
+os.environ.setdefault("PGCLIENTENCODING", "UTF8")
+
 _multimodal_loader = MultimodalDocumentLoader()
 _milvus = MilvusManager()
 _parent = ParentChunkStore()
@@ -67,6 +69,33 @@ def allowed_upload_extension(filename: str) -> bool:
     )
 
 
+_KB_FILENAMES_TTL = 3600
+
+
+def _kb_filenames_cache_key(kb_scope: str) -> str:
+    return f"kb_filenames:{kb_scope}"
+
+
+def invalidate_kb_filename_cache(kb_scope: str) -> None:
+    cache.delete(_kb_filenames_cache_key(kb_scope))
+
+
+def list_kb_filenames_for_scope(kb_scope: str) -> list[str]:
+    """从 PostgreSQL mg_kb_documents 读选档文件名，按 kb_scope Redis 缓存。"""
+    key = _kb_filenames_cache_key(kb_scope)
+    cached = cache.get_json(key)
+    if isinstance(cached, list):
+        return [str(x).strip() for x in cached if str(x).strip()]
+    db = SessionLocal()
+    try:
+        rows = db.query(KbDocument.display_filename).filter(KbDocument.kb_scope == kb_scope).all()
+        names = sorted({(r[0] or "").strip() for r in rows if (r[0] or "").strip()})
+    finally:
+        db.close()
+    cache.set_json(key, names, ttl=_KB_FILENAMES_TTL)
+    return names
+
+
 def purge_kb_for_scope(kb_scope: str, user_id: int, agent_id: int) -> None:
     """
     删除单个智能体的知识库全部向量、父块、元数据与磁盘文件。
@@ -93,6 +122,7 @@ def purge_kb_for_scope(kb_scope: str, user_id: int, agent_id: int) -> None:
         db.close()
     # 4. 删除图片
     _image_store.delete_images_by_kb_scope(kb_scope)
+    invalidate_kb_filename_cache(kb_scope)
     # 5. 删除对象存储中的文档文件
     try:
         obs.delete_prefix(agent_kb_key_prefix(user_id, agent_id))
@@ -156,6 +186,7 @@ def delete_kb_document(
             obs.delete_key(obs.join_key(agent_kb_key_prefix(user_id, agent_id), stored))
         except Exception:
             pass
+    invalidate_kb_filename_cache(kb_scope)
     return True
 
 
@@ -465,6 +496,7 @@ def run_ingest_pipeline_sync(
             db.commit()
         finally:
             db.close()
+        invalidate_kb_filename_cache(kb_scope)
     except Exception:
         # 临界区内失败：旧数据此刻已删，尽力清理本次已上传对象（窄窗口残余风险，同名重传即自愈）
         _cleanup_upload_assets(doc_key, images_prefix)

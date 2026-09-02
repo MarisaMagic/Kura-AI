@@ -7,7 +7,12 @@
           </div>
           <template v-else>
             <div class="agent-chat-main">
-            <div ref="bodyScrollRef" class="agent-chat-body" @scroll.passive="onBodyScroll">
+            <div
+              ref="bodyScrollRef"
+              class="agent-chat-body"
+              :class="{ 'agent-chat-body--feed': sessionPhase === 'chat' }"
+              @scroll.passive="onBodyScroll"
+            >
             <transition name="agent-chat-fade">
               <div v-if="sessionPhase === 'intro'" key="intro" class="agent-chat-intro">
                 <n-avatar
@@ -37,331 +42,28 @@
               </div>
             </transition>
 
-            <div v-if="sessionPhase === 'chat'" class="agent-chat-feed">
-              <div class="agent-chat-feed-list">
-                <div
-                  v-for="m in messages"
-                  :key="m.id"
-                  class="agent-chat-feed-item"
-                  :class="{ 'agent-chat-feed-item--user': m.role === 'user' }"
-                >
-                  <template v-if="m.role === 'user'">
-                    <div class="agent-chat-user-row">
-                      <div class="agent-chat-user-bubble">
-                        <div class="agent-chat-user-text">{{ m.content }}</div>
-                      </div>
-                      <div
-                        v-if="m.attachments?.length"
-                        class="agent-chat-attachment-boxes agent-chat-attachment-boxes--user"
-                      >
-                        <ChatAttachmentItem
-                          v-for="(a, ai) in m.attachments"
-                          :key="`ua-${m.id}-${ai}`"
-                          :agent-id="chatAgentId"
-                          :session-id="sessionId"
-                          :attachment="a"
-                        />
-                      </div>
-                    </div>
-                  </template>
-                  <template v-else>
-                    <n-avatar
-                      round
-                      :size="40"
-                      :src="agentAvatarSrc"
-                      object-fit="cover"
-                      class="agent-chat-feed-avatar"
-                    />
-                    <div class="agent-chat-feed-col">
-                      <div class="agent-chat-feed-head">
-                        <span class="agent-chat-feed-name">{{ agent?.name || '—' }}</span>
-                        <span class="agent-chat-feed-ai-badge">{{
-                          $t('views.agents.chat_feed_ai_badge')
-                        }}</span>
-                      </div>
-
-                      <div class="agent-chat-thinking-wrap">
-                        <button
-                          type="button"
-                          class="agent-chat-thinking-pill"
-                          :aria-expanded="m.thinkingOpen"
-                          @click="toggleThinking(m)"
-                        >
-                          <TheIcon icon="mdi:lightbulb-outline" :size="16" class="agent-chat-thinking-icon" />
-                          <span>{{
-                            m.pending && lastThinkingStepLabel(m)
-                              ? lastThinkingStepLabel(m)
-                              : m.pending
-                                ? $t('views.agents.chat_feed_thinking')
-                                : $t('views.agents.chat_feed_thinking_done')
-                          }}</span>
-                          <TheIcon
-                            :icon="m.thinkingOpen ? 'mdi:chevron-up' : 'mdi:chevron-down'"
-                            :size="18"
-                            class="agent-chat-thinking-chevron"
-                          />
-                        </button>
-                        <div v-show="m.thinkingOpen" class="agent-chat-thinking-panel">
-                          <div v-if="m.thinkingItems?.length" class="agent-chat-thinking-steps">
-                            <template v-for="(item, sIdx) in m.thinkingItems" :key="sIdx">
-                              <div v-if="item.type === 'step'" class="agent-chat-thinking-step-line">
-                                <span class="agent-chat-thinking-step-icon">{{ item.icon || '▸' }}</span>
-                                <span class="agent-chat-thinking-step-label">{{ item.label }}</span>
-                                <span v-if="item.detail" class="agent-chat-thinking-step-detail">{{
-                                  item.detail
-                                }}</span>
-                              </div>
-                              <div
-                                v-else-if="item.type === 'text'"
-                                class="agent-chat-thinking-step-line agent-chat-thinking-step-line--text"
-                              >
-                                <span class="agent-chat-thinking-step-icon">💭</span>
-                                <span class="agent-chat-thinking-step-label">{{
-                                  $t('views.agents.chat_thinking_text_label')
-                                }}</span>
-                                <div
-                                  class="agent-chat-thinking-step-body agent-chat-md"
-                                  v-html="renderAgentChatMarkdown(item.text)"
-                                ></div>
-                              </div>
-                            </template>
-                          </div>
-                          <p
-                            v-if="!m.thinkingItems?.length"
-                            class="agent-chat-thinking-placeholder"
-                          >
-                            {{ $t('views.agents.chat_feed_thinking_placeholder') }}
-                          </p>
-                          <details v-if="m.ragTrace && Object.keys(m.ragTrace).length" class="agent-chat-rag-trace">
-                            <summary>{{ $t('views.agents.chat_thinking_trace_summary') }}</summary>
-                            <div class="agent-chat-rag-trace-lines">
-                              <div v-if="m.ragTrace.retrieval_mode" class="agent-chat-trace-line">
-                                {{ $t('views.agents.chat_thinking_trace_mode') }}：{{
-                                  m.ragTrace.retrieval_mode
-                                }}
-                              </div>
-                              <div v-if="m.ragTrace.retrieval_stage" class="agent-chat-trace-line">
-                                {{ $t('views.agents.chat_thinking_trace_stage') }}：{{
-                                  m.ragTrace.retrieval_stage
-                                }}
-                              </div>
-                              <div v-if="m.ragTrace.grade_score" class="agent-chat-trace-line">
-                                {{ $t('views.agents.chat_thinking_trace_grade') }}：{{
-                                  m.ragTrace.grade_score
-                                }}
-                              </div>
-                              <div v-if="m.ragTrace.rewrite_strategy" class="agent-chat-trace-line">
-                                {{ m.ragTrace.rewrite_strategy }}
-                              </div>
-                            </div>
-                          </details>
-                        </div>
-                      </div>
-
-                      <div class="agent-chat-feed-body">
-                        <div
-                          v-if="!m.pending && (m.errorText || '').trim()"
-                          class="agent-chat-msg-error"
-                          role="alert"
-                        >
-                          <div class="agent-chat-msg-error-label">
-                            {{ $t('views.agents.chat_feed_error_title') }}
-                          </div>
-                          <div class="agent-chat-msg-error-text">{{ m.errorText }}</div>
-                        </div>
-                        <div
-                          v-if="!m.pending && m.stoppedByUser && !(m.errorText || '').trim()"
-                          class="agent-chat-msg-stopped"
-                          role="status"
-                        >
-                          {{ $t('views.agents.chat_msg_aborted') }}
-                        </div>
-                        <div v-if="m.mcpConfirmations?.length" class="agent-chat-mcp-confirm">
-                          <div
-                            v-for="item in m.mcpConfirmations"
-                            :key="item.pending_id"
-                            class="agent-chat-mcp-confirm-item"
-                          >
-                            <div class="agent-chat-mcp-confirm-title">高危 MCP 工具调用确认</div>
-                            <div class="agent-chat-mcp-confirm-text">
-                              {{ item.server_name }} / {{ item.tool_name }}
-                            </div>
-                            <pre class="agent-chat-mcp-confirm-args">{{ item.args_preview }}</pre>
-                            <div class="agent-chat-mcp-confirm-actions">
-                              <n-button
-                                size="tiny"
-                                type="primary"
-                                :disabled="sending || confirmingMcpIds.has(item.pending_id)"
-                                @click="approveMcpConfirmation(m, item, true)"
-                              >
-                                允许一次
-                              </n-button>
-                              <n-button
-                                size="tiny"
-                                quaternary
-                                :disabled="sending || confirmingMcpIds.has(item.pending_id)"
-                                @click="approveMcpConfirmation(m, item, false)"
-                              >
-                                拒绝
-                              </n-button>
-                            </div>
-                          </div>
-                        </div>
-                        <div
-                          v-if="!m.pending && (m.content || '').trim()"
-                          class="agent-chat-md"
-                          @click="onAgentMdClick"
-                          v-html="renderAgentChatMarkdown(m.content, m.sources)"
-                        />
-                        <div v-if="!m.pending && m.sources?.length" class="agent-chat-sources">
-                          <span class="agent-chat-sources-label">{{
-                            $t('views.agents.chat_sources_label')
-                          }}</span>
-                          <template v-for="src in m.sources" :key="`src-${src.chunk_id || src.index}`">
-                            <a
-                              v-if="src.url"
-                              :href="src.url"
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              class="agent-chat-source-chip"
-                              :data-kcite-chip="src.index"
-                            >
-                              [{{ src.index }}] {{ src.title || src.url }}
-                            </a>
-                            <a
-                              v-else-if="src.image_url"
-                              :href="toSameOriginMediaUrl(src.image_url)"
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              class="agent-chat-source-chip"
-                              :data-kcite-chip="src.index"
-                            >
-                              [{{ src.index }}] {{ src.filename
-                              }}<template
-                                v-if="src.page_number && src.page_number !== 'N/A'"
-                              >
-                                · P{{ src.page_number }}</template
-                              >
-                            </a>
-                            <span
-                              v-else
-                              class="agent-chat-source-chip"
-                              :data-kcite-chip="src.index"
-                            >
-                              [{{ src.index }}] {{ src.filename
-                              }}<template
-                                v-if="src.page_number && src.page_number !== 'N/A'"
-                              >
-                                · P{{ src.page_number }}</template
-                              >
-                            </span>
-                          </template>
-                        </div>
-                      </div>
-                      <div
-                        v-if="
-                          !m.pending &&
-                          ((m.content || '').trim() ||
-                            (m.errorText || '').trim() ||
-                            m.stoppedByUser)
-                        "
-                        class="agent-chat-assistant-actions"
-                      >
-                        <span
-                          v-if="(m.versionCount || 1) > 1"
-                          class="agent-chat-version-switch"
-                        >
-                          <n-button
-                            quaternary
-                            circle
-                            size="small"
-                            class="agent-chat-copy-btn"
-                            :disabled="sending || switchingBranch || (m.versionIndex || 1) <= 1"
-                            :aria-label="$t('views.agents.chat_version_prev_tooltip')"
-                            @click="switchAssistantVersion(m, -1)"
-                          >
-                            <TheIcon icon="mdi:chevron-left" :size="16" />
-                          </n-button>
-                          <span class="agent-chat-version-label">
-                            {{ m.versionIndex || 1 }}/{{ m.versionCount }}
-                          </span>
-                          <n-button
-                            quaternary
-                            circle
-                            size="small"
-                            class="agent-chat-copy-btn"
-                            :disabled="
-                              sending ||
-                              switchingBranch ||
-                              (m.versionIndex || 1) >= (m.versionCount || 1)
-                            "
-                            :aria-label="$t('views.agents.chat_version_next_tooltip')"
-                            @click="switchAssistantVersion(m, 1)"
-                          >
-                            <TheIcon icon="mdi:chevron-right" :size="16" />
-                          </n-button>
-                        </span>
-                        <n-tooltip :show-arrow="false" placement="top">
-                          <template #trigger>
-                            <n-button
-                              quaternary
-                              circle
-                              size="small"
-                              class="agent-chat-copy-btn"
-                              :disabled="sending || switchingBranch || !m.messageId"
-                              :aria-label="$t('views.agents.chat_regenerate_tooltip')"
-                              @click="regenerateAssistant(m)"
-                            >
-                              <TheIcon icon="mdi:refresh" :size="18" />
-                            </n-button>
-                          </template>
-                          {{ $t('views.agents.chat_regenerate_tooltip') }}
-                        </n-tooltip>
-                        <n-tooltip :show-arrow="false" placement="top">
-                          <template #trigger>
-                            <n-button
-                              quaternary
-                              circle
-                              size="small"
-                              class="agent-chat-copy-btn"
-                              :aria-label="$t('views.agents.chat_copy_plain_tooltip')"
-                              @click="copyAssistantPlain(m)"
-                            >
-                              <TheIcon icon="lucide:copy" :size="18" />
-                            </n-button>
-                          </template>
-                          {{ $t('views.agents.chat_copy_plain_tooltip') }}
-                        </n-tooltip>
-                        <n-tooltip :show-arrow="false" placement="top">
-                          <template #trigger>
-                            <n-button
-                              quaternary
-                              circle
-                              size="small"
-                              class="agent-chat-copy-btn"
-                              :aria-label="$t('views.agents.chat_copy_md_tooltip')"
-                              @click="copyAssistantMarkdown(m)"
-                            >
-                              <TheIcon icon="simple-icons:markdown" :size="18" />
-                            </n-button>
-                          </template>
-                          {{ $t('views.agents.chat_copy_md_tooltip') }}
-                        </n-tooltip>
-                      </div>
-                      <div v-if="m.attachments?.length" class="agent-chat-attachment-boxes">
-                        <ChatAttachmentItem
-                          v-for="(a, ai) in m.attachments"
-                          :key="`aa-${m.id}-${ai}`"
-                          :agent-id="chatAgentId"
-                          :session-id="sessionId"
-                          :attachment="a"
-                        />
-                      </div>
-                    </div>
-                  </template>
-                </div>
-              </div>
+            <div v-if="sessionPhase === 'chat'" class="agent-chat-feed agent-chat-feed--virtual">
+              <ChatMessageList
+                ref="messageListRef"
+                :messages="messages"
+                :chat-agent-id="chatAgentId"
+                :session-id="sessionId"
+                :agent-avatar-src="agentAvatarSrc"
+                :agent-name="agent?.name || '—'"
+                :sending="sending"
+                :switching-branch="switchingBranch"
+                :confirming-mcp-ids="confirmingMcpIds"
+                @toggle-thinking="toggleThinking"
+                @mcp-approve="approveMcpConfirmation"
+                @md-click="onAgentMdClick"
+                @switch-version="switchAssistantVersion"
+                @regenerate="regenerateAssistant"
+                @copy-plain="copyAssistantPlain"
+                @copy-md="copyAssistantMarkdown"
+                @scroll="onBodyScroll"
+              />
             </div>
+
           </div>
           <div class="agent-chat-toolbar">
             <div class="agent-chat-toolbar-fade"></div>
@@ -490,23 +192,34 @@ import { useI18n } from 'vue-i18n'
 import { NAvatar, NButton, NInput, NSpin, NSwitch, NTooltip, NUpload } from 'naive-ui'
 import AppPage from '@/components/page/AppPage.vue'
 import TheIcon from '@/components/icon/TheIcon.vue'
-import ChatAttachmentItem from './ChatAttachmentItem.vue'
+import ChatMessageList from './ChatMessageList.vue'
 import { useChatStickToBottom } from './useChatStickToBottom.js'
+import { useChatSession } from './useChatSession.js'
+import { useChatComposer, MAX_CHAT_ATTACHMENTS, chatAttachmentIcon } from './useChatComposer.js'
+import { useChatJobStream, clearPendingChatJob } from './useChatJobStream.js'
+import { useChatMessages } from './useChatMessages.js'
+import { useChatMcpConfirm } from './useChatMcpConfirm.js'
 import api from '@/api'
 import { getToken } from '@/utils'
-import { renderAgentChatMarkdown, toSameOriginMediaUrl } from '@/utils/agentChatMarkdown'
-import { applyThinkingItem, buildThinkingItemsFromRow, lastThinkingStepLabel } from '@/utils/agentChatThinking'
-import { useAgentChatHeaderStore, useAgentSidebarStore, useRecentAgentsStore, useUserStore } from '@/store'
+import { renderAgentChatMarkdown } from '@/utils/agentChatMarkdown'
+import { useAgentChatHeaderStore, useAgentSidebarStore, useUserStore } from '@/store'
 import { DEFAULT_AVATAR } from '@/views/agents/composables/agentFormCommon.js'
 
 const { t } = useI18n()
+const {
+  pendingFiles,
+  uploadResetKey,
+  handleUploadRequest,
+  onUploadChange,
+  removePendingFile,
+  resetPending,
+} = useChatComposer({ t })
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 const chatAgentId = computed(() => Number(route.params.agentId))
 const agentChatHeaderStore = useAgentChatHeaderStore()
 const agentSidebarStore = useAgentSidebarStore()
-const recentAgentsStore = useRecentAgentsStore()
 
 const pageLoading = ref(true)
 const loadError = ref(false)
@@ -516,18 +229,30 @@ const messages = ref([])
 const inputText = ref('')
 const sending = ref(false)
 const confirmingMcpIds = ref(new Set())
-/** 流式请求 AbortController，用于停止生成 */
-const streamAbortController = ref(null)
-const activeJobId = ref(null)
-const activeAssistantIdx = ref(-1)
-/** 用户主动停止时置 true，避免 catch 里按网络错误处理 */
-const streamStoppedByUser = ref(false)
-/** 版本切换请求进行中（防止并发切换与生成中切换） */
-const switchingBranch = ref(false)
-/** 开启时允许后端注册知识库检索工具；关闭则仅通用知识（按会话持久化，新会话默认关） */
-const useKnowledgeRetrieval = ref(false)
-/** 开启时允许后端注册联网搜索工具（与知识库检索互斥；按会话持久化，新会话默认关） */
-const useWebSearch = ref(false)
+const {
+  sessionId,
+  ignoreNextQueryWatch,
+  useKnowledgeRetrieval,
+  useWebSearch,
+  persistSessionId,
+  readStoredSessionId,
+  clearStoredSessionId,
+  applyKbPreferenceForCurrentSession: applySessionPrefs,
+  onKbToggle: persistKbToggle,
+  onWebToggle: persistWebToggle,
+} = useChatSession()
+
+function applyKbPreferenceForCurrentSession() {
+  applySessionPrefs(agent.value?.id)
+}
+
+function onKbToggle(val) {
+  persistKbToggle(agent.value?.id, val)
+}
+
+function onWebToggle(val) {
+  persistWebToggle(agent.value?.id, val)
+}
 /** 新建对话 intro 内本地流式展示的开场白（不入库） */
 const introOpeningDisplayed = ref('')
 const introOpeningRunning = ref(false)
@@ -536,10 +261,13 @@ let introOpeningGeneration = 0
 const INTRO_OPENING_START_DELAY_MS = 450
 const INTRO_OPENING_CHAR_DELAY_MS = 72
 
-const pendingFiles = ref([])
 const bodyScrollRef = ref(null)
+const messageListRef = ref(null)
+const stickTargetRef = computed(() =>
+  sessionPhase.value === 'chat' ? messageListRef.value : bodyScrollRef.value
+)
 const { scrollAtBottom, onBodyScroll, scrollBodyToBottom, updateScrollBottomState } =
-  useChatStickToBottom(bodyScrollRef)
+  useChatStickToBottom(stickTargetRef)
 
 const showGoBottomButton = computed(() => {
   if (pageLoading.value || loadError.value) return false
@@ -547,714 +275,58 @@ const showGoBottomButton = computed(() => {
   if (!messages.value.length) return false
   return !scrollAtBottom.value
 })
-const uploadResetKey = ref(0)
-const sessionId = ref(`session_${Date.now()}`)
-let fileIdSeq = 0
-/** 与后端 CHAT_UPLOAD_MAX_FILES_PER_MESSAGE 对齐 */
-const MAX_CHAT_ATTACHMENTS = 5
-
-/** 气泡内仅展示文本块；附件用下方卡片展示（与历史 content_json 一致） */
-function userContentFromHistoryRow(row) {
-  const cj = row.content_json
-  if (cj && cj.lc != null) {
-    const lc = cj.lc
-    if (typeof lc === 'string') return lc
-    if (Array.isArray(lc)) {
-      const parts = []
-      for (const b of lc) {
-        if (typeof b === 'string') parts.push(b)
-        else if (b && b.type === 'text' && b.text) parts.push(b.text)
-        else if (b && (b.type === 'image_ref' || b.type === 'file_ref')) {
-          /* 附件见 attachmentsFromHistoryRow */
-        }
-      }
-      const s = parts.join('\n').trim()
-      if (s) return s
-    }
-  }
-  return row.content || ''
-}
-
-/** 从历史消息的 content_json 解析附件列表（含刷新/重开会话） */
-function attachmentsFromHistoryRow(row) {
-  if (row.type !== 'human') return undefined
-  const cj = row.content_json
-  if (!cj || cj.lc == null) return undefined
-  const lc = cj.lc
-  if (!Array.isArray(lc)) return undefined
-  const out = []
-  for (const b of lc) {
-    if (!b || typeof b !== 'object') continue
-    if (b.type === 'image_ref') {
-      out.push({
-        name: (b.filename && String(b.filename).trim()) || t('views.agents.chat_attachment_image_fallback'),
-        kind: 'image',
-        mime: b.mime || '',
-        attachmentId: b.attachment_id != null ? String(b.attachment_id) : '',
-      })
-    } else if (b.type === 'file_ref') {
-      out.push({
-        name:
-          (b.filename && String(b.filename).trim()) ||
-          (b.attachment_id && String(b.attachment_id)) ||
-          t('views.agents.chat_attachment_file_fallback'),
-        kind: b.kind || 'other',
-        mime: b.mime || '',
-        attachmentId: b.attachment_id != null ? String(b.attachment_id) : '',
-      })
-    }
-  }
-  return out.length ? out : undefined
-}
-
-function chatAttachmentIcon(att) {
-  const kind = String(att.kind || '').toLowerCase()
-  const mime = String(att.mime || '').toLowerCase()
-  const name = String(att.name || '').toLowerCase()
-  if (kind === 'image' || mime.startsWith('image/')) return 'mdi:file-image-outline'
-  if (kind === 'table' || mime.includes('spreadsheet') || /\.(csv|xlsx?|xls)$/i.test(name))
-    return 'mdi:table-large'
-  if (kind === 'document' || mime === 'application/pdf' || /\.pdf$/i.test(name)) return 'mdi:file-pdf-box'
-  return 'mdi:file-document-outline'
-}
 const baseDocTitle = import.meta.env.VITE_TITLE || ''
-const baseApi = import.meta.env.VITE_BASE_API || '/api/v1'
 
-const SESSION_KEY_PREFIX = 'kura_ai_chat_session_'
-const ignoreNextQueryWatch = ref(false)
+const jobReload = { fn: async () => {} }
+const {
+  streamStoppedByUser,
+  stopActiveChatGeneration,
+  postChatJobAndConsumeStream,
+  maybeResumePendingChatJob,
+} = useChatJobStream({
+  messages,
+  sessionId,
+  sending,
+  sessionPhase,
+  pageLoading,
+  loadError,
+  agent,
+  useKnowledgeRetrieval,
+  useWebSearch,
+  scrollBodyToBottom,
+  reloadSessionMessages: (id) => jobReload.fn(id),
+})
 
-function sessionStorageKey(agentId) {
-  return `${SESSION_KEY_PREFIX}${agentId}`
-}
+const {
+  switchingBranch,
+  loadMessagesForSession,
+  reloadSessionMessages,
+  switchAssistantVersion,
+  regenerateAssistant,
+} = useChatMessages({
+  t,
+  messages,
+  sessionId,
+  sessionPhase,
+  sending,
+  chatAgentId,
+  scrollBodyToBottom,
+  persistSessionId,
+  postChatJobAndConsumeStream,
+  streamStoppedByUser,
+})
+jobReload.fn = reloadSessionMessages
 
-function persistSessionId(agentId, sid) {
-  try {
-    if (agentId && sid) sessionStorage.setItem(sessionStorageKey(agentId), sid)
-  } catch {
-    /* ignore */
-  }
-}
-
-function readStoredSessionId(agentId) {
-  try {
-    return sessionStorage.getItem(sessionStorageKey(agentId)) || ''
-  } catch {
-    return ''
-  }
-}
-
-function clearStoredSessionId(agentId) {
-  try {
-    sessionStorage.removeItem(sessionStorageKey(agentId))
-  } catch {
-    /* ignore */
-  }
-}
-
-/** 按 agentId + sessionId 记忆知识库开关，刷新后保持；新 session 无记录时默认关 */
-const KB_TOGGLE_PREFIX = 'kura_ai_kb_'
-/** 联网搜索开关持久化前缀（与知识库开关同一套模式） */
-const WEB_TOGGLE_PREFIX = 'kura_ai_web_'
-
-function kbToggleStorageKey(agentId, sid) {
-  return `${KB_TOGGLE_PREFIX}${agentId}_${sid}`
-}
-
-function webToggleStorageKey(agentId, sid) {
-  return `${WEB_TOGGLE_PREFIX}${agentId}_${sid}`
-}
-
-function readKbPreference(agentId, sid) {
-  if (!agentId || !sid) return false
-  try {
-    const v = sessionStorage.getItem(kbToggleStorageKey(agentId, sid))
-    if (v === null) return false
-    return v === 'true'
-  } catch {
-    return false
-  }
-}
-
-function writeKbPreference(agentId, sid, val) {
-  try {
-    if (agentId && sid) sessionStorage.setItem(kbToggleStorageKey(agentId, sid), val ? 'true' : 'false')
-  } catch {
-    /* ignore */
-  }
-}
-
-function readWebPreference(agentId, sid) {
-  if (!agentId || !sid) return false
-  try {
-    const v = sessionStorage.getItem(webToggleStorageKey(agentId, sid))
-    if (v === null) return false
-    return v === 'true'
-  } catch {
-    return false
-  }
-}
-
-function writeWebPreference(agentId, sid, val) {
-  try {
-    if (agentId && sid) sessionStorage.setItem(webToggleStorageKey(agentId, sid), val ? 'true' : 'false')
-  } catch {
-    /* ignore */
-  }
-}
-
-function applyKbPreferenceForCurrentSession() {
-  const aid = agent.value?.id
-  if (!aid) return
-  useKnowledgeRetrieval.value = readKbPreference(aid, sessionId.value)
-  useWebSearch.value = readWebPreference(aid, sessionId.value)
-}
-
-function onKbToggle(val) {
-  useKnowledgeRetrieval.value = val
-  const aid = agent.value?.id
-  if (aid && sessionId.value) writeKbPreference(aid, sessionId.value, val)
-  // 知识库检索与联网搜索互斥：开启知识库时强制关闭联网
-  if (val && useWebSearch.value) {
-    useWebSearch.value = false
-    if (aid && sessionId.value) writeWebPreference(aid, sessionId.value, false)
-  }
-}
-
-function onWebToggle(val) {
-  useWebSearch.value = val
-  const aid = agent.value?.id
-  if (aid && sessionId.value) writeWebPreference(aid, sessionId.value, val)
-  // 联网搜索与知识库检索互斥：开启联网时强制关闭知识库
-  if (val && useKnowledgeRetrieval.value) {
-    useKnowledgeRetrieval.value = false
-    if (aid && sessionId.value) writeKbPreference(aid, sessionId.value, false)
-  }
-}
-
-const PENDING_JOB_PREFIX = 'kura_ai_chat_job_'
-
-function pendingJobStorageKey(agentId, sid) {
-  return `${PENDING_JOB_PREFIX}${agentId}_${sid}`
-}
-
-function savePendingChatJob(agentId, sid, payload) {
-  try {
-    if (agentId && sid && payload?.job_id) {
-      // 合并写入：保留 regenerate / target_message_id 等创建期字段，seq 流式推进不丢失它们
-      const prev = readPendingChatJob(agentId, sid) || {}
-      sessionStorage.setItem(
-        pendingJobStorageKey(agentId, sid),
-        JSON.stringify({ ...prev, ...payload })
-      )
-    }
-  } catch {
-    /* ignore */
-  }
-}
-
-function readPendingChatJob(agentId, sid) {
-  try {
-    const s = sessionStorage.getItem(pendingJobStorageKey(agentId, sid))
-    if (!s) return null
-    return JSON.parse(s)
-  } catch {
-    return null
-  }
-}
-
-function clearPendingChatJob(agentId, sid) {
-  try {
-    if (agentId && sid) sessionStorage.removeItem(pendingJobStorageKey(agentId, sid))
-  } catch {
-    /* ignore */
-  }
-}
-
-/** 将单条 SSE JSON 事件应用到助手消息行（与流式接口字段一致） */
-function applyChatSsePayload(data, idx) {
-  if (idx === -1) return
-  if (data.type === 'content') {
-    const row = messages.value[idx]
-    const resumed = !!row.mcpExecuting
-    messages.value[idx] = {
-      ...row,
-      content: resumed ? (data.content || '') : (row.content || '') + (data.content || ''),
-      mcpExecuting: resumed ? false : row.mcpExecuting,
-      pending: false,
-      thinkingOpen: row.thinkingOpen ?? false,
-      ragTrace: row.ragTrace ?? null,
-    }
-  } else if (data.type === 'thinking_item') {
-    const cur = messages.value[idx]
-    const item = data.item || {}
-    const patch = {
-      ...cur,
-      thinkingItems: applyThinkingItem(cur.thinkingItems, item, !!data.append),
-      thinkingOpen: true,
-      pending: cur.pending,
-    }
-    if (data.moved_from_content && item.type === 'text') {
-      const text = item.text || ''
-      const curContent = cur.content || ''
-      patch.content =
-        text && curContent.endsWith(text)
-          ? curContent.slice(0, curContent.length - text.length)
-          : curContent
-      patch.pending = true
-    }
-    messages.value[idx] = patch
-  } else if (data.type === 'trace') {
-    const cur = messages.value[idx]
-    messages.value[idx] = {
-      ...cur,
-      ragTrace: data.rag_trace || null,
-      pending: cur.pending,
-    }
-  } else if (data.type === 'sources') {
-    const cur = messages.value[idx]
-    messages.value[idx] = {
-      ...cur,
-      sources: Array.isArray(data.sources) ? data.sources : [],
-      pending: cur.pending,
-    }
-  } else if (data.type === 'error') {
-    const cur = messages.value[idx]
-    messages.value[idx] = {
-      ...cur,
-      errorText: data.content || '',
-      pending: false,
-      mcpExecuting: false,
-      thinkingOpen: cur.thinkingOpen ?? false,
-      ragTrace: cur.ragTrace ?? null,
-    }
-  } else if (data.type === 'cancelled') {
-    const cur = messages.value[idx]
-    messages.value[idx] = {
-      ...cur,
-      stoppedByUser: true,
-      pending: false,
-      mcpExecuting: false,
-      thinkingOpen: cur.thinkingOpen ?? false,
-      ragTrace: cur.ragTrace ?? null,
-      errorText: undefined,
-    }
-  } else if (data.type === 'mcp_confirmation_required') {
-    const cur = messages.value[idx]
-    const item = data.confirmation || {}
-    const list = Array.isArray(cur.mcpConfirmations) ? cur.mcpConfirmations : []
-    if (item.pending_id && !list.some((x) => x.pending_id === item.pending_id)) {
-      list.push(item)
-    }
-    messages.value[idx] = {
-      ...cur,
-      mcpConfirmations: list,
-      pending: cur.pending,
-    }
-  } else if (data.type === 'done') {
-    const row = messages.value[idx]
-    messages.value[idx] = {
-      ...row,
-      pending: false,
-      mcpExecuting: false,
-      stoppedByUser: data.cancelled ? true : row.stoppedByUser,
-    }
-  }
-}
-
-async function readChatJobSseStream(reader, decoder, idx, jobId, agentId, initialSeq = 0) {
-  let buffer = ''
-  let seq = initialSeq
-
-  while (true) {
-    let chunk
-    try {
-      chunk = await reader.read()
-    } catch {
-      break
-    }
-    const { done, value } = chunk
-    if (done) break
-
-    buffer += decoder.decode(value, { stream: true })
-
-    let eventEndIndex
-    while ((eventEndIndex = buffer.indexOf('\n\n')) !== -1) {
-      const eventStr = buffer.slice(0, eventEndIndex)
-      buffer = buffer.slice(eventEndIndex + 2)
-
-      if (!eventStr.startsWith('data: ')) continue
-      const dataStr = eventStr.slice(6)
-      if (dataStr === '[DONE]') {
-        clearPendingChatJob(agentId, sessionId.value)
-        continue
-      }
-      try {
-        const data = JSON.parse(dataStr)
-        applyChatSsePayload(data, idx)
-        seq += 1
-        savePendingChatJob(agentId, sessionId.value, { job_id: jobId, seq })
-        if (data.type === 'done') {
-          clearPendingChatJob(agentId, sessionId.value)
-        }
-      } catch (e) {
-        console.warn('SSE parse error:', e)
-      }
-    }
-    scrollBodyToBottom()
-  }
-  if (idx !== -1 && messages.value[idx]?.pending) {
-    const row = messages.value[idx]
-    messages.value[idx] = { ...row, pending: false }
-  }
-}
-
-async function stopActiveChatGeneration() {
-  if (!sending.value) return
-  streamStoppedByUser.value = true
-  const jid = activeJobId.value
-  const ix = activeAssistantIdx.value
-  const token = getToken()
-  const aid = agent.value?.id
-  if (jid && token) {
-    try {
-      await fetch(`${baseApi}/user-agent/chat/jobs/${jid}/cancel`, {
-        method: 'POST',
-        headers: { token, 'Content-Type': 'application/json' },
-      })
-    } catch {
-      /* ignore */
-    }
-  } else if (token && aid && sessionId.value) {
-    // job_id 未知（创建请求在途被中断）：按会话兜底取消活动任务，避免孤儿任务阻塞后续对话
-    try {
-      await fetch(
-        `${baseApi}/user-agent/chat/active_job/cancel?agent_id=${aid}&session_id=${encodeURIComponent(sessionId.value)}`,
-        {
-          method: 'POST',
-          headers: { token, 'Content-Type': 'application/json' },
-        }
-      )
-    } catch {
-      /* ignore */
-    }
-  }
-  streamAbortController.value?.abort()
-  streamAbortController.value = null
-  activeJobId.value = null
-  activeAssistantIdx.value = -1
-  if (aid && sessionId.value) clearPendingChatJob(aid, sessionId.value)
-  if (ix >= 0 && messages.value[ix]?.role === 'assistant') {
-    const row = messages.value[ix]
-    messages.value[ix] = {
-      ...row,
-      pending: false,
-      stoppedByUser: true,
-      errorText: undefined,
-    }
-  }
-  sending.value = false
-}
-
-async function postChatJobAndConsumeStream({
-  agentId,
-  token,
-  regenerate,
-  message,
-  attachmentIds,
-  assistantIdx,
-  mcpApprovedPendingId = null,
-  targetMessageId = null,
-}) {
-  let jobId
-  let startSeq = 0
-  streamStoppedByUser.value = false
-  const ac = new AbortController()
-  streamAbortController.value = ac
-  activeAssistantIdx.value = assistantIdx
-  const idx = assistantIdx
-  try {
-    const postJob = () =>
-      fetch(`${baseApi}/user-agent/chat/jobs`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          token,
-        },
-        body: JSON.stringify({
-          agent_id: agentId,
-          message,
-          session_id: sessionId.value,
-          use_knowledge_retrieval: useKnowledgeRetrieval.value,
-          use_web_search: useWebSearch.value,
-          attachment_ids: attachmentIds,
-          regenerate,
-          target_message_id: targetMessageId || undefined,
-          mcp_approved_pending_id: mcpApprovedPendingId || undefined,
-        }),
-        signal: ac.signal,
-      })
-
-    let postRes = await postJob()
-    if (postRes.status === 409) {
-      // 旧任务刚被停止时占用锁释放存在短暂延迟，短延迟后重试一次创建；
-      // 仍 409 说明有其他真实运行中的任务，回退到重连 existing_job_id
-      await new Promise((resolve) => setTimeout(resolve, 300))
-      postRes = await postJob()
-    }
-
-    if (postRes.status === 409) {
-      const errBody = await postRes.json()
-      jobId = errBody.detail?.existing_job_id
-      if (!jobId) {
-        throw new Error(
-          typeof errBody.detail === 'string' ? errBody.detail : errBody.detail?.message || '任务冲突'
-        )
-      }
-      const pj = readPendingChatJob(agentId, sessionId.value)
-      startSeq = pj?.seq ?? 0
-    } else if (!postRes.ok) {
-      let detail = `HTTP ${postRes.status}`
-      try {
-        const errBody = await postRes.json()
-        detail = errBody.detail || errBody.msg || detail
-      } catch {
-        /* ignore */
-      }
-      throw new Error(detail)
-    } else {
-      const body = await postRes.json()
-      jobId = body.data?.job_id
-      if (!jobId) throw new Error('未返回 job_id')
-      savePendingChatJob(agentId, sessionId.value, {
-        job_id: jobId,
-        seq: 0,
-        regenerate: !!regenerate,
-        target_message_id: targetMessageId || null,
-      })
-    }
-
-    activeJobId.value = jobId
-
-    const streamRes = await fetch(
-      `${baseApi}/user-agent/chat/jobs/${jobId}/stream?since_seq=${startSeq}`,
-      {
-        headers: { token },
-        signal: ac.signal,
-      }
-    )
-
-    if (!streamRes.ok) {
-      let detail = `HTTP ${streamRes.status}`
-      try {
-        const errBody = await streamRes.json()
-        detail = errBody.detail || errBody.msg || detail
-      } catch {
-        /* ignore */
-      }
-      throw new Error(detail)
-    }
-
-    const reader = streamRes.body?.getReader()
-    const decoder = new TextDecoder()
-    if (!reader) {
-      throw new Error('No response body')
-    }
-
-    await readChatJobSseStream(reader, decoder, idx, jobId, agentId, startSeq)
-    await recentAgentsStore.touch(agentId)
-  } finally {
-    streamAbortController.value = null
-    activeJobId.value = null
-    activeAssistantIdx.value = -1
-  }
-}
-
-async function maybeResumePendingChatJob() {
-  const agentId = agent.value?.id
-  const token = getToken()
-  if (!agentId || !token || sending.value || pageLoading.value || loadError.value) return
-
-  const pj = readPendingChatJob(agentId, sessionId.value)
-  if (!pj?.job_id) return
-
-  try {
-    const metaRes = await fetch(`${baseApi}/user-agent/chat/jobs/${pj.job_id}`, {
-      headers: { token },
-    })
-    if (!metaRes.ok) {
-      clearPendingChatJob(agentId, sessionId.value)
-      return
-    }
-    const metaBody = await metaRes.json()
-    const meta = metaBody.data ?? metaBody
-    if (meta.status !== 'running') {
-      clearPendingChatJob(agentId, sessionId.value)
-      return
-    }
-  } catch {
-    return
-  }
-
-  const last = messages.value[messages.value.length - 1]
-  let idx = -1
-  // 复用当前页里「仍在生成」的助手气泡时，只需从已收条数继续拉；刷新后从接口重载历史时没有未落库的助手行，会走 else 新建空气泡，必须从 Redis 下标 0 重放，否则会丢掉 pj.seq 之前的已生成内容。
-  const reuseAssistantRow = last?.role === 'assistant' && last?.pending
-  if (!reuseAssistantRow && pj.regenerate && pj.target_message_id) {
-    // 重新生成中的刷新：历史里还是旧版本，替换目标行为空气泡并截断其后，从下标 0 重放
-    const tIdx = messages.value.findIndex(
-      (m) => m.role === 'assistant' && m.messageId === pj.target_message_id
-    )
-    if (tIdx !== -1) {
-      const row = messages.value[tIdx]
-      messages.value = messages.value.slice(0, tIdx + 1)
-      messages.value[tIdx] = {
-        ...row,
-        content: '',
-        errorText: undefined,
-        stoppedByUser: false,
-        pending: true,
-        thinkingOpen: true,
-        thinkingItems: [],
-        ragTrace: null,
-        sources: [],
-      }
-      idx = tIdx
-    }
-  }
-  if (idx !== -1) {
-    // 重新生成占位已就位
-  } else if (reuseAssistantRow) {
-    idx = messages.value.length - 1
-  } else {
-    const assistantId = `a-resume-${Date.now()}`
-    messages.value.push({
-      id: assistantId,
-      role: 'assistant',
-      content: '',
-      errorText: undefined,
-      pending: true,
-      thinkingOpen: true,
-      thinkingItems: [],
-      ragTrace: null,
-      sources: [],
-    })
-    idx = messages.value.length - 1
-    sessionPhase.value = 'chat'
-  }
-
-  sending.value = true
-  const sinceSeq = reuseAssistantRow ? (pj.seq ?? 0) : 0
-  streamStoppedByUser.value = false
-  const ac = new AbortController()
-  streamAbortController.value = ac
-  activeJobId.value = pj.job_id
-  activeAssistantIdx.value = idx
-  try {
-    const streamRes = await fetch(
-      `${baseApi}/user-agent/chat/jobs/${pj.job_id}/stream?since_seq=${sinceSeq}`,
-      {
-        headers: { token },
-        signal: ac.signal,
-      }
-    )
-    if (!streamRes.ok) {
-      clearPendingChatJob(agentId, sessionId.value)
-      return
-    }
-    const reader = streamRes.body?.getReader()
-    const decoder = new TextDecoder()
-    if (!reader) return
-    await readChatJobSseStream(reader, decoder, idx, pj.job_id, agentId, sinceSeq)
-    if (
-      pj.regenerate &&
-      !streamStoppedByUser.value &&
-      !messages.value[idx]?.mcpConfirmations?.length
-    ) {
-      await reloadSessionMessages(agentId)
-    }
-    await recentAgentsStore.touch(agentId)
-  } catch (e) {
-    console.warn('resume job stream:', e)
-  } finally {
-    streamAbortController.value = null
-    activeJobId.value = null
-    activeAssistantIdx.value = -1
-    sending.value = false
-    scrollBodyToBottom(false, { force: true })
-    agentSidebarStore.bumpRefresh()
-  }
-}
-
-function mapHistoryRow(row, i) {
-  const role = row.type === 'human' ? 'user' : 'assistant'
-  const base = {
-    id: row.message_id ? `hist-${row.message_id}` : `hist-${i}-${row.timestamp}`,
-    messageId: row.message_id ?? null,
-    role,
-    content: userContentFromHistoryRow(row),
-    pending: false,
-    thinkingOpen: row.type === 'human' ? undefined : false,
-    thinkingItems: buildThinkingItemsFromRow(row),
-    ragTrace: row.rag_trace || null,
-    errorText: row.error_text || undefined,
-    sources: Array.isArray(row.sources) ? row.sources : [],
-    versionIndex: row.version_index || 1,
-    versionCount: row.version_count || 1,
-    siblingIds: Array.isArray(row.sibling_ids) ? row.sibling_ids : [],
-  }
-  if (role === 'user') {
-    const att = attachmentsFromHistoryRow(row)
-    if (att) base.attachments = att
-  }
-  return base
-}
-
-async function loadMessagesForSession(agentId, sid) {
-  const res = await api.getAgentChatSessionMessages(agentId, sid)
-  const rows = res.data?.messages || []
-  const list = rows.map(mapHistoryRow)
-  messages.value = list
-  sessionId.value = sid
-  sessionPhase.value = list.length > 0 ? 'chat' : 'intro'
-  await nextTick()
-  scrollBodyToBottom(false, { force: true })
-}
-
-/** 重新拉取当前分支消息（拿到真实 messageId 与版本信息），用于发送/重生成完成后对齐本地行 */
-async function reloadSessionMessages(agentId) {
-  if (!agentId || !sessionId.value) return
-  try {
-    const res = await api.getAgentChatSessionMessages(agentId, sessionId.value)
-    const rows = res.data?.messages || []
-    messages.value = rows.map(mapHistoryRow)
-    await nextTick()
-    scrollBodyToBottom(false, { force: true })
-  } catch (e) {
-    console.warn('reload session messages:', e)
-  }
-}
-
-async function switchAssistantVersion(assistantMsg, delta) {
-  if (sending.value || switchingBranch.value) return
-  const ids = assistantMsg.siblingIds || []
-  const targetIdx = (assistantMsg.versionIndex || 1) - 1 + delta
-  if (targetIdx < 0 || targetIdx >= ids.length) return
-  const targetId = ids[targetIdx]
-  const agentId = Number(route.params.agentId)
-  if (!getToken() || !Number.isFinite(agentId) || !sessionId.value) return
-  switchingBranch.value = true
-  try {
-    const res = await api.selectAgentChatBranch(agentId, sessionId.value, targetId)
-    const rows = res.data?.messages || []
-    messages.value = rows.map(mapHistoryRow)
-    await nextTick()
-    scrollBodyToBottom(false, { force: true })
-  } catch (error) {
-    window.$message?.error(`${error?.message || error}`)
-  } finally {
-    switchingBranch.value = false
-  }
-}
+const { approveMcpConfirmation } = useChatMcpConfirm({
+  messages,
+  sending,
+  confirmingMcpIds,
+  chatAgentId,
+  scrollBodyToBottom,
+  postChatJobAndConsumeStream,
+  getToken,
+  t,
+})
 
 const hasIntroOpeningText = computed(() => {
   const s = String(agent.value?.opening_message || '').trim()
@@ -1473,33 +545,6 @@ function onInputKeydown(e) {
   }
 }
 
-function handleUploadRequest({ onFinish }) {
-  onFinish()
-}
-
-function onUploadChange(options) {
-  const rawList = options.fileList || []
-  if (rawList.length > MAX_CHAT_ATTACHMENTS) {
-    window.$message?.warning(t('views.agents.chat_attachments_limit', { n: MAX_CHAT_ATTACHMENTS }))
-  }
-  const fileList = rawList.slice(0, MAX_CHAT_ATTACHMENTS)
-  pendingFiles.value = fileList.map((item) => {
-    const raw = item.file
-    const fileObj = raw instanceof File ? raw : raw?.file
-    return {
-      id: ++fileIdSeq,
-      name: fileObj?.name || item.name || 'file',
-      file: fileObj,
-      kind: '',
-      mime: (fileObj && fileObj.type) || '',
-    }
-  })
-}
-
-function removePendingFile(index) {
-  pendingFiles.value.splice(index, 1)
-}
-
 async function loadAgent() {
   const id = Number(route.params.agentId)
   if (!Number.isFinite(id)) {
@@ -1532,8 +577,7 @@ async function restartChat() {
   messages.value = []
   sessionPhase.value = 'intro'
   inputText.value = ''
-  pendingFiles.value = []
-  uploadResetKey.value += 1
+  resetPending()
   sessionId.value = `session_${Date.now()}`
   if (aid) persistSessionId(aid, sessionId.value)
   applyKbPreferenceForCurrentSession()
@@ -1613,8 +657,7 @@ async function submitMessage() {
     sessionPhase.value = 'chat'
   }
   inputText.value = ''
-  pendingFiles.value = []
-  uploadResetKey.value += 1
+  resetPending()
   scrollBodyToBottom(false, { force: true })
   // 立即持久化 session_id，避免刷新后 pending job 的 session 与 sessionStorage 不一致
   persistSessionId(agentId, sessionId.value)
@@ -1681,172 +724,6 @@ async function submitMessage() {
   }
 }
 
-async function regenerateAssistant(assistantMsg) {
-  if (sending.value || switchingBranch.value) return
-  const token = getToken()
-  if (!token) {
-    window.$message?.warning(t('views.agents.chat_msg_need_login'))
-    return
-  }
-  if (!assistantMsg.messageId) return
-  const assistantIdx = messages.value.findIndex((x) => x.id === assistantMsg.id)
-  if (assistantIdx <= 0) return
-  const prev = messages.value[assistantIdx - 1]
-  if (prev.role !== 'user') return
-
-  const agentId = Number(route.params.agentId)
-  if (!Number.isFinite(agentId)) {
-    window.$message?.error(t('views.agents.chat_error_load_agent'))
-    return
-  }
-
-  // 本地截断目标行之后的所有行（旧分支仍完整保留在后端，可通过版本切换找回）
-  messages.value = messages.value.slice(0, assistantIdx + 1)
-  messages.value[assistantIdx] = {
-    ...assistantMsg,
-    content: '',
-    errorText: undefined,
-    stoppedByUser: false,
-    pending: true,
-    thinkingOpen: false,
-    thinkingItems: [],
-    ragTrace: null,
-    sources: [],
-  }
-  scrollBodyToBottom(false, { force: true })
-
-  sending.value = true
-  try {
-    await postChatJobAndConsumeStream({
-      agentId,
-      token,
-      regenerate: true,
-      message: '',
-      attachmentIds: [],
-      assistantIdx,
-      targetMessageId: assistantMsg.messageId,
-    })
-    // 完成后重拉当前分支：拿到新版本的真实 messageId 与版本号
-    // （存在待确认的 MCP 调用时跳过重拉，避免确认按钮被历史行覆盖丢失）
-    if (!streamStoppedByUser.value && !messages.value[assistantIdx]?.mcpConfirmations?.length) {
-      await reloadSessionMessages(agentId)
-    }
-  } catch (error) {
-    clearPendingChatJob(agentId, sessionId.value)
-    if (streamStoppedByUser.value) {
-      if (messages.value[assistantIdx]?.pending) {
-        const row = messages.value[assistantIdx]
-        messages.value[assistantIdx] = {
-          ...row,
-          pending: false,
-          stoppedByUser: true,
-          errorText: undefined,
-          thinkingOpen: row.thinkingOpen ?? false,
-          ragTrace: row.ragTrace ?? null,
-        }
-      }
-    } else {
-      const row = messages.value[assistantIdx]
-      messages.value[assistantIdx] = {
-        ...row,
-        errorText: t('views.agents.chat_msg_stream_error') + `：${error?.message || error}`,
-        pending: false,
-        thinkingOpen: row.thinkingOpen ?? false,
-        ragTrace: row.ragTrace ?? null,
-      }
-    }
-  } finally {
-    sending.value = false
-    if (agentId && sessionId.value) persistSessionId(agentId, sessionId.value)
-    scrollBodyToBottom()
-    agentSidebarStore.bumpRefresh()
-  }
-}
-
-async function resumeApprovedMcp(assistantMsg, pendingId) {
-  const token = getToken()
-  const assistantIdx = messages.value.findIndex((x) => x.id === assistantMsg.id)
-  const agentId = Number(route.params.agentId)
-  if (!token || assistantIdx <= 0 || !Number.isFinite(agentId)) return
-  const prev = messages.value[assistantIdx - 1]
-  if (prev.role !== 'user') return
-
-  const row = messages.value[assistantIdx]
-  messages.value[assistantIdx] = {
-    ...row,
-    pending: true,
-    mcpExecuting: true,
-    mcpConfirmations: [],
-    errorText: undefined,
-    stoppedByUser: false,
-  }
-  sending.value = true
-  try {
-    await postChatJobAndConsumeStream({
-      agentId,
-      token,
-      regenerate: true,
-      message: '',
-      attachmentIds: [],
-      assistantIdx,
-      mcpApprovedPendingId: pendingId,
-      targetMessageId: assistantMsg.messageId || null,
-    })
-  } catch (error) {
-    const cur = messages.value[assistantIdx]
-    messages.value[assistantIdx] = {
-      ...cur,
-      pending: false,
-      mcpExecuting: false,
-      errorText: t('views.agents.chat_msg_stream_error') + `：${error?.message || error}`,
-    }
-  } finally {
-    sending.value = false
-    scrollBodyToBottom()
-  }
-}
-
-async function approveMcpConfirmation(assistantMsg, item, approve) {
-  const token = getToken()
-  if (!token || !item?.pending_id) return
-  const idx = messages.value.findIndex((x) => x.id === assistantMsg.id)
-  if (confirmingMcpIds.value.has(item.pending_id)) return
-  confirmingMcpIds.value = new Set([...confirmingMcpIds.value, item.pending_id])
-  try {
-    const res = await fetch(`${baseApi}/user-agent/chat/mcp/confirm`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', token },
-      body: JSON.stringify({ pending_id: item.pending_id, approve }),
-    })
-    if (!res.ok) {
-      let detail = `HTTP ${res.status}`
-      try {
-        const body = await res.json()
-        detail = body.detail || body.msg || detail
-      } catch {
-        /* ignore */
-      }
-      throw new Error(detail)
-    }
-    if (idx !== -1) {
-      const row = messages.value[idx]
-      messages.value[idx] = {
-        ...row,
-        mcpConfirmations: (row.mcpConfirmations || []).filter((x) => x.pending_id !== item.pending_id),
-      }
-    }
-    if (approve && idx !== -1) {
-      await resumeApprovedMcp(messages.value[idx], item.pending_id)
-    }
-  } catch (error) {
-    window.$message?.error(`${error?.message || error}`)
-  } finally {
-    const next = new Set(confirmingMcpIds.value)
-    next.delete(item.pending_id)
-    confirmingMcpIds.value = next
-  }
-}
-
 watch(
   () => route.params.agentId,
   (newId, oldId) => {
@@ -1856,8 +733,7 @@ watch(
       messages.value = []
       sessionPhase.value = 'intro'
       inputText.value = ''
-      pendingFiles.value = []
-      uploadResetKey.value += 1
+      resetPending()
     }
     loadAgent()
   }
@@ -2015,6 +891,25 @@ html.dark .agent-chat-spin :deep(.n-spin-body) {
   background: #ffffff;
   scrollbar-width: thin;
   scrollbar-color: rgba(15, 23, 42, 0.14) transparent;
+}
+
+.agent-chat-body--feed {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+}
+
+.agent-chat-feed.agent-chat-feed--virtual {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  max-width: none;
+  width: 100%;
+  margin: 0;
+  padding-bottom: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 html.dark .agent-chat-body {
@@ -2185,7 +1080,7 @@ html.dark .agent-chat-intro-avatar {
 }
 
 /* —— 信息流（助手左对齐；用户右对齐气泡）—— */
-.agent-chat-feed {
+.agent-chat-feed:not(.agent-chat-feed--virtual) {
   max-width: var(--agent-chat-column-max);
   margin: 0 auto;
   padding-bottom: 16px;

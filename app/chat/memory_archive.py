@@ -218,10 +218,9 @@ def archive_session_memory(user_id: int, agent_id: int, session_id: str) -> None
             return
 
         texts = [r["text"] for r in insert_rows]
-        dense_list, sparse_list = embedder.get_all_embeddings(texts)  # 获取密集向量和稀疏向量
-        for r, d_emb, s_emb in zip(insert_rows, dense_list, sparse_list):
+        dense_list = embedder.get_text_embeddings(texts)
+        for r, d_emb in zip(insert_rows, dense_list):
             r["dense_embedding"] = d_emb
-            r["sparse_embedding"] = s_emb
 
         milvus.insert(insert_rows)  # 插入数据到 Milvus
         storage.patch_session_metadata(

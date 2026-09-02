@@ -42,4 +42,5 @@ class JWTPayload(BaseModel):
     user_id: int
     username: str
     is_superuser: bool
+    token_version: int = 0
     exp: datetime

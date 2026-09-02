@@ -42,6 +42,8 @@ def make_middlewares():
             methods=["GET", "POST", "PUT", "DELETE"],
             exclude_paths=[
                 "/api/v1/base/access_token",
+                "/api/v1/base/refresh",
+                "/api/v1/base/logout",
                 "/api/v1/base/register",
                 "/api/v1/base/registration_enabled",
                 "/api/v1/base/health",
@@ -88,15 +90,16 @@ async def init_superuser():
             validate_password_strength(password)
         except ValueError as exc:
             raise RuntimeError(f"INITIAL_ADMIN_PASSWORD 不符合要求: {exc}") from exc
-        await user_controller.create_user(
+        admin = await user_controller.create_user(
             UserCreate(
                 username=settings.INITIAL_ADMIN_USERNAME,
                 email=settings.INITIAL_ADMIN_EMAIL.strip().lower(),
                 password=password,
                 is_active=True,
-                is_superuser=True,
             )
         )
+        admin.is_superuser = True
+        await admin.save()
         logger.info("已创建初始管理员用户: %s", settings.INITIAL_ADMIN_USERNAME)
 
 
@@ -197,14 +200,15 @@ async def init_apis():
 
 
 async def init_db():
-    # 直接按当前模型建表（IF NOT EXISTS，幂等）。本地 migrations/ 为 SQLite 时代的
-    # aerich 迁移（含 AUTOINCREMENT，且被 .gitignore 忽略），在 PostgreSQL 上不可执行，
-    # 故启动不再走 aerich upgrade；新增列由下方 ensure_* 幂等补丁兜底。
+    # 直接按当前模型建表（IF NOT EXISTS，幂等）。aerich 已弃用（见 docs/deprecations.md）；
+    # 本地 migrations/ 为 SQLite 时代产物，在 PostgreSQL 上不可执行。
+    # 新增列由下方 ensure_* 幂等补丁兜底（尚无版本化迁移）。
     await Tortoise.init(config=settings.TORTOISE_ORM)
     # 列级补丁须先于 generate_schemas 执行：它会为带 description 的新列生成 COMMENT ON COLUMN
     # （PG 无 IF EXISTS），旧库缺列时直接报错，事后补丁来不及兜底。
     # 全新库上表尚不存在，ALTER 失败由 ensure 内 try/except 吞掉，随后由建表覆盖新列。
     await ensure_user_agent_sub_llm_columns()
+    await ensure_user_token_version_column()
     await Tortoise.generate_schemas(safe=True)
     await ensure_user_avatar_column()
     await ensure_user_agent_base_url_column()
@@ -212,6 +216,17 @@ async def init_db():
     await ensure_user_agent_is_published_column()
     await ensure_user_agent_share_table()
     await ensure_user_agent_mcp_confirm_policy_column()
+
+
+async def ensure_user_token_version_column() -> None:
+    """旧库补 token_version，供 refresh 吊销。"""
+    try:
+        conn = Tortoise.get_connection("default")
+        await conn.execute_query(
+            'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "token_version" INT NOT NULL DEFAULT 0'
+        )
+    except Exception as e:
+        logger.warning("ensure_user_token_version_column: %s", e)
 
 
 async def ensure_user_avatar_column() -> None:

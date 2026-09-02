@@ -32,43 +32,6 @@ _parent_chunk_store = ParentChunkStore()
 # 以文检索时 document_filenames 白名单条数上限（与智能体选档方案一致）
 KB_MAX_DOCUMENT_FILTER = 10
 
-
-def apply_document_name_filter(
-    kb_scope: str,
-    document_filenames: list[str] | None,
-    *,
-    max_docs: int = KB_MAX_DOCUMENT_FILTER,
-) -> tuple[str | None, list[str] | None, list[str]]:
-    """
-    将调用方（智能体）提供的 filename 与向量库中存在的 filename 做交集校验，供 Milvus 子句使用。
-    返回: (错误信息或 None, 用于 filter 的 filename 或 None=全库不限制文档, 被剔除的不存在项)。
-    约定：document_filenames 为 None 表示不限制；非 None 的列表必须至少能解析出 1 个合法 file_key，否则返回错误信息。
-    """
-    if document_filenames is None:
-        return (None, None, [])
-    if not document_filenames:
-        return (
-            "错误：若需全库检索请传入 None；若需限定文档则须至少 1 个与知识库一致的 file_key。",
-            None,
-            [],
-        )
-    allow = set(_milvus_manager.list_distinct_filenames(kb_scope))
-    valid: list[str] = []
-    invalid: list[str] = []
-    for r in (x.strip() for x in document_filenames if (x or "").strip()):
-        if r in allow:
-            if r not in valid:
-                valid.append(r)
-        else:
-            if r not in invalid:
-                invalid.append(r)
-    if not valid:
-        tail = f" 无效项示例：{invalid[:15]}" if invalid else ""
-        return (f"错误：提供的 file_key 均不在本知识库中。{tail}", None, invalid)
-    if len(valid) > max_docs:
-        valid = valid[:max_docs]
-    return (None, valid, invalid)
-
 AUTO_MERGE_ENABLED = bool(settings.AUTO_MERGE_ENABLED)
 AUTO_MERGE_THRESHOLD = int(settings.AUTO_MERGE_THRESHOLD or 2)
 LEAF_RETRIEVE_LEVEL = int(settings.LEAF_RETRIEVE_LEVEL or 3)
@@ -665,9 +628,14 @@ def step_back_expand(query: str, llm_config: dict | None) -> dict:
     :return: 扩展查询
     """
     step_back_question = _generate_step_back_question(query, llm_config)
-    step_back_answer = _answer_step_back_question(step_back_question, llm_config)
+    step_back_answer = ""
+    if getattr(settings, "RAG_STEP_BACK_ANSWER_ENABLED", False):
+        step_back_answer = _answer_step_back_question(step_back_question, llm_config)
     if step_back_question or step_back_answer:
-        expanded_query = f"{query}\n\n退步问题：{step_back_question}\n退步问题答案：{step_back_answer}"
+        if step_back_answer:
+            expanded_query = f"{query}\n\n退步问题：{step_back_question}\n退步问题答案：{step_back_answer}"
+        else:
+            expanded_query = f"{query}\n\n退步问题：{step_back_question}"
     else:
         expanded_query = query
     return {

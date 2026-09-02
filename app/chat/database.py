@@ -123,6 +123,16 @@ def init_chat_db() -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                "ALTER TABLE mg_chat_sessions ADD COLUMN IF NOT EXISTS last_user_preview VARCHAR(160)"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE mg_chat_sessions ADD COLUMN IF NOT EXISTS path_message_count INTEGER"
+            )
+        )
 
 
 def get_db_session() -> Session:

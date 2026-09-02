@@ -30,6 +30,9 @@ class AuthControl:
                 raise HTTPException(status_code=401, detail="无效的Token")
             if not user.is_active:
                 raise HTTPException(status_code=401, detail="用户已被禁用")
+            tv = int(decode_data.get("token_version", 0) or 0)
+            if tv != int(getattr(user, "token_version", 0) or 0):
+                raise HTTPException(status_code=401, detail="登录已过期")
             CTX_USER_ID.set(int(user_id))
             return user
         except HTTPException:

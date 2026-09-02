@@ -21,7 +21,6 @@ class UserCreate(BaseModel):
     username: str = Field(example="admin")
     password: str = Field(example="123456")
     is_active: Optional[bool] = True
-    is_superuser: Optional[bool] = False
     role_ids: Optional[List[int]] = []
     dept_id: Optional[int] = Field(0, description="部门ID")
 
@@ -34,9 +33,13 @@ class UserUpdate(BaseModel):
     email: EmailStr
     username: str
     is_active: Optional[bool] = True
-    is_superuser: Optional[bool] = False
     role_ids: Optional[List[int]] = []
     dept_id: Optional[int] = 0
+
+
+class SetSuperuserRequest(BaseModel):
+    user_id: int
+    is_superuser: bool
 
 
 class UpdatePassword(BaseModel):

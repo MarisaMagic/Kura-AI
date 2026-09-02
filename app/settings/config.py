@@ -83,7 +83,12 @@ class Settings(BaseSettings):
     AUTH_REGISTER_RATE_LIMIT: int = 5
     AUTH_REGISTER_RATE_WINDOW_SECONDS: int = 3600
     JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 day
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    JWT_REFRESH_COOKIE_NAME: str = "kura_refresh"
+    # 生产 HTTPS 设 true；本机 http 开发 false
+    AUTH_COOKIE_SECURE: bool = False
+    AUTH_COOKIE_SAMESITE: str = "lax"
     # 用户智能体 API Key 字段级加密：优先设置环境变量 API_KEY_ENCRYPTION_KEY（Fernet 密钥，见 cryptography.fernet.Fernet.generate_key()）
     # 未设置时由 SECRET_KEY 派生（仅适合开发；生产请显式配置独立密钥）
     API_KEY_ENCRYPTION_KEY: typing.Optional[str] = None
@@ -127,6 +132,8 @@ class Settings(BaseSettings):
     MILVUS_HOST: str = "127.0.0.1"
     MILVUS_PORT: str = "19530"
     MILVUS_COLLECTION: str = "kura_ai_kb"
+    # 云上 / 已开鉴权的实例填 token；本地 docker standalone 通常留空
+    MILVUS_TOKEN: str = ""
     # 会话记忆向量（与知识库隔离的独立 Milvus collection）
     MILVUS_COLLECTION_CHAT_MEMORY: str = "kura_ai_chat_memory"
     # Milvus VARCHAR(text) 的 max_length；修改后需重建集合（见 CHAT_MEMORY_MILVUS_RECREATE_ON_INIT）
@@ -200,8 +207,19 @@ class Settings(BaseSettings):
     CHAT_VISION_CAPTION_TIMEOUT_SECONDS: int = 60
     CHAT_VISION_CAPTION_MAX_CHARS: int = 1200
 
+    # LLM HTTP：禁止 timeout=None；进程内并发闸门限制同时进行的对话 Job
+    LLM_HTTP_CONNECT_TIMEOUT: float = 10.0
+    LLM_HTTP_READ_TIMEOUT: float = 120.0
+    LLM_HTTP_WRITE_TIMEOUT: float = 30.0
+    LLM_HTTP_POOL_TIMEOUT: float = 10.0
+    LLM_MAX_INFLIGHT: int = 8
+
     # RAG：可选单独指定打分模型；未设置则与智能体对话模型相同
     RAG_GRADE_MODEL: typing.Optional[str] = None
+    # 默认不走 complex（step-back + HyDE 全开）；路由若选出 complex 则降为 step_back
+    RAG_ALLOW_COMPLEX_STRATEGY: bool = False
+    # step-back 默认只生成问句，不先让模型答题（避免首 token 前多一次 LLM）
+    RAG_STEP_BACK_ANSWER_ENABLED: bool = False
     # 扩展检索后二次质量门控：逐块打分全部不相关（或无结果）时置 no_answer，工具侧返回拒答文案；
     # 关闭后保持旧行为（改写后直接生成）
     KB_GRADE_REFUSAL_ENABLED: bool = True

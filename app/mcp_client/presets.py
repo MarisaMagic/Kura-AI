@@ -67,6 +67,7 @@ MCP_SERVER_PRESETS: list[dict] = [
         "transport": "streamable_http",
         "url": "https://api.githubcopilot.com/mcp",
         "icon": "mdi:github",
+        "confirm_policy": "auto",
         "header_fields": [
             {
                 "key": "Authorization",

@@ -1,10 +1,12 @@
 import logging
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Depends, Query
 from tortoise.expressions import Q
 
 from app.controllers.dept import dept_controller
 from app.controllers.user import user_controller
+from app.core.dependency import AuthControl
+from app.models.admin import User
 from app.schemas.base import Fail, Success, SuccessExtra
 from app.schemas.users import *
 from app.utils.avatar import enrich_user_avatar
@@ -58,15 +60,39 @@ async def create_user(
         return Fail(code=400, msg="The user with this email already exists in the system.")
     new_user = await user_controller.create_user(obj_in=user_in)
     await user_controller.update_roles(new_user, user_in.role_ids)
-    return Success(msg="Created Successfully")
+    return Success(msg="Created Successfully", data={"id": new_user.id})
 
 
 @router.post("/update", summary="更新用户")
 async def update_user(
     user_in: UserUpdate,
 ):
-    user = await user_controller.update(id=user_in.id, obj_in=user_in)
+    existing = await user_controller.get(id=user_in.id)
+    was_active = bool(existing.is_active)
+    payload = user_in.model_dump(exclude_unset=True, exclude={"id", "role_ids", "is_superuser"})
+    user = await user_controller.update(id=user_in.id, obj_in=payload)
     await user_controller.update_roles(user, user_in.role_ids)
+    if was_active and user_in.is_active is False:
+        await user_controller.bump_auth_epoch(user)
+    return Success(msg="Updated Successfully")
+
+
+@router.post("/set_superuser", summary="设置超级管理员（仅现有超管）")
+async def set_superuser(
+    body: SetSuperuserRequest,
+    current_user: User = Depends(AuthControl.is_authed),
+):
+    if not current_user.is_superuser:
+        return Fail(code=403, msg="仅超级管理员可设置该标记")
+    if int(body.user_id) == int(current_user.id):
+        return Fail(code=400, msg="不能修改自己的超级管理员标记")
+    target = await user_controller.get(id=body.user_id)
+    if target.is_superuser and not body.is_superuser:
+        others = await User.filter(is_superuser=True).exclude(id=target.id).count()
+        if others < 1:
+            return Fail(code=400, msg="不能取消最后一个超级管理员")
+    target.is_superuser = bool(body.is_superuser)
+    await user_controller.bump_auth_epoch(target)
     return Success(msg="Updated Successfully")
 
 

@@ -16,6 +16,16 @@ from app.chat.preview_session import is_editor_preview_session
 from app.controllers.user_agent import user_agent_controller
 from app.settings import settings
 
+_llm_inflight_sem: asyncio.Semaphore | None = None
+
+
+def _llm_inflight() -> asyncio.Semaphore:
+    global _llm_inflight_sem
+    if _llm_inflight_sem is None:
+        n = max(1, int(getattr(settings, "LLM_MAX_INFLIGHT", 8) or 8))
+        _llm_inflight_sem = asyncio.Semaphore(n)
+    return _llm_inflight_sem
+
 
 def _meta_key(job_id: str) -> str:
     """
@@ -159,14 +169,18 @@ async def create_chat_job(
         meta = await asyncio.to_thread(cache.get_json, _meta_key(ej))
         if meta and meta.get("status") == "running":
             if await asyncio.to_thread(is_job_cancel_requested, ej):
-                # 僵尸任务：取消标记已存在但占用锁尚未释放，清理后继续创建新任务
                 await asyncio.to_thread(_release_active_key, user_id, agent_id, session_id, ej)
             else:
                 return ej, True
 
-    # 创建新的 Job
     job_id = uuid.uuid4().hex
-    # 创建 Job 元数据
+    lock_ok = await asyncio.to_thread(cache.set_nx, ak, {"job_id": job_id}, _ttl())
+    if not lock_ok:
+        raced = await asyncio.to_thread(cache.get_json, ak)
+        if isinstance(raced, dict) and raced.get("job_id"):
+            return str(raced["job_id"]), True
+        raise RuntimeError("无法创建对话任务：会话锁不可用")
+
     meta = {
         "job_id": job_id,
         "user_id": user_id,
@@ -177,10 +191,7 @@ async def create_chat_job(
         "regenerate": bool(regenerate),
         "target_message_id": target_message_id,
     }
-    # 存储 Job 元数据，放入事件循环绑定的线程池里执行
     await asyncio.to_thread(cache.set_json, _meta_key(job_id), meta, _ttl())
-    # 存储 Job 活动 key，放入事件循环绑定的线程池里执行
-    await asyncio.to_thread(cache.set_json, ak, {"job_id": job_id}, _ttl())
 
     # 创建异步任务执行对话
     aids = attachment_ids or []
@@ -230,26 +241,25 @@ async def _run_chat_job(
             return
 
         user_cancelled = False
-        # 异步迭代流式事件
-        async for ev in iter_chat_stream_events(
-            ua,
-            message,
-            user_id,
-            agent_id,
-            session_id,
-            use_knowledge_retrieval=use_knowledge_retrieval,
-            use_web_search=use_web_search,
-            attachment_ids=attachment_ids or [],
-            regenerate=regenerate,
-            target_message_id=target_message_id,
-            cancel_check=lambda jid=job_id: is_job_cancel_requested(jid),
-            mcp_approved_pending_id=mcp_approved_pending_id,
-        ):
-            # 追加事件
-            await _append_event(job_id, seq, ev)
-            seq += 1
-            if ev.get("type") == "done" and ev.get("cancelled"):
-                user_cancelled = True
+        async with _llm_inflight():
+            async for ev in iter_chat_stream_events(
+                ua,
+                message,
+                user_id,
+                agent_id,
+                session_id,
+                use_knowledge_retrieval=use_knowledge_retrieval,
+                use_web_search=use_web_search,
+                attachment_ids=attachment_ids or [],
+                regenerate=regenerate,
+                target_message_id=target_message_id,
+                cancel_check=lambda jid=job_id: is_job_cancel_requested(jid),
+                mcp_approved_pending_id=mcp_approved_pending_id,
+            ):
+                await _append_event(job_id, seq, ev)
+                seq += 1
+                if ev.get("type") == "done" and ev.get("cancelled"):
+                    user_cancelled = True
 
         if user_cancelled:
             await _finish_meta(job_id, status="cancelled", error=None)

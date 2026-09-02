@@ -99,6 +99,30 @@ class ParseBochaImagesTests(unittest.TestCase):
         self.assertEqual(_parse_bocha_images(None), [])
         self.assertEqual(_parse_bocha_images([]), [])
 
+    def test_drops_loopback_and_markdown_breaking_urls(self):
+        payload = {
+            "images": {
+                "value": [
+                    {"name": "本机", "contentUrl": "https://127.0.0.1/x.jpg"},
+                    {"name": "主机", "contentUrl": "https://localhost/x.jpg"},
+                    {
+                        "name": "破坏",
+                        "contentUrl": "https://cdn.example/a.jpg)![x](https://evil.example/x.png",
+                    },
+                    {
+                        "name": "好图",
+                        "contentUrl": "https://cdn.example/ok.jpg",
+                        "hostPageUrl": "https://127.0.0.1/admin",
+                    },
+                ]
+            }
+        }
+        items = _parse_bocha_images(payload)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["title"], "好图")
+        self.assertEqual(items[0]["contentUrl"], "https://cdn.example/ok.jpg")
+        self.assertEqual(items[0].get("hostPageUrl") or "", "")
+
 
 class FormatImageSearchTests(unittest.TestCase):
     def test_markdown_count_and_https_lines(self):
@@ -118,7 +142,7 @@ class FormatImageSearchTests(unittest.TestCase):
         self.assertNotIn("![图5]", text)
         self.assertIn("[5] 图5", text)
         self.assertIn("来源页: https://ex.com/5", text)
-        self.assertIn("原样复制", text)
+        self.assertIn("只复制", text)
 
     def test_empty_title_uses_host_not_parens(self):
         results = [
@@ -136,6 +160,20 @@ class FormatImageSearchTests(unittest.TestCase):
 
     def test_empty_title_and_url_falls_back_to_tupian(self):
         self.assertEqual(_image_display_title({"title": "", "contentUrl": "", "hostPageUrl": ""}), "图片")
+
+    def test_title_markdown_injection_stripped(self):
+        results = [
+            {
+                "title": "橘猫\n![pwn](https://evil.example/x.png)",
+                "contentUrl": "https://cdn.example/cat.jpg",
+                "hostPageUrl": "https://example.com/cat",
+            }
+        ]
+        text = _format_image_search_output(results)
+        self.assertEqual(text.count("](https://"), 1)
+        self.assertNotIn("![pwn]", text)
+        self.assertIn("![", text)
+        self.assertIn("https://cdn.example/cat.jpg", text)
 
 
 class RankImageResultsTests(unittest.TestCase):
@@ -358,6 +396,11 @@ class ImageDedupeTests(unittest.TestCase):
     def test_discipline_forbids_repeat_copy(self):
         self.assertIn("同一图片地址不要再复制", _WEB_SEARCH_DISCIPLINE)
 
+    def test_discipline_requires_copy_marked_line_only(self):
+        self.assertIn("只复制工具标出的那一行", _WEB_SEARCH_DISCIPLINE)
+        tool = make_web_image_search_tool()
+        self.assertIn("只复制工具标出的那一行", tool.description)
+
     def test_discipline_requires_proper_names(self):
         self.assertIn("专名", _WEB_SEARCH_DISCIPLINE)
         self.assertIn("禁止使用「这个人物」", _WEB_SEARCH_DISCIPLINE)
@@ -385,6 +428,7 @@ class ImageDedupeTests(unittest.TestCase):
         self.assertIn("web_image_search", block)
         self.assertIn("专名", block)
         self.assertIn("这个人物", block)
+        self.assertIn("untrusted_external_content", block)
 
     def test_turn_context_caption_without_web_skips_search_hint(self):
         block = _format_turn_context_block(
@@ -538,7 +582,7 @@ class VlRerankTests(unittest.TestCase):
             def __exit__(self, *a):
                 return False
 
-            def post(self, url, headers=None, json=None):
+            def post(self, url, headers=None, json=None, **kwargs):
                 captured["payload"] = json
                 return _Resp()
 
@@ -625,7 +669,7 @@ class VlRerankTests(unittest.TestCase):
             def __exit__(self, *a):
                 return False
 
-            def post(self, url, headers=None, json=None):
+            def post(self, url, headers=None, json=None, **kwargs):
                 docs = (json or {}).get("input", {}).get("documents") or []
                 if len(docs) > 1:
                     return _Err()
@@ -641,6 +685,49 @@ class VlRerankTests(unittest.TestCase):
         self.assertEqual(out[0]["rerank_score"], 0.91)
         self.assertNotIn("rerank_score", out[1])
         self.assertEqual(meta.get("skipped_bad"), 1)
+
+    def test_per_image_retry_capped_at_three(self):
+        results = [
+            {
+                "title": f"图{i}",
+                "contentUrl": f"https://cdn.example/{i}.jpg",
+                "hostPageUrl": f"https://museum.example/{i}",
+                "width": 800,
+                "height": 600,
+            }
+            for i in range(5)
+        ]
+        err_body = (
+            '{"code":"InvalidParameter","message":'
+            '"<400> InternalError.Algo.InvalidParameter: download form url error"}'
+        )
+        posts: list = []
+
+        class _Err:
+            status_code = 400
+            text = err_body
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def post(self, url, headers=None, json=None, **kwargs):
+                posts.append(json)
+                return _Err()
+
+        with self._patch_settings(), mock.patch("httpx.Client", _Client):
+            out, meta = _rerank_web_images("橘猫", results)
+        self.assertTrue(meta.get("fallback"))
+        self.assertLessEqual(len(posts), 4)
+        self.assertEqual(len(posts[0]["input"]["documents"]), 5)
+        self.assertTrue(all(len((p.get("input") or {}).get("documents") or []) == 1 for p in posts[1:]))
+        self.assertLessEqual(len(posts) - 1, 3)
 
 
 class WebImageSearchGuardTests(unittest.TestCase):
@@ -684,6 +771,14 @@ class WebImageSearchGuardTests(unittest.TestCase):
         self.assertEqual(sources[2]["image_url"], "https://cdn.example/cat.jpg")
 
 
+class BuiltinToolNameTests(unittest.TestCase):
+    def test_web_image_search_is_reserved(self):
+        from app.mcp_client.service import _BUILTIN_TOOL_NAMES
+
+        self.assertIn("web_image_search", _BUILTIN_TOOL_NAMES)
+        self.assertIn("fetch_url", _BUILTIN_TOOL_NAMES)
+
+
 class RewriteMediaUrlsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -721,12 +816,26 @@ class RewriteMediaUrlsTests(unittest.TestCase):
         self.assertIn(f"![知识库]({fallback})", out)
         self.assertNotIn("stored/relpath.jpg", out)
 
+    def test_safe_chat_url_rejects_loopback(self):
+        if not self.node:
+            self.skipTest("需要 node 才能执行 isSafeChatUrl")
+        self.assertTrue(_is_safe_chat_url_via_node("https://cdn.example/cat.jpg"))
+        self.assertFalse(_is_safe_chat_url_via_node("https://127.0.0.1/x.jpg"))
+        self.assertFalse(_is_safe_chat_url_via_node("https://localhost/x.jpg"))
+        self.assertTrue(
+            _is_safe_chat_url_via_node("/api/v1/media/user_agent_images/kb.jpg?exp=1&sig=abc")
+        )
 
-def _rewrite_media_urls_via_node(text: str, sources: list) -> str:
+
+def _extract_markdown_js_helpers() -> str:
     src = _WEB_MARKDOWN_JS.read_text(encoding="utf-8")
     start = src.index("const MEDIA_PATH_RE")
     end = src.index("export function renderAgentChatMarkdown")
-    extracted = src[start:end].replace("export function ", "function ")
+    return src[start:end].replace("export function ", "function ")
+
+
+def _rewrite_media_urls_via_node(text: str, sources: list) -> str:
+    extracted = _extract_markdown_js_helpers()
     harness = (
         extracted
         + "\nconst fs = require('fs');\n"
@@ -748,6 +857,31 @@ def _rewrite_media_urls_via_node(text: str, sources: list) -> str:
     if proc.returncode != 0:
         raise AssertionError(f"node rewrite failed: {proc.stderr}\n{proc.stdout}")
     return proc.stdout
+
+
+def _is_safe_chat_url_via_node(url: str) -> bool:
+    extracted = _extract_markdown_js_helpers()
+    harness = (
+        extracted
+        + "\nconst fs = require('fs');\n"
+        + "const input = JSON.parse(fs.readFileSync(0, 'utf8'));\n"
+        + "process.stdout.write(isSafeChatUrl(input.url) ? '1' : '0');\n"
+    )
+    node = shutil.which("node")
+    with tempfile.TemporaryDirectory() as tmp:
+        script = Path(tmp) / "safeurl.cjs"
+        script.write_text(harness, encoding="utf-8")
+        proc = subprocess.run(
+            [node, str(script)],
+            input=json.dumps({"url": url}, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+    if proc.returncode != 0:
+        raise AssertionError(f"node isSafeChatUrl failed: {proc.stderr}\n{proc.stdout}")
+    return proc.stdout.strip() == "1"
 
 
 if __name__ == "__main__":

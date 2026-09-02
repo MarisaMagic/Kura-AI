@@ -284,6 +284,8 @@ docker compose -f docker-compose.prod.yml logs -f backend
 
 相关文件：`deploy/Dockerfile.backend`、`deploy/Dockerfile.frontend`、`deploy/nginx.conf`、`docker-compose.prod.yml`。
 
+已弃用能力与过渡说明见 [`docs/deprecations.md`](docs/deprecations.md)。
+
 ---
 
 ## 公网部署清单
@@ -295,8 +297,10 @@ docker compose -f docker-compose.prod.yml logs -f backend
 - `DOCS_ENABLED=false`
 - `ALLOW_PRIVATE_UPSTREAM_URLS=false`
 - `UVICORN_HOST=127.0.0.1`，前面用 Nginx/Caddy 做 HTTPS 反代（`docker-compose.prod.yml` 已在容器内用 Nginx 反代，且不把 9999 映射到宿主机）
-- `AUTH_TRUST_X_FORWARDED_FOR` 仅在**可信**反代正确设置 `X-Forwarded-For` 后开启
+- `AUTH_TRUST_X_FORWARDED_FOR` 仅在**可信**反代之后开启；nginx 须覆盖（而非追加）`X-Forwarded-For`
 - 生产单独配置 `API_KEY_ENCRYPTION_KEY`，不要只靠 `SECRET_KEY` 派生
-- 公网可将 `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` 改为 `1440`
-- `docker compose` 端口已绑定 `127.0.0.1`；**务必修改** Postgres / MinIO 默认口令，且不要把这些端口映射到公网
+- Access JWT 默认 15 分钟；刷新令牌为 HttpOnly cookie（见 `.env.example`）
+- `.env` 必须设置 `POSTGRES_PASSWORD`、`MINIO_APP_ROOT_PASSWORD`；compose 不再内置弱口令
+- `docker compose` 端口已绑定 `127.0.0.1`；不要把数据库/对象存储端口映射到公网
+- 可选：`MILVUS_TOKEN`（已开鉴权的 Milvus / Zilliz）
 - Redis 不可用时，非 DEBUG 环境登录/注册会返回 503（fail-closed），请保证 Redis 可用

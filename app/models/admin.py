@@ -15,6 +15,7 @@ class User(BaseModel, TimestampMixin):
     is_active = fields.BooleanField(default=True, description="是否激活", index=True)
     is_superuser = fields.BooleanField(default=False, description="是否为超级管理员", index=True)
     last_login = fields.DatetimeField(null=True, description="最后登录时间", index=True)
+    token_version = fields.IntField(default=0, description="令牌版本，改密/禁用时递增以吊销 refresh")
     roles = fields.ManyToManyField("models.Role", related_name="user_roles")
     dept_id = fields.IntField(null=True, description="部门ID", index=True)
     avatar = fields.CharField(max_length=255, null=True, description="头像文件名（存于 user_avatar 目录）")

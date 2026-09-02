@@ -52,6 +52,12 @@ export const useUserStore = defineStore('user', {
     async logout() {
       const { resetTags } = useTagsStore()
       const { resetPermission } = usePermissionStore()
+      try {
+        const base = import.meta.env.VITE_BASE_API || '/api/v1'
+        await fetch(`${base}/base/logout`, { method: 'POST', credentials: 'include' })
+      } catch {
+        /* ignore */
+      }
       removeToken()
       try {
         useRecentAgentsStore().clear()

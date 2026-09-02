@@ -403,6 +403,9 @@ def rewrite_question_node(state: RAGState) -> RAGState:
         except Exception:
             strategy = "step_back"
 
+    if strategy == "complex" and not bool(getattr(settings, "RAG_ALLOW_COMPLEX_STRATEGY", False)):
+        strategy = "step_back"
+
     expanded_query = question
     step_back_question = ""
     step_back_answer = ""

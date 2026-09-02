@@ -195,7 +195,8 @@ async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(
         mapped = _upstream_http_exception(e)
         if mapped:
             raise mapped from e
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        logger.exception("chat_sync_endpoint failed")
+        raise HTTPException(status_code=500, detail="对话生成失败，请稍后重试") from e
 
 
 @router.post("/chat/stream", summary="智能体对话（SSE 流式）", tags=["智能体模块"])
@@ -241,7 +242,8 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
                 await touch_recent_agent(user_id, request.agent_id)
         # 如果发生异常，则返回错误信息
         except Exception as e:
-            err = {"type": "error", "content": str(e)}
+            logger.exception("chat_stream_endpoint failed")
+            err = {"type": "error", "content": "对话生成失败，请稍后重试"}
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
 
     # 返回流式响应

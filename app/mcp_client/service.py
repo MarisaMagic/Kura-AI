@@ -23,6 +23,7 @@ _BUILTIN_TOOL_NAMES = {
     "list_session_attachments_brief",
     "web_search",
     "fetch_url",
+    "web_image_search",
 }
 
 

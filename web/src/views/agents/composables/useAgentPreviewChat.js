@@ -40,6 +40,7 @@ export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval,
       try {
         await fetch(`${baseApi}/user-agent/chat/jobs/${jid}/cancel`, {
           method: 'POST',
+          credentials: 'include',
           headers: { token, 'Content-Type': 'application/json' },
         })
       } catch {
@@ -52,7 +53,8 @@ export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval,
           `${baseApi}/user-agent/chat/active_job/cancel?agent_id=${aid}&session_id=${encodeURIComponent(sid)}`,
           {
             method: 'POST',
-            headers: { token, 'Content-Type': 'application/json' },
+            credentials: 'include',
+          headers: { token, 'Content-Type': 'application/json' },
           }
         )
       } catch {
@@ -94,6 +96,7 @@ export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval,
       const postJob = () =>
         fetch(`${baseApi}/user-agent/chat/jobs`, {
           method: 'POST',
+          credentials: 'include',
           headers: { 'Content-Type': 'application/json', token },
           body: JSON.stringify({
             agent_id: aid,
@@ -145,6 +148,7 @@ export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval,
       activeJobId.value = jobId
 
       const streamRes = await fetch(`${baseApi}/user-agent/chat/jobs/${jobId}/stream?since_seq=${startSeq}`, {
+        credentials: 'include',
         headers: { token },
         signal: ac.signal,
       })
@@ -259,6 +263,7 @@ export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval,
     try {
       const res = await fetch(`${baseApi}/user-agent/chat/mcp/confirm`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json', token },
         body: JSON.stringify({ pending_id: item.pending_id, approve }),
       })

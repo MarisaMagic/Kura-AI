@@ -11,9 +11,12 @@ from app.settings import settings
 
 def client_ip(request: Request) -> str:
     if getattr(settings, "AUTH_TRUST_X_FORWARDED_FOR", False):
+        real_ip = (request.headers.get("X-Real-IP") or "").strip()
+        if real_ip:
+            return real_ip.split(",")[0].strip()
         forwarded = (request.headers.get("X-Forwarded-For") or "").strip()
         if forwarded:
-            return forwarded.split(",")[0].strip()
+            return forwarded.split(",")[-1].strip()
     if request.client and request.client.host:
         return request.client.host
     return "unknown"

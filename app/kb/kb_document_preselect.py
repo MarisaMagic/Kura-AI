@@ -9,12 +9,9 @@ from langchain.chat_models import init_chat_model
 from pydantic import BaseModel, Field
 
 from app.chat.tools import emit_rag_step
-from app.kb.milvus_client import MilvusManager
 from app.kb.rag_utils import KB_MAX_DOCUMENT_FILTER
 from app.settings import settings
 from app.utils.egress import pinned_llm_client_kwargs
-
-_milvus = MilvusManager()
 
 
 class _DocPickOut(BaseModel):
@@ -69,7 +66,9 @@ def run_kb_document_preselect(
         return None, meta
 
     try:
-        names = _milvus.list_distinct_filenames(kb_scope)
+        from app.kb.kb_service import list_kb_filenames_for_scope
+
+        names = list_kb_filenames_for_scope(kb_scope)
     except Exception as e:
         meta["error"] = str(e)[:200]
         emit_rag_step("⚠️", "知识库选档失败", meta["error"])

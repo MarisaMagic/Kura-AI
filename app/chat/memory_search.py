@@ -93,13 +93,13 @@ def retrieve_session_memory_hits(
 
     try:
         embedder = get_multimodal_embedding_service()
-        dense, sparse = embedder.get_all_embeddings([search_q[:8000]])  # 将当前查询转换为密集向量和稀疏向量
+        dense = embedder.get_text_embeddings([search_q[:8000]])
         milvus = get_chat_memory_milvus()
         milvus.init_collection()
         flt = memory_filter_expr(mem_scope, turn_keys=allowed_turn_keys)
-        hits = milvus.hybrid_retrieve(  # 混合检索, 检索 top_k 个与当前查询最相似的记忆
+        hits = milvus.hybrid_retrieve(
             dense[0],
-            sparse[0],
+            search_q[:8000],
             top_k=max(1, top_k),
             filter_expr=flt,
         )

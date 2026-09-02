@@ -74,6 +74,20 @@ async function handleResetPassword() {
   }
 }
 
+const userStore = useUserStore()
+
+async function persistUser(payload, isCreate) {
+  const { is_superuser, ...rest } = payload
+  const res = isCreate ? await api.createUser(rest) : await api.updateUser(rest)
+  if (userStore.isSuperUser && typeof is_superuser === 'boolean') {
+    const uid = isCreate ? res.data?.id : payload.id
+    if (uid && uid !== userStore.userId) {
+      await api.setSuperuser({ user_id: uid, is_superuser })
+    }
+  }
+  return res
+}
+
 const {
   modalVisible,
   modalTitle,
@@ -88,8 +102,8 @@ const {
 } = useCRUD({
   name: '用户',
   initForm: {},
-  doCreate: api.createUser,
-  doUpdate: api.updateUser,
+  doCreate: (data) => persistUser(data, true),
+  doUpdate: (data) => persistUser(data, false),
   doDelete: api.deleteUser,
   refresh: () => $table.value?.handleSearch(),
 })
@@ -480,7 +494,7 @@ const validateAddUser = {
                 </NSpace>
               </NCheckboxGroup>
             </NFormItem>
-            <NFormItem label="超级用户" path="is_superuser">
+            <NFormItem v-if="userStore.isSuperUser" label="超级用户" path="is_superuser">
               <NSwitch
                 v-model:value="modalForm.is_superuser"
                 size="small"

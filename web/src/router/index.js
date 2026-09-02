@@ -1,7 +1,7 @@
 import { createRouter, createWebHistory, createWebHashHistory } from 'vue-router'
 import { setupRouterGuard } from './guard'
 import { basicRoutes, EMPTY_ROUTE, NOT_FOUND_ROUTE } from './routes'
-import { getToken, isNullOrWhitespace } from '@/utils'
+import { getToken, isNullOrWhitespace, tryRefreshToken } from '@/utils'
 import { useUserStore, usePermissionStore } from '@/store'
 
 const isHash = import.meta.env.VITE_USE_HASH === 'true'
@@ -28,7 +28,10 @@ export async function resetRouter() {
 }
 
 export async function addDynamicRoutes() {
-  const token = getToken()
+  let token = getToken()
+  if (isNullOrWhitespace(token)) {
+    token = await tryRefreshToken()
+  }
 
   // 没有token情况
   if (isNullOrWhitespace(token)) {

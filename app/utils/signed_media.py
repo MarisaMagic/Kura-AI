@@ -11,7 +11,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
@@ -33,7 +33,7 @@ _PREFIX_KIND = {v: k for k, v in _KIND_PREFIX.items()}
 _MEDIA_URL_RE = re.compile(
     r"(?P<origin>(?:https?://[^/\s\"')]+)?)(?P<prefix>/api/v1/media/"
     r"(?:user_avatar|user_agents_avatar|user_agent_images)/)"
-    r"(?P<path>[^\s\"'?)]+)(?:\?[^\s\"')]+)?"
+    r"(?P<path>[^\s\"'?)]+)(?P<query>\?[^\s\"')]+)?"
 )
 
 
@@ -57,7 +57,7 @@ def _sign(kind: str, relpath: str, exp: int) -> str:
     return hmac.new(settings.SECRET_KEY.encode(), payload, hashlib.sha256).hexdigest()
 
 
-def sign_media_url(kind: str, relpath: str, *, absolute: bool = False) -> str:
+def sign_media_url(kind: str, relpath: str, *, absolute: bool = False, exp: int | None = None) -> str:
     """生成带 exp/sig 的媒体 URL。absolute=True 时前置 PUBLIC_API_BASE。"""
     rel = _normalize_relpath(relpath)
     if not rel:
@@ -66,9 +66,9 @@ def sign_media_url(kind: str, relpath: str, *, absolute: bool = False) -> str:
     if not prefix:
         return ""
     ttl = max(60, int(getattr(settings, "MEDIA_SIGNED_URL_TTL_SECONDS", 86400)))
-    exp = int(time.time()) + ttl
-    sig = _sign(kind, rel, exp)
-    path_part = f"{prefix}/{rel}?{urlencode({'exp': exp, 'sig': sig})}"
+    exp_i = int(exp) if exp is not None else int(time.time()) + ttl
+    sig = _sign(kind, rel, exp_i)
+    path_part = f"{prefix}/{rel}?{urlencode({'exp': exp_i, 'sig': sig})}"
     if absolute:
         base = (getattr(settings, "PUBLIC_API_BASE", None) or "").strip().rstrip("/")
         if base:
@@ -117,10 +117,47 @@ def serve_signed_media(kind: str, relpath: str, exp: int, sig: str) -> Streaming
     )
 
 
+def _query_exp_sig(query: str) -> tuple[str | None, str | None]:
+    qs = parse_qs((query or "").lstrip("?"), keep_blank_values=True)
+    exp = (qs.get("exp") or [None])[0]
+    sig = (qs.get("sig") or [None])[0]
+    return exp, sig
+
+
+def _signature_ok_for_resign(kind: str, relpath: str, exp: str | None, sig: str | None) -> bool:
+    """仅当现有 URL 带有效 HMAC（允许过期不超过一个 TTL）时才允许换新签。"""
+    if not exp or not sig:
+        return False
+    try:
+        exp_i = int(exp)
+    except (TypeError, ValueError):
+        return False
+    expected = _sign(kind, relpath, exp_i)
+    if not hmac.compare_digest(expected, str(sig)):
+        return False
+    ttl = max(60, int(getattr(settings, "MEDIA_SIGNED_URL_TTL_SECONDS", 86400)))
+    if exp_i + ttl < int(time.time()):
+        return False
+    return True
+
+
+def _resign_kind_rel(kind: str, rel: str, exp: str | None) -> str:
+    ttl = max(60, int(getattr(settings, "MEDIA_SIGNED_URL_TTL_SECONDS", 86400)))
+    new_exp = int(time.time()) + ttl
+    try:
+        old_exp = int(exp) if exp is not None else 0
+        if new_exp <= old_exp:
+            new_exp = old_exp + 1
+    except (TypeError, ValueError):
+        pass
+    return sign_media_url(kind, rel, absolute=False, exp=new_exp)
+
+
 def resign_media_url(url: str) -> str:
     """将已有媒体 URL 换成当前有效签名的同源相对路径。非媒体 URL 原样返回。
 
     始终去掉 http(s) origin / PUBLIC_API_BASE，避免前端 CSP img-src 'self' 拦截跨源图片。
+    未带有效签名的路径不会签发（防止用户正文注入媒体路径骗取签名）。
     """
     raw = (url or "").strip()
     if not raw:
@@ -136,7 +173,10 @@ def resign_media_url(url: str) -> str:
             break
     if not kind or not rel:
         return raw
-    return sign_media_url(kind, rel, absolute=False)
+    exp, sig = _query_exp_sig(split.query)
+    if not _signature_ok_for_resign(kind, rel, exp, sig):
+        return raw
+    return _resign_kind_rel(kind, rel, exp)
 
 
 def resign_media_urls_in_text(text: str) -> str:
@@ -149,7 +189,10 @@ def resign_media_urls_in_text(text: str) -> str:
         kind = _PREFIX_KIND.get(prefix.rstrip("/"))
         if not kind:
             return m.group(0)
-        return sign_media_url(kind, rel, absolute=False)
+        exp, sig = _query_exp_sig(m.group("query") or "")
+        if not _signature_ok_for_resign(kind, rel, exp, sig):
+            return m.group(0)
+        return _resign_kind_rel(kind, rel, exp)
 
     return _MEDIA_URL_RE.sub(_repl, text)
 

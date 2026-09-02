@@ -23,11 +23,34 @@ from app.chat.preview_session import (
 
 
 class ConversationStorage:
+    def _preview_from_path_rows(self, path: list) -> str:
+        preview = ""
+        for r in reversed(path):
+            if r.message_type != "human":
+                continue
+            if r.content_json and isinstance(r.content_json, dict):
+                preview = msg_content_to_str(r.content_json.get("lc")).strip()
+            elif (r.content or "").strip():
+                preview = (r.content or "").strip()
+            preview = preview.replace("\n", " ")
+            if len(preview) > 160:
+                preview = preview[:160]
+            break
+        return preview
+
     def _build_session_info_dict(self, db, s: ChatSessionRow) -> dict:
         """
         由会话 ORM 行生成列表项（预览与计数），供全量列表与分页列表复用。
-        预览与计数基于当前选中路径，避免跨分支取到其它分支的消息。
+        优先读会话表上的 last_user_preview / path_message_count，避免 N+1 加载 content_json。
         """
+        if s.path_message_count is not None:
+            return {
+                "session_id": s.session_id,
+                "agent_id": s.agent_id,
+                "updated_at": s.updated_at.isoformat(),
+                "message_count": int(s.path_message_count),
+                "last_user_preview": (s.last_user_preview or ""),
+            }
         rows = (
             db.query(
                 ChatMessageRow.id,
@@ -42,18 +65,7 @@ class ConversationStorage:
             .all()
         )
         path = self._walk_path(rows)
-        preview = ""
-        for r in reversed(path):
-            if r.message_type != "human":
-                continue
-            if r.content_json and isinstance(r.content_json, dict):
-                preview = msg_content_to_str(r.content_json.get("lc")).strip()
-            elif (r.content or "").strip():
-                preview = (r.content or "").strip()
-            preview = preview.replace("\n", " ")
-            if len(preview) > 120:
-                preview = preview[:120] + "…"
-            break
+        preview = self._preview_from_path_rows(path)
         return {
             "session_id": s.session_id,
             "agent_id": s.agent_id,
@@ -308,6 +320,16 @@ class ConversationStorage:
     ) -> None:
         """提交消息变更后按库回填消息缓存，并失效会话列表缓存。"""
         session.updated_at = datetime.utcnow()
+        db.flush()
+        path_rows = (
+            db.query(ChatMessageRow)
+            .filter(ChatMessageRow.session_ref_id == session.id)
+            .order_by(ChatMessageRow.id.asc())
+            .all()
+        )
+        path = self._walk_path(path_rows)
+        session.last_user_preview = self._preview_from_path_rows(path)
+        session.path_message_count = len(path)
         session_pk = session.id
         db.commit()
         db.expire_all()

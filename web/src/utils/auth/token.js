@@ -1,31 +1,58 @@
-import { lStorage } from '@/utils'
+import { lStorage, sStorage } from '@/utils/storage'
 
 const TOKEN_CODE = 'access_token'
 
+function migrateLegacyToken() {
+  if (sStorage.get(TOKEN_CODE)) {
+    lStorage.remove(TOKEN_CODE)
+    return
+  }
+  const old = lStorage.get(TOKEN_CODE)
+  if (old) {
+    sStorage.set(TOKEN_CODE, old)
+    lStorage.remove(TOKEN_CODE)
+  }
+}
+
 export function getToken() {
-  return lStorage.get(TOKEN_CODE)
+  migrateLegacyToken()
+  return sStorage.get(TOKEN_CODE)
 }
 
 export function setToken(token) {
-  lStorage.set(TOKEN_CODE, token)
-}
-
-export function removeToken() {
+  sStorage.set(TOKEN_CODE, token)
   lStorage.remove(TOKEN_CODE)
 }
 
-// export async function refreshAccessToken() {
-//   const tokenItem = lStorage.getItem(TOKEN_CODE)
-//   if (!tokenItem) {
-//     return
-//   }
-//   const { time } = tokenItem
-//   // token生成或者刷新后30分钟内不执行刷新
-//   if (new Date().getTime() - time <= 1000 * 60 * 30) return
-//   try {
-//     const res = await api.refreshToken()
-//     setToken(res.data.token)
-//   } catch (error) {
-//     console.error(error)
-//   }
-// }
+export function removeToken() {
+  sStorage.remove(TOKEN_CODE)
+  lStorage.remove(TOKEN_CODE)
+}
+
+let refreshing = null
+
+export async function tryRefreshToken() {
+  if (refreshing) return refreshing
+  refreshing = (async () => {
+    try {
+      const base = import.meta.env.VITE_BASE_API || '/api/v1'
+      const res = await fetch(`${base}/base/refresh`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      const data = await res.json().catch(() => null)
+      const tok = data?.data?.access_token
+      if (data?.code === 200 && tok) {
+        setToken(tok)
+        return tok
+      }
+      return null
+    } catch {
+      return null
+    } finally {
+      refreshing = null
+    }
+  })()
+  return refreshing
+}

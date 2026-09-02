@@ -167,6 +167,8 @@ class ChatSession(Base):
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    last_user_preview: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    path_message_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
     memory_cursor = relationship(

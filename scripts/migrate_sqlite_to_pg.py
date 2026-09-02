@@ -1,6 +1,7 @@
 """一次性迁移：管理端 SQLite (db.sqlite3) -> PostgreSQL，保留原主键 ID。
 
-前置：先启动一次后端（`python run.py` 或 Docker 后端容器），让 aerich 在目标库建好表结构。
+前置：先启动一次后端（`python run.py` 或 Docker 后端容器），让 Tortoise
+`generate_schemas` + 启动期幂等补丁在目标库建好表结构（aerich 已弃用，见 docs/deprecations.md）。
 
 用法（开发机，数据库服务已由 docker compose 拉起）：
     python scripts/migrate_sqlite_to_pg.py --source db.sqlite3
@@ -27,7 +28,7 @@ import asyncpg
 # 与 settings.timezone 一致：SQLite 中 naive 时间戳为本地墙钟时间
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 
-# 按外键依赖顺序排列；aerich / sqlite_sequence 不迁移
+# 按外键依赖顺序排列；sqlite_sequence 不迁移
 TABLES = [
     "dept",
     "deptclosure",

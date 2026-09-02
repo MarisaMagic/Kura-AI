@@ -13,6 +13,17 @@ from app.settings import settings
 MILVUS_MAX_QUERY_WINDOW = 16384
 
 
+def milvus_client_kwargs() -> dict:
+    """MilvusClient 连接参数。已开鉴权的实例可设 MILVUS_TOKEN。"""
+    host = (settings.MILVUS_HOST or "127.0.0.1").strip()
+    port = (settings.MILVUS_PORT or "19530").strip()
+    kw: dict = {"uri": f"http://{host}:{port}"}
+    token = (getattr(settings, "MILVUS_TOKEN", None) or "").strip()
+    if token:
+        kw["token"] = token
+    return kw
+
+
 def _milvus_query_row_to_dict(row: object) -> dict:
     if isinstance(row, dict):
         return row
@@ -97,7 +108,7 @@ class MilvusManager:
         :return: MilvusClient
         """
         if self.client is None:
-            self.client = MilvusClient(uri=self.uri)
+            self.client = MilvusClient(**milvus_client_kwargs())
         return self.client
 
     def init_collection(self, dense_dim: int | None = None, *, collection_name: str | None = None) -> None:

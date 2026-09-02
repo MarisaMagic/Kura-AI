@@ -202,10 +202,23 @@ def build_mcp_httpx_client_factory(url: str):
     return _factory
 
 
+def llm_http_timeout() -> httpx.Timeout:
+    """LLM 上游显式超时，禁止 timeout=None。"""
+    from app.settings import settings
+
+    return httpx.Timeout(
+        connect=float(getattr(settings, "LLM_HTTP_CONNECT_TIMEOUT", 10) or 10),
+        read=float(getattr(settings, "LLM_HTTP_READ_TIMEOUT", 120) or 120),
+        write=float(getattr(settings, "LLM_HTTP_WRITE_TIMEOUT", 30) or 30),
+        pool=float(getattr(settings, "LLM_HTTP_POOL_TIMEOUT", 10) or 10),
+    )
+
+
 def pinned_llm_client_kwargs(base_url: str | None) -> dict:
     if not base_url:
         return {}
-    sync_client, async_client = build_pinned_clients(base_url)
+    timeout = llm_http_timeout()
+    sync_client, async_client = build_pinned_clients(base_url, timeout=timeout)
     return {"http_client": sync_client, "http_async_client": async_client}
 
 

@@ -65,7 +65,7 @@ class RedisCache:
 
     def set_nx(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         """
-        SET NX：仅当键不存在时写入并返回 True，用于互斥标记（如知识库同名文档替换锁）。
+        SET NX：仅当键不存在时写入并返回 True，用于互斥标记（会话 Job 锁、知识库同名文档替换锁）。
         Redis 不可用时返回 False，调用方按「未能抢占」处理。
         """
         try:

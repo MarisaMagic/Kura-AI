@@ -25,8 +25,11 @@ class UserController(CRUDBase[User, UserCreate, UserUpdate]):
         return await self.model.filter(username=username).first()
 
     async def create_user(self, obj_in: UserCreate) -> User:
-        obj_in.password = get_password_hash(password=obj_in.password)
-        obj = await self.create(obj_in)
+        data = obj_in.model_dump(exclude={"role_ids"})
+        data["password"] = get_password_hash(password=obj_in.password)
+        data["is_superuser"] = False
+        obj = self.model(**data)
+        await obj.save()
         return obj
 
     async def update_last_login(self, id: int) -> None:
@@ -92,7 +95,6 @@ class UserController(CRUDBase[User, UserCreate, UserUpdate]):
                 username=username,
                 password=body.password,
                 is_active=True,
-                is_superuser=False,
             )
         )
         role = await Role.filter(name="普通用户").first()
@@ -114,7 +116,15 @@ class UserController(CRUDBase[User, UserCreate, UserUpdate]):
             user_obj.password = get_password_hash(new_password)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        await user_obj.save()
+        await self.bump_auth_epoch(user_obj)
+
+    async def bump_auth_epoch(self, user: User) -> None:
+        """改密 / 禁用 / 权限变更后递增 token_version 并吊销全部 refresh。"""
+        user.token_version = int(getattr(user, "token_version", 0) or 0) + 1
+        await user.save()
+        from app.utils.refresh_tokens import revoke_user_refresh_tokens
+
+        revoke_user_refresh_tokens(int(user.id))
 
 
 user_controller = UserController()

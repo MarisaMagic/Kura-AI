@@ -17,8 +17,36 @@ from app.utils.auth_rate_limit import check_auth_rate_limit
 from app.utils.avatar import ALLOWED_AVATAR_EXTENSIONS, avatar_url_from_filename, enrich_user_avatar, safe_avatar_extension
 from app.utils.jwt_utils import create_access_token
 from app.utils.password import get_password_hash, validate_password_strength, verify_password
+from app.utils.refresh_tokens import (
+    clear_refresh_cookie,
+    consume_refresh_token,
+    issue_refresh_token,
+    set_refresh_cookie,
+)
 
 router = APIRouter()
+
+
+def _auth_success(user: User) -> Success:
+    access_token_expires = timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now(timezone.utc) + access_token_expires
+    tv = int(getattr(user, "token_version", 0) or 0)
+    data = JWTOut(
+        access_token=create_access_token(
+            data=JWTPayload(
+                user_id=user.id,
+                username=user.username,
+                is_superuser=user.is_superuser,
+                token_version=tv,
+                exp=expire,
+            )
+        ),
+        username=user.username,
+    )
+    resp = Success(data=data.model_dump())
+    jti = issue_refresh_token(int(user.id), tv)
+    set_refresh_cookie(resp, jti)
+    return resp
 
 
 @router.get("/health", summary="存活检查", tags=["基础模块"])
@@ -55,21 +83,42 @@ async def login_access_token(credentials: CredentialsSchema, request: Request):
     )
     user: User = await user_controller.authenticate(credentials)
     await user_controller.update_last_login(user.id)
-    access_token_expires = timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
-    expire = datetime.now(timezone.utc) + access_token_expires
+    return _auth_success(user)
 
-    data = JWTOut(
-        access_token=create_access_token(
-            data=JWTPayload(
-                user_id=user.id,
-                username=user.username,
-                is_superuser=user.is_superuser,
-                exp=expire,
-            )
-        ),
-        username=user.username,
-    )
-    return Success(data=data.model_dump())
+
+@router.post("/refresh", summary="刷新 access token", tags=["基础模块"])
+async def refresh_access_token(request: Request):
+    from app.utils.refresh_tokens import COOKIE_NAME
+
+    name = (getattr(settings, "JWT_REFRESH_COOKIE_NAME", None) or COOKIE_NAME).strip() or COOKIE_NAME
+    jti = (request.cookies.get(name) or "").strip()
+    rec = consume_refresh_token(jti)
+    if not rec:
+        resp = Fail(code=401, msg="登录已过期")
+        clear_refresh_cookie(resp)
+        return resp
+    user = await User.filter(id=int(rec.get("user_id") or 0)).first()
+    if not user or not user.is_active:
+        resp = Fail(code=401, msg="登录已过期")
+        clear_refresh_cookie(resp)
+        return resp
+    if int(rec.get("tv") or 0) != int(getattr(user, "token_version", 0) or 0):
+        resp = Fail(code=401, msg="登录已过期")
+        clear_refresh_cookie(resp)
+        return resp
+    return _auth_success(user)
+
+
+@router.post("/logout", summary="退出登录", tags=["基础模块"])
+async def logout(request: Request):
+    from app.utils.refresh_tokens import COOKIE_NAME
+
+    name = (getattr(settings, "JWT_REFRESH_COOKIE_NAME", None) or COOKIE_NAME).strip() or COOKIE_NAME
+    jti = (request.cookies.get(name) or "").strip()
+    consume_refresh_token(jti)
+    resp = Success(msg="已退出")
+    clear_refresh_cookie(resp)
+    return resp
 
 
 @router.get("/userinfo", summary="查看用户信息", dependencies=[DependAuth])
@@ -167,5 +216,5 @@ async def update_user_password(req_in: UpdatePassword):
     except ValueError as exc:
         return Fail(msg=str(exc))
     user.password = get_password_hash(req_in.new_password)
-    await user.save()
+    await user_controller.bump_auth_epoch(user)
     return Success(msg="修改成功")

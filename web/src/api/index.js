@@ -15,6 +15,7 @@ export default {
   getUserById: (params = {}) => request.get('/user/get', { params }),
   createUser: (data = {}) => request.post('/user/create', data),
   updateUser: (data = {}) => request.post('/user/update', data),
+  setSuperuser: (data = {}) => request.post('/user/set_superuser', data),
   deleteUser: (params = {}) => request.delete(`/user/delete`, { params }),
   resetPassword: (data = {}) => request.post(`/user/reset_password`, data),
   // role
@@ -101,7 +102,10 @@ export default {
     const headers = {}
     const token = getToken()
     if (token) headers.token = token
-    return fetch(`${base}/user-agent/chat/attachments/preview?${q}`, { headers }).then(
+    return fetch(`${base}/user-agent/chat/attachments/preview?${q}`, {
+      credentials: 'include',
+      headers,
+    }).then(
       async (res) => {
         if (!res.ok) throw new Error(String(res.status))
         return res.blob()

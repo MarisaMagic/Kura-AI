@@ -8,6 +8,7 @@ export function configHtmlPlugin(viteEnv, isBuild) {
     inject: {
       data: {
         title: VITE_TITLE,
+        cspScriptSrc: isBuild ? "'self'" : "'self' 'unsafe-eval'",
       },
     },
   })
