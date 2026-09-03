@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/MarisaMagic/Kura-AI">
-    <img alt="Kura AI Logo" width="200" src="https://github.com/mizhexiaoxiao/vue-fastapi-admin/blob/main/deploy/sample-picture/logo.svg">
+    <img alt="Kura AI Logo" width="200" src="deploy/sample-picture/logo.svg">
   </a>
 </p>
 

@@ -11,7 +11,13 @@
 
       <div w-320 flex-col px-20 py-35>
         <h5 f-c-c text-24 font-normal color="#6a6a6a">
-          <icon-custom-logo mr-10 text-50 color-primary />{{ $t('app_name') }}
+          <img
+            :src="brandLogoSrc"
+            alt=""
+            width="50"
+            height="50"
+            class="mr-10 h-50 w-50 shrink-0 object-contain"
+          />{{ $t('app_name') }}
         </h5>
         <div mt-30>
           <n-input
@@ -65,6 +71,7 @@ import { useI18n } from 'vue-i18n'
 const router = useRouter()
 const { query } = useRoute()
 const { t } = useI18n({ useScope: 'global' })
+const brandLogoSrc = `${import.meta.env.BASE_URL}logo.svg`.replace(/\/{2,}/, '/')
 
 const loginInfo = ref({
   username: '',
