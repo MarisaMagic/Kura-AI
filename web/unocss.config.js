@@ -1,19 +1,25 @@
 import { defineConfig, presetAttributify, presetUno } from 'unocss'
 
 export default defineConfig({
-  exclude: [
-    'node_modules',
-    '.git',
-    '.github',
-    '.husky',
-    '.vscode',
-    'build',
-    'dist',
-    'mock',
-    'public',
-    './stats.html',
-  ],
   presets: [presetUno(), presetAttributify()],
+  // unocss >= 0.55: 顶层 exclude 已废弃，需放 content.pipeline.exclude，
+  // 否则 CI 环境下 deprecationCheck 会直接 throw（见 @unocss/vite deprecationCheck）
+  content: {
+    pipeline: {
+      exclude: [
+        'node_modules',
+        '.git',
+        '.github',
+        '.husky',
+        '.vscode',
+        'build',
+        'dist',
+        'mock',
+        'public',
+        './stats.html',
+      ],
+    },
+  },
   shortcuts: [
     ['wh-full', 'w-full h-full'],
     ['f-c-c', 'flex justify-center items-center'],
