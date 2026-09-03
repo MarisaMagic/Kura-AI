@@ -279,15 +279,8 @@ class ConversationStorage:
         db.add(row)
         return row
 
-    def _load_message_records(self, db, session: ChatSessionRow) -> list[dict]:
-        """加载当前选中路径上的消息记录（附带版本信息），而非全树按 id 排序。"""
-        rows = (
-            db.query(ChatMessageRow)
-            .filter(ChatMessageRow.session_ref_id == session.id)
-            .order_by(ChatMessageRow.id.asc())
-            .all()
-        )
-        path = self._walk_path(rows)
+    def _records_from_rows(self, rows: list, path: list) -> list[dict]:
+        """由（全量行, 当前路径行）生成带版本信息的记录列表，不再查库。"""
         vmeta = self._version_meta(rows, path)
         records = []
         for row in path:
@@ -299,16 +292,15 @@ class ConversationStorage:
             records.append(rec)
         return records
 
-    def _current_leaf_row(self, db, session_ref_id: int) -> ChatMessageRow | None:
-        """当前路径的叶子消息行；无任何消息时返回 None。"""
+    def _load_message_records(self, db, session: ChatSessionRow) -> list[dict]:
+        """加载当前选中路径上的消息记录（附带版本信息），而非全树按 id 排序。"""
         rows = (
             db.query(ChatMessageRow)
-            .filter(ChatMessageRow.session_ref_id == session_ref_id)
+            .filter(ChatMessageRow.session_ref_id == session.id)
             .order_by(ChatMessageRow.id.asc())
             .all()
         )
-        path = self._walk_path(rows)
-        return path[-1] if path else None
+        return self._records_from_rows(rows, self._walk_path(rows))
 
     def _commit_and_refresh_caches(
         self,
@@ -317,24 +309,28 @@ class ConversationStorage:
         user_id: int,
         agent_id: int,
         session_id: str,
+        rows: list | None = None,
     ) -> None:
-        """提交消息变更后按库回填消息缓存，并失效会话列表缓存。"""
+        """提交消息变更后按库回填消息缓存，并失效会话列表缓存。
+
+        :param rows: 传入「已有行 + 本次新增行」的全量内存行时直接复用，
+            跳过重复全量 SELECT（append 热路径）；缺省则照旧查库（其余入口）。
+        """
         session.updated_at = datetime.utcnow()
         db.flush()
-        path_rows = (
-            db.query(ChatMessageRow)
-            .filter(ChatMessageRow.session_ref_id == session.id)
-            .order_by(ChatMessageRow.id.asc())
-            .all()
-        )
-        path = self._walk_path(path_rows)
+        if rows is None:
+            rows = (
+                db.query(ChatMessageRow)
+                .filter(ChatMessageRow.session_ref_id == session.id)
+                .order_by(ChatMessageRow.id.asc())
+                .all()
+            )
+        path = self._walk_path(rows)
         session.last_user_preview = self._preview_from_path_rows(path)
         session.path_message_count = len(path)
-        session_pk = session.id
         db.commit()
-        db.expire_all()
-        session = db.query(ChatSessionRow).filter(ChatSessionRow.id == session_pk).first()
-        records = self._load_message_records(db, session) if session else []
+        # expire_on_commit=False：提交后内存行属性仍有效，直接据此构建记录，无需重查
+        records = self._records_from_rows(rows, path)
         cache.set_json(self._messages_cache_key(user_id, agent_id, session_id), records)
         cache.delete(self._sessions_cache_key(user_id, agent_id))
         cache.delete(self._sessions_all_cache_key(user_id))
@@ -359,7 +355,15 @@ class ConversationStorage:
         try:
             session = self._get_or_create_session(db, user_id, agent_id, session_id, metadata)
             now = datetime.utcnow()
-            parent = self._current_leaf_row(db, session.id)
+            # 单次加载全量行：叶子定位与后续缓存回填复用同一份内存数据（原为 3 次全量 SELECT）
+            rows = (
+                db.query(ChatMessageRow)
+                .filter(ChatMessageRow.session_ref_id == session.id)
+                .order_by(ChatMessageRow.id.asc())
+                .all()
+            )
+            path = self._walk_path(rows)
+            parent = path[-1] if path else None
             extras = extra_message_data or []
             for idx, msg in enumerate(new_messages):
                 extra = extras[idx] if idx < len(extras) else None
@@ -370,7 +374,8 @@ class ConversationStorage:
                 if parent is not None:
                     parent.selected_child_id = row.id
                 parent = row
-            self._commit_and_refresh_caches(db, session, user_id, agent_id, session_id)
+                rows.append(row)
+            self._commit_and_refresh_caches(db, session, user_id, agent_id, session_id, rows=rows)
         finally:
             db.close()
 

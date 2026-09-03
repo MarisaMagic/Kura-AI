@@ -47,6 +47,12 @@ async def lifespan(app: FastAPI):
             "DEBUG=true：Header token=dev 可跳过 JWT，仅限本机调试，公网务必关闭"
         )
     yield
+    try:
+        from app.utils.egress import close_pinned_llm_clients
+
+        await close_pinned_llm_clients()
+    except Exception as e:
+        logger.warning("关闭缓存的 LLM 客户端失败（不影响退出）: %s", e)
     await Tortoise.close_connections()
 
 

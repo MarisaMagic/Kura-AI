@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     REDIS_CACHE_TTL_SECONDS: int = 300
     # 智能体对话异步 Job（刷新后可重连 SSE）在 Redis 中的 TTL（秒）
     CHAT_JOB_TTL_SECONDS: int = 86400
+    # Job 到达终态（完成/取消/失败）后的 TTL（秒）：只需覆盖断线重连与迟到追更，远小于 running 期
+    CHAT_JOB_DONE_TTL_SECONDS: int = 3600
+    # 流式生成中取消标记的实查最小间隔（秒）：chunk 级检查仅在到点时才真正读 Redis
+    CHAT_CANCEL_CHECK_INTERVAL: float = 0.25
     # 对话生成接口（/chat、/chat/stream、/chat/jobs）按用户限流：每分钟最多次数，0=关闭
     CHAT_RATE_LIMIT_PER_MINUTE: int = 20
     # 单条用户消息字符上限（防超长输入刷 token 成本）
@@ -213,6 +217,8 @@ class Settings(BaseSettings):
     LLM_HTTP_WRITE_TIMEOUT: float = 30.0
     LLM_HTTP_POOL_TIMEOUT: float = 10.0
     LLM_MAX_INFLIGHT: int = 8
+    # 并发闸门排队等待上限（秒）：超时将任务置为 failed，避免前端无限静默等待
+    LLM_QUEUE_TIMEOUT_SECONDS: float = 120.0
 
     # RAG：可选单独指定打分模型；未设置则与智能体对话模型相同
     RAG_GRADE_MODEL: typing.Optional[str] = None

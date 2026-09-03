@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Callable
 from functools import partial
 from typing import Any, AsyncIterator
@@ -16,8 +17,6 @@ from langchain_core.messages import (
     AIMessageChunk,
     BaseMessage,
     HumanMessage,
-    SystemMessage,
-    ToolMessage,
 )
 
 from app.chat.attachment_service import build_storable_human_content, format_attachment_hint
@@ -54,7 +53,7 @@ from app.utils.api_key_crypto import decrypt_api_key_safe
 
 
 from app.chat.agent_prompt import (
-    _WEB_SEARCH_DISCIPLINE,
+    _WEB_SEARCH_DISCIPLINE,  # noqa: F401  （tests 经由本模块引用此常量）
     _agent_invoke_config,
     _append_turn_context_message,
     _compose_system_prompt,
@@ -594,6 +593,35 @@ def chat_with_agent_sync(
     }
 
 
+def _throttled_cancel_check(
+    cancel_check: Callable[[], bool] | None,
+) -> Callable[[], Any] | None:
+    """
+    取消检查节流包装：流式循环按 chunk 频率调用本函数，但实际读 Redis（线程跳转）
+    最多每 CHAT_CANCEL_CHECK_INTERVAL 秒一次，期间返回上次结果。
+    一旦观察到取消则永久为真（取消不可逆）。
+    """
+    if cancel_check is None:
+        return None
+    interval = max(0.05, float(getattr(settings, "CHAT_CANCEL_CHECK_INTERVAL", 0.25) or 0.25))
+    state = {"last_at": 0.0, "flag": False}
+
+    async def _probe() -> bool:
+        if state["flag"]:
+            return True
+        now = time.monotonic()
+        if now - state["last_at"] < interval:
+            return False
+        state["last_at"] = now
+        try:
+            state["flag"] = bool(await asyncio.to_thread(cancel_check))
+        except Exception:
+            state["flag"] = False
+        return state["flag"]
+
+    return _probe
+
+
 async def iter_chat_stream_events(
     ua: UserAgent,
     user_text: str,
@@ -625,6 +653,8 @@ async def iter_chat_stream_events(
     :return: 异步迭代器
     """
     attachment_ids = attachment_ids or []
+    # 节流后的取消探测：chunk 级调用不再每块都打 Redis
+    cancel_probe = _throttled_cancel_check(cancel_check)
 
     # 清空 RAG 上下文, 重置工具调用守卫
     get_last_rag_context(clear=True)
@@ -817,7 +847,7 @@ async def iter_chat_stream_events(
                     agent_id=agent_id,
                     session_id=session_id,
                 ):
-                    if cancel_check and await asyncio.to_thread(cancel_check):
+                    if cancel_probe is not None and await cancel_probe():
                         get_last_rag_context(clear=True)
                         get_pending_mcp_confirmations(clear=True)
                         set_rag_step_queue(None)
@@ -873,7 +903,7 @@ async def iter_chat_stream_events(
 
     # 预流式阶段（KB 预选 / MCP 加载 / 记忆准备）完成后、启动生成前检查一次取消标记，
     # 使用户在阻塞阶段点击停止也能即时生效（此时用户消息已落库，与流式中取消行为一致）
-    if cancel_check and await asyncio.to_thread(cancel_check):
+    if cancel_probe is not None and await cancel_probe():
         get_last_rag_context(clear=True)
         get_pending_mcp_confirmations(clear=True)
         set_rag_step_queue(None)
@@ -895,7 +925,7 @@ async def iter_chat_stream_events(
                 stream_mode="messages",
                 config=_agent_invoke_config(),
             ):
-                if cancel_check and await asyncio.to_thread(cancel_check):
+                if cancel_probe is not None and await cancel_probe():
                     cancelled_externally = True
                     break
                 if not isinstance(msg, AIMessageChunk):
@@ -969,10 +999,10 @@ async def iter_chat_stream_events(
     # 取消看门狗：周期轮询取消标记，命中即中断生成任务。
     # 覆盖工具执行等无 chunk 流出的阶段（chunk 循环内的取消检查在这些阶段不会被触发）
     async def _cancel_watchdog() -> None:
-        if not cancel_check:
+        if cancel_probe is None:
             return
         while not agent_task.done():
-            if await asyncio.to_thread(cancel_check):
+            if await cancel_probe():
                 agent_task.cancel()
                 return
             await asyncio.sleep(0.3)

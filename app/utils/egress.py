@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import socket
+import threading
+from collections import OrderedDict
 from typing import Iterable
 
 import anyio
-import httpcore
 import httpx
 from httpcore._backends.anyio import AnyIOStream
 from httpcore._backends.auto import AutoBackend
@@ -214,11 +215,70 @@ def llm_http_timeout() -> httpx.Timeout:
     )
 
 
+# 进程级 LLM 客户端注册表：同一 base_url 复用 (sync, async) httpx 客户端，
+# 避免每次 init_chat_model 都新建连接池（9 处调用点）。api_key 由 OpenAI SDK
+# 每请求注入，共享客户端安全；经核实 OpenAI/LangChain 均无 __del__/close 钩子，
+# 不会在使用中关闭共享客户端。
+_LLM_CLIENT_CACHE: OrderedDict[str, tuple[httpx.Client, httpx.AsyncClient]] = OrderedDict()
+_LLM_CLIENT_CACHE_LOCK = threading.Lock()
+_LLM_CLIENT_CACHE_MAX = 64
+
+
+def _build_pinned_llm_clients(base_url: str) -> tuple[httpx.Client, httpx.AsyncClient]:
+    return build_pinned_clients(base_url, timeout=llm_http_timeout())
+
+
+def get_or_build_pinned_llm_clients(base_url: str) -> tuple[httpx.Client, httpx.AsyncClient]:
+    key = base_url
+    with _LLM_CLIENT_CACHE_LOCK:
+        cached = _LLM_CLIENT_CACHE.get(key)
+        if cached is not None:
+            _LLM_CLIENT_CACHE.move_to_end(key)
+            return cached
+    # 建连（含 DNS 校验）放在锁外，避免阻塞其它调用
+    sync_client, async_client = _build_pinned_llm_clients(base_url)
+    with _LLM_CLIENT_CACHE_LOCK:
+        # 双重检查：并发下可能已有其它线程插入同一 key
+        cached = _LLM_CLIENT_CACHE.get(key)
+        if cached is not None:
+            _LLM_CLIENT_CACHE.move_to_end(key)
+            try:
+                sync_client.close()
+            except Exception:
+                pass
+            # 未启用的 AsyncClient 无活跃连接，交给 GC 回收即可
+            return cached
+        _LLM_CLIENT_CACHE[key] = (sync_client, async_client)
+        _LLM_CLIENT_CACHE.move_to_end(key)
+        while len(_LLM_CLIENT_CACHE) > _LLM_CLIENT_CACHE_MAX:
+            _, (old_sync, _old_async) = _LLM_CLIENT_CACHE.popitem(last=False)
+            try:
+                old_sync.close()
+            except Exception:
+                pass
+    return sync_client, async_client
+
+
+async def close_pinned_llm_clients() -> None:
+    """关停时统一关闭缓存的 LLM 客户端（挂到 lifespan 收尾）。"""
+    with _LLM_CLIENT_CACHE_LOCK:
+        items = list(_LLM_CLIENT_CACHE.values())
+        _LLM_CLIENT_CACHE.clear()
+    for sync_client, async_client in items:
+        try:
+            sync_client.close()
+        except Exception:
+            pass
+        try:
+            await async_client.aclose()
+        except Exception:
+            pass
+
+
 def pinned_llm_client_kwargs(base_url: str | None) -> dict:
     if not base_url:
         return {}
-    timeout = llm_http_timeout()
-    sync_client, async_client = build_pinned_clients(base_url, timeout=timeout)
+    sync_client, async_client = get_or_build_pinned_llm_clients(base_url)
     return {"http_client": sync_client, "http_async_client": async_client}
 
 

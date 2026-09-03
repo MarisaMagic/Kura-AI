@@ -18,7 +18,6 @@ from app.kb.milvus_client import (
     MilvusManager,
     _normalize_content_type,
     filename_in_filter_expr,
-    kb_filter_expr,
     milvus_escape,
 )
 from app.kb.parent_chunk_store import ParentChunkStore
@@ -28,6 +27,9 @@ from app.utils.egress import pinned_llm_client_kwargs
 _multimodal_embedding_service = get_multimodal_embedding_service()
 _milvus_manager = MilvusManager()
 _parent_chunk_store = ParentChunkStore()
+
+# rerank 复用连接池的模块级 Session（替代每次一次性 requests.post）
+_rerank_session = requests.Session()
 
 # 以文检索时 document_filenames 白名单条数上限（与智能体选档方案一致）
 KB_MAX_DOCUMENT_FILTER = 10
@@ -409,7 +411,7 @@ def _rerank_documents(
     timeout = max(5, int(getattr(settings, "RERANK_TIMEOUT_SECONDS", 15) or 15))
     try:
         meta["rerank_applied"] = True
-        response = requests.post(meta["rerank_endpoint"], headers=headers, json=payload, timeout=timeout)
+        response = _rerank_session.post(meta["rerank_endpoint"], headers=headers, json=payload, timeout=timeout)
         if response.status_code >= 400:
             meta["rerank_error"] = f"HTTP {response.status_code}: {response.text[:500]}"
             return _fallback_by_vector_score()

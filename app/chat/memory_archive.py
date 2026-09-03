@@ -15,10 +15,10 @@ from app.chat.memory_turns import group_turn_pairs, split_system_prefix
 from app.chat.milvus_memory import get_chat_memory_milvus
 from app.chat.message_codec import msg_content_to_str
 from app.chat.storage import storage
-
-_META_ARCHIVED_TURN_KEYS = "memory_archived_turn_keys"
 from app.kb.multimodal_embedding import get_multimodal_embedding_service
 from app.settings import settings
+
+_META_ARCHIVED_TURN_KEYS = "memory_archived_turn_keys"
 
 
 def _milvus_text_cap() -> int:
@@ -127,14 +127,22 @@ def path_turn_keys_for_session(user_id: int, agent_id: int, session_id: str) -> 
 
 
 def archived_turn_keys_on_path(
-    user_id: int, agent_id: int, session_id: str, path_turn_keys: list[int] | None = None
+    user_id: int,
+    agent_id: int,
+    session_id: str,
+    path_turn_keys: list[int] | None = None,
+    meta: dict | None = None,
 ) -> list[int]:
-    """已归档且落在当前路径上的 turn_key 列表（会话记忆检索的允许集合）。"""
+    """已归档且落在当前路径上的 turn_key 列表（会话记忆检索的允许集合）。
+
+    :param meta: 调用方已读取的会话元数据；缺省则自行查库（同一轮内可透传避免重复查询）。
+    """
     if path_turn_keys is None:
         path_turn_keys = path_turn_keys_for_session(user_id, agent_id, session_id)
     if not path_turn_keys:
         return []
-    meta = storage.get_session_metadata(user_id, agent_id, session_id)
+    if meta is None:
+        meta = storage.get_session_metadata(user_id, agent_id, session_id)
     archived = {int(k) for k in (meta.get(_META_ARCHIVED_TURN_KEYS) or [])}
     return [k for k in path_turn_keys if k in archived]
 
@@ -165,13 +173,14 @@ def archive_session_memory(user_id: int, agent_id: int, session_id: str) -> None
 
     from app.chat.compact import verbatim_keep_from_for_session
 
+    # 会话元数据一次读取后在归档链路内透传，避免重复查库
+    meta = storage.get_session_metadata(user_id, agent_id, session_id)
     keep_from = verbatim_keep_from_for_session(
-        user_id, agent_id, session_id, path_turn_keys=path_turn_keys
+        user_id, agent_id, session_id, path_turn_keys=path_turn_keys, meta=meta
     )
     if keep_from <= 0:
         return
 
-    meta = storage.get_session_metadata(user_id, agent_id, session_id)
     archived = {int(k) for k in (meta.get(_META_ARCHIVED_TURN_KEYS) or [])}
     # 仅归档已离开原文窗口、且未按 turn_key 归档过的轮次
     pending = [

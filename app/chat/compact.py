@@ -107,11 +107,16 @@ def verbatim_keep_from_for_session(
     session_id: str,
     turn_count: int | None = None,
     path_turn_keys: list[int] | None = None,
+    meta: dict | None = None,
 ) -> int:
-    """当前原文窗口起始轮次（不含已压缩轮）。给出路径 turn_key 时按分支前缀匹配，否则按旧下标。"""
-    from app.chat.storage import storage
+    """当前原文窗口起始轮次（不含已压缩轮）。给出路径 turn_key 时按分支前缀匹配，否则按旧下标。
 
-    meta = storage.get_session_metadata(user_id, agent_id, session_id)
+    :param meta: 调用方已读取的会话元数据；缺省则自行查库（同一轮内可透传避免重复查询）。
+    """
+    if meta is None:
+        from app.chat.storage import storage
+
+        meta = storage.get_session_metadata(user_id, agent_id, session_id)
     if path_turn_keys is not None:
         _, covered = match_compact_state(load_compact_states(meta, path_turn_keys), path_turn_keys)
         if turn_count is not None:

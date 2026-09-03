@@ -17,6 +17,8 @@ from app.controllers.user_agent import user_agent_controller
 from app.settings import settings
 
 _llm_inflight_sem: asyncio.Semaphore | None = None
+# 正在等待并发闸门的 Job 数（仅用于排队提示，不参与调度）
+_llm_inflight_waiting: int = 0
 
 
 def _llm_inflight() -> asyncio.Semaphore:
@@ -25,6 +27,11 @@ def _llm_inflight() -> asyncio.Semaphore:
         n = max(1, int(getattr(settings, "LLM_MAX_INFLIGHT", 8) or 8))
         _llm_inflight_sem = asyncio.Semaphore(n)
     return _llm_inflight_sem
+
+
+def _queue_timeout() -> float:
+    """并发闸门排队等待上限（秒），超时置任务失败而非无限静默排队。"""
+    return max(1.0, float(getattr(settings, "LLM_QUEUE_TIMEOUT_SECONDS", 120) or 120))
 
 
 def _meta_key(job_id: str) -> str:
@@ -124,22 +131,23 @@ def _ttl() -> int:
     return int(getattr(settings, "CHAT_JOB_TTL_SECONDS", 86400))
 
 
-async def _touch_meta_ttl(job_id: str) -> None:
-    """
-    更新 Job 元数据和事件的过期时间
-    """
-    t = _ttl()
-    await asyncio.to_thread(cache.expire, _meta_key(job_id), t)
-    await asyncio.to_thread(cache.expire, _events_key(job_id), t)
+def _done_ttl() -> int:
+    """Job 终态后的过期时间：只需覆盖断线重连与迟到追更，远小于 running 期。"""
+    return int(getattr(settings, "CHAT_JOB_DONE_TTL_SECONDS", 3600) or 3600)
 
 
 async def _append_event(job_id: str, seq: int, data: dict[str, Any]) -> None:
     """
-    追加 Job 事件
+    追加 Job 事件：RPUSH + meta/events 双 EXPIRE 经单次 Lua 往返完成。
     """
-    wrapped = {"seq": seq, "data": data}
-    await asyncio.to_thread(cache.rpush_json, _events_key(job_id), wrapped)
-    await _touch_meta_ttl(job_id)
+    wrapped = json.dumps({"seq": seq, "data": data}, ensure_ascii=False)
+    await asyncio.to_thread(
+        cache.append_event_atomic,
+        _events_key(job_id),
+        _meta_key(job_id),
+        wrapped,
+        _ttl(),
+    )
 
 
 async def create_chat_job(
@@ -241,7 +249,23 @@ async def _run_chat_job(
             return
 
         user_cancelled = False
-        async with _llm_inflight():
+        gate = _llm_inflight()
+        global _llm_inflight_waiting
+        # 闸门已满时先给前端一条排队事件（含等待人数），避免 running 状态下长时间零反馈
+        if gate.locked():
+            await _append_event(job_id, seq, {"type": "queued", "waiting": _llm_inflight_waiting + 1})
+            seq += 1
+        _llm_inflight_waiting += 1
+        acquired = False
+        try:
+            try:
+                await asyncio.wait_for(gate.acquire(), timeout=_queue_timeout())
+                acquired = True
+            except asyncio.TimeoutError:
+                await _append_event(job_id, seq, {"type": "error", "content": "服务繁忙，排队等待超时，请稍后重试"})
+                seq += 1
+                await _finish_meta(job_id, status="failed", error="排队等待超时")
+                return
             async for ev in iter_chat_stream_events(
                 ua,
                 message,
@@ -260,6 +284,10 @@ async def _run_chat_job(
                 seq += 1
                 if ev.get("type") == "done" and ev.get("cancelled"):
                     user_cancelled = True
+        finally:
+            _llm_inflight_waiting -= 1
+            if acquired:
+                gate.release()
 
         if user_cancelled:
             await _finish_meta(job_id, status="cancelled", error=None)
@@ -281,14 +309,16 @@ async def _run_chat_job(
 
 async def _finish_meta(job_id: str, *, status: str, error: str | None) -> None:
     """
-    完成任务
+    完成任务：终态后改用较短的 done TTL，避免事件列表在 Redis 中留存 24h。
     """
     meta = await asyncio.to_thread(cache.get_json, _meta_key(job_id))
     if not isinstance(meta, dict):
         meta = {"job_id": job_id}
     meta["status"] = status
     meta["error"] = error
-    await asyncio.to_thread(cache.set_json, _meta_key(job_id), meta, _ttl())
+    ttl = _done_ttl()
+    await asyncio.to_thread(cache.set_json, _meta_key(job_id), meta, ttl)
+    await asyncio.to_thread(cache.expire, _events_key(job_id), ttl)
     await asyncio.to_thread(cache.delete, _cancel_key(job_id))
 
 
@@ -311,18 +341,22 @@ async def iter_job_sse_events(
     """
     # 从 Redis 列表下标 since_seq 起追更直至任务结束
     next_idx = max(0, since_seq)
+    # 空闲退避：有事件时保持 40ms 低延迟，持续空转时逐倍放宽到 0.3s，降低挂起连接的 Redis 底噪
+    idle_delay = 0.04
     # 循环直到任务结束
     while True:
-        # 从 Redis 列表下标 next_idx 起获取一条数据
-        chunk = await asyncio.to_thread(cache.lrange_str, _events_key(job_id), next_idx, next_idx)
+        # 批量取事件（下标即 seq，since_seq 续传语义不变）
+        chunk = await asyncio.to_thread(cache.lrange_str, _events_key(job_id), next_idx, next_idx + 63)
         if chunk:
-            try:
-                wrapped = json.loads(chunk[0])
-                data = wrapped.get("data") or {}
-                yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
-            except Exception:
-                pass
-            next_idx += 1
+            idle_delay = 0.04
+            for raw in chunk:
+                try:
+                    wrapped = json.loads(raw)
+                    data = wrapped.get("data") or {}
+                    yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                except Exception:
+                    pass
+                next_idx += 1
             continue
 
         meta = await asyncio.to_thread(cache.get_json, _meta_key(job_id))
@@ -332,7 +366,8 @@ async def iter_job_sse_events(
         if st != "running":
             break
         # 短轮询：在 Job 仍 running 且暂无新事件时等待；间隔过大会导致 SSE 观感像“整段输出”
-        await asyncio.sleep(0.04)
+        await asyncio.sleep(idle_delay)
+        idle_delay = min(idle_delay * 2, 0.3)
 
     yield "data: [DONE]\n\n"
 

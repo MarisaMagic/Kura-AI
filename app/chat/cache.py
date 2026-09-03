@@ -106,6 +106,35 @@ class RedisCache:
             logger.warning("Redis delete_if_job_matches 失败 key={}: {}", key, e)
             return False
 
+    # RPUSH + 双 EXPIRE（事件列表 + Job meta）合并为单次 Lua 往返，
+    # 替代原先每条事件 3 次串行 Redis 命令的写放大
+    _APPEND_EVENT_LUA = """
+    redis.call('RPUSH', KEYS[1], ARGV[1])
+    redis.call('EXPIRE', KEYS[1], ARGV[2])
+    redis.call('EXPIRE', KEYS[2], ARGV[2])
+    return 1
+    """
+
+    def append_event_atomic(self, events_key: str, meta_key: str, payload_json: str, ttl: int) -> bool:
+        """
+        原子追加 Job 事件：一次往返完成事件入队与 meta/events 双 TTL 刷新。
+        :param payload_json: 已序列化的 {"seq":..,"data":..} JSON 字符串
+        :return: 写入成功返回 True
+        """
+        try:
+            self._get_client().eval(
+                self._APPEND_EVENT_LUA,
+                2,
+                self._key(events_key),
+                self._key(meta_key),
+                payload_json,
+                str(int(ttl)),
+            )
+            return True
+        except Exception as e:
+            logger.warning("Redis append_event_atomic 失败 key={}: {}", events_key, e)
+            return False
+
     def rpush_json(self, key: str, value: Any) -> int:
         """列表尾部追加 JSON 元素，返回列表长度。"""
         try:
