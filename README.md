@@ -284,7 +284,7 @@ docker compose -f docker-compose.prod.yml logs -f backend
 
 相关文件：`deploy/Dockerfile.backend`、`deploy/Dockerfile.frontend`、`deploy/nginx.conf`、`docker-compose.prod.yml`。
 
-已弃用能力与过渡说明见 [`docs/deprecations.md`](docs/deprecations.md)。
+数据库结构/数据补丁：启动时自动应用版本化补丁（见 [`app/core/schema_patches.py`](app/core/schema_patches.py)，按 `schema_patch_log` 表去重）。
 
 ---
 

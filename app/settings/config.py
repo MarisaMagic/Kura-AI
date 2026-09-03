@@ -342,7 +342,7 @@ class Settings(BaseSettings):
             "connections": {"default": _tortoise_pg_url(self.admin_database_url)},
             "apps": {
                 "models": {
-                    "models": ["app.models", "aerich.models"],
+                    "models": ["app.models"],
                     "default_connection": "default",
                 },
             },

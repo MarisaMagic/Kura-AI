@@ -24,6 +24,7 @@ from app.schemas.menus import MenuType
 from app.settings.config import settings
 
 from .middlewares import BackGroundTaskMiddleware, HttpAuditLogMiddleware, SecurityHeadersMiddleware
+from .schema_patches import apply_schema_patches
 
 
 def make_middlewares():
@@ -200,151 +201,15 @@ async def init_apis():
 
 
 async def init_db():
-    # 直接按当前模型建表（IF NOT EXISTS，幂等）。aerich 已弃用（见 docs/deprecations.md）；
-    # 本地 migrations/ 为 SQLite 时代产物，在 PostgreSQL 上不可执行。
-    # 新增列由下方 ensure_* 幂等补丁兜底（尚无版本化迁移）。
+    # 直接按当前模型建表（IF NOT EXISTS，幂等）。aerich 已弃用；
+    # 结构/数据补丁统一走版本化 schema_patches（按 schema_patch_log 去重、逐次启动追加）。
     await Tortoise.init(config=settings.TORTOISE_ORM)
     # 列级补丁须先于 generate_schemas 执行：它会为带 description 的新列生成 COMMENT ON COLUMN
     # （PG 无 IF EXISTS），旧库缺列时直接报错，事后补丁来不及兜底。
-    # 全新库上表尚不存在，ALTER 失败由 ensure 内 try/except 吞掉，随后由建表覆盖新列。
-    await ensure_user_agent_sub_llm_columns()
-    await ensure_user_token_version_column()
+    # 全新库上表尚不存在，补丁内 ALTER 失败会被记录为未应用（下次启动重试），随后由建表覆盖新列。
+    await apply_schema_patches(before_schemas=True)
     await Tortoise.generate_schemas(safe=True)
-    await ensure_user_avatar_column()
-    await ensure_user_agent_base_url_column()
-    await ensure_user_agent_supports_vision_column()
-    await ensure_user_agent_is_published_column()
-    await ensure_user_agent_share_table()
-    await ensure_user_agent_mcp_confirm_policy_column()
-
-
-async def ensure_user_token_version_column() -> None:
-    """旧库补 token_version，供 refresh 吊销。"""
-    try:
-        conn = Tortoise.get_connection("default")
-        await conn.execute_query(
-            'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "token_version" INT NOT NULL DEFAULT 0'
-        )
-    except Exception as e:
-        logger.warning("ensure_user_token_version_column: %s", e)
-
-
-async def ensure_user_avatar_column() -> None:
-    """旧库可能缺少 avatar 列；aerich 未覆盖时补齐。"""
-    try:
-        conn = Tortoise.get_connection("default")
-        await conn.execute_query(
-            'ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "avatar" VARCHAR(255)'
-        )
-    except Exception as e:
-        logger.warning("ensure_user_avatar_column: %s", e)
-
-
-async def ensure_user_agent_base_url_column() -> None:
-    """旧库可能缺少 base_url 列；aerich 未覆盖时补齐。"""
-    try:
-        conn = Tortoise.get_connection("default")
-        await conn.execute_query(
-            'ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "base_url" VARCHAR(512)'
-        )
-    except Exception as e:
-        logger.warning("ensure_user_agent_base_url_column: %s", e)
-
-
-async def ensure_user_agent_supports_vision_column() -> None:
-    """旧库可能缺少 supports_vision 列；aerich 未覆盖时补齐。"""
-    try:
-        conn = Tortoise.get_connection("default")
-        await conn.execute_query(
-            'ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "supports_vision" BOOL NOT NULL DEFAULT FALSE'
-        )
-    except Exception as e:
-        logger.warning("ensure_user_agent_supports_vision_column: %s", e)
-
-
-async def ensure_user_agent_is_published_column() -> None:
-    """旧库可能缺少 is_published 列；aerich 未覆盖时补齐。"""
-    try:
-        conn = Tortoise.get_connection("default")
-        await conn.execute_query(
-            'ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "is_published" BOOL NOT NULL DEFAULT FALSE'
-        )
-    except Exception as e:
-        logger.warning("ensure_user_agent_is_published_column: %s", e)
-
-
-async def ensure_user_agent_share_table() -> None:
-    """旧库可能缺少 user_agent_share 表；aerich 未覆盖时补齐。"""
-    try:
-        conn = Tortoise.get_connection("default")
-        await conn.execute_query(
-            '''CREATE TABLE IF NOT EXISTS "user_agent_share" (
-    "id" BIGSERIAL PRIMARY KEY,
-    "created_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "agent_id" BIGINT NOT NULL REFERENCES "user_agent" ("id") ON DELETE CASCADE,
-    "user_id" BIGINT NOT NULL REFERENCES "user" ("id") ON DELETE CASCADE
-)'''
-        )
-        await conn.execute_query(
-            'CREATE INDEX IF NOT EXISTS "idx_user_agent_share_agent" ON "user_agent_share" ("agent_id")'
-        )
-        await conn.execute_query(
-            'CREATE INDEX IF NOT EXISTS "idx_user_agent_share_user" ON "user_agent_share" ("user_id")'
-        )
-        await conn.execute_query(
-            'CREATE UNIQUE INDEX IF NOT EXISTS "uid_user_agent_share_agent_user" ON "user_agent_share" ("agent_id", "user_id")'
-        )
-    except Exception as e:
-        logger.warning("ensure_user_agent_share_table: %s", e)
-
-
-async def ensure_user_agent_mcp_confirm_policy_column() -> None:
-    """旧库可能缺少 confirm_policy 列；aerich 未覆盖时补齐。"""
-    try:
-        conn = Tortoise.get_connection("default")
-        await conn.execute_query(
-            "ALTER TABLE \"user_agent_mcp_server\" ADD COLUMN IF NOT EXISTS \"confirm_policy\" VARCHAR(16) NOT NULL DEFAULT 'auto'"
-        )
-    except Exception as e:
-        logger.warning("ensure_user_agent_mcp_confirm_policy_column: %s", e)
-
-
-async def ensure_user_agent_sub_llm_columns() -> None:
-    """旧库可能缺少子智能体（打杂模型）配置列；aerich 未覆盖时补齐。"""
-    try:
-        conn = Tortoise.get_connection("default")
-        await conn.execute_query(
-            'ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "sub_model_name" VARCHAR(100)'
-        )
-        await conn.execute_query(
-            'ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "sub_base_url" VARCHAR(512)'
-        )
-        await conn.execute_query(
-            'ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "sub_api_key_ciphertext" TEXT'
-        )
-    except Exception as e:
-        logger.warning("ensure_user_agent_sub_llm_columns: %s", e)
-
-
-async def ensure_readonly_mcp_preset_confirm_policy() -> None:
-    """已知只读 MCP 预置的存量 auto 配置收紧为 never，避免 Context7 等查询服务被误拦。"""
-    try:
-        from app.mcp_client.presets import MCP_SERVER_PRESETS
-        from app.models.user_agent_mcp import UserAgentMcpServer
-
-        readonly_urls = [p["url"] for p in MCP_SERVER_PRESETS if p.get("confirm_policy") == "never"]
-        if not readonly_urls:
-            return
-        updated = await UserAgentMcpServer.filter(confirm_policy="auto", url__in=readonly_urls).update(
-            confirm_policy="never"
-        )
-        if updated:
-            logger.info("已将 %d 个只读 MCP 预置服务的 confirm_policy 调整为 never", updated)
-    except Exception as e:
-        logger.warning("ensure_readonly_mcp_preset_confirm_policy: %s", e)
-
-
+    await apply_schema_patches(before_schemas=False)
 async def ensure_agent_menus():
     """智能体：一级菜单「智能体中心」；创建/编辑为全屏路由，不在侧栏。"""
     legacy = await Menu.filter(path="/agents", parent_id=0).first()
@@ -437,7 +302,6 @@ async def restrict_normal_role_api_grants():
 
 async def init_data():
     await init_db()
-    await ensure_readonly_mcp_preset_confirm_policy()
     await init_superuser()
     await init_menus()
     await ensure_agent_menus()

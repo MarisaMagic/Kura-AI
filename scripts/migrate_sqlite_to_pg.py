@@ -1,7 +1,7 @@
 """一次性迁移：管理端 SQLite (db.sqlite3) -> PostgreSQL，保留原主键 ID。
 
 前置：先启动一次后端（`python run.py` 或 Docker 后端容器），让 Tortoise
-`generate_schemas` + 启动期幂等补丁在目标库建好表结构（aerich 已弃用，见 docs/deprecations.md）。
+`generate_schemas` + 版本化 schema 补丁（`app/core/schema_patches.py`）在目标库建好表结构。
 
 用法（开发机，数据库服务已由 docker compose 拉起）：
     python scripts/migrate_sqlite_to_pg.py --source db.sqlite3
