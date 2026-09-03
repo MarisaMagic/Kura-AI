@@ -16,7 +16,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from loguru import logger
 
 from app.kb.multimodal_embedding import get_multimodal_embedding_service
-from app.settings import settings
 
 
 def _filename_fingerprint(filename: str) -> str:
@@ -232,11 +231,7 @@ class MultimodalDocumentLoader:
             # 遍历每一页
             for page_num in range(len(doc)):
                 page = doc[page_num]
-                
-                # 获取页面尺寸
-                page_rect = page.rect
-                page_height = page_rect.height
-                
+
                 # 获取页面上的所有图片
                 image_list = page.get_images(full=True)
                 
@@ -384,7 +379,7 @@ class MultimodalDocumentLoader:
                                 with Image.open(image_path) as img:
                                     width, height = img.size
                                     img_format = img.format.lower() if img.format else "png"
-                            except:
+                            except Exception:
                                 width, height = 0, 0
                                 img_format = "png"
                             

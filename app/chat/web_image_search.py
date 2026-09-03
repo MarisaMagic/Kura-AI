@@ -149,10 +149,12 @@ _VL_RETRY_MAX_IMAGES = 3
 _MD_ALT_UNSAFE_RE = re.compile(r"[\[\]()!`\\]")
 _MD_ALT_WS_RE = re.compile(r"\s+")
 
-from app.chat.web_search_providers import (
+from app.chat.web_search_providers import (  # noqa: E402
     _bocha_api_key,
-    _web_search_proxy,
+    _normalize_ddgs_region,
     _normalize_site,
+    _resolve_ddgs_backend,
+    _web_search_proxy,
 )
 
 def _is_https_url(url: str) -> bool:

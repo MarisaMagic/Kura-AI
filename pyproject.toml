@@ -1,0 +1,23 @@
+[project]
+name = "kura-ai"
+version = "0.1.0"
+description = "Kura-AI 后端（配置仅用于 ruff 等工具；依赖见 requirements.txt）"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["RAG_test", "migrations", "web"]
+
+[tool.ruff.lint]
+select = ["E", "F"]
+# E501：行长与现状对齐，不强制；F403/F405：api/schemas/models 既有的 star-import 模式，暂不改造
+ignore = ["E501", "F403", "F405"]
+
+[tool.ruff.lint.per-file-ignores]
+# 联网搜索子系统为紧耦合的再导出（facade）链：
+# agent_service/测试从 web_search_tool 统一导入，后者再从 image_search/providers/rerank 汇聚。
+# 这些"未使用导入"实为对外再导出，F401 误删会破坏导入链，故按文件豁免。
+"app/chat/web_search_tool.py" = ["F401"]
+"app/chat/web_search_rerank.py" = ["F401"]
+"app/chat/web_image_search.py" = ["F401"]

@@ -72,7 +72,7 @@ _FRESHNESS_INTENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 FreshnessLiteral = Literal["noLimit", "oneDay", "oneWeek", "oneMonth", "oneYear"]
 
-from app.chat.web_search_providers import (
+from app.chat.web_search_providers import (  # noqa: E402
     _bocha_api_key,
     _format_published,
     _web_search_proxy,

@@ -17,7 +17,6 @@ from app.chat.database import SessionLocal
 from app.chat.db_models import KbDocument, KbParentChunk
 from app.core import object_storage as obs
 from app.kb.image_store import get_image_store
-from app.kb.kb_scope import kb_scope_for
 from app.kb.milvus_client import MilvusManager, milvus_escape
 from app.kb.multimodal_document_loader import MultimodalDocumentLoader, _filename_fingerprint
 from app.kb.multimodal_milvus_writer import MultimodalMilvusWriter

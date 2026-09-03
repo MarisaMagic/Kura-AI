@@ -172,8 +172,7 @@ def retrieve_initial(state: RAGState) -> RAGState:
     """
     query = state["question"] # 用户问题
     kb_scope = state["kb_scope"] # 当前智能体检索的知识库范围
-    llm_config = state["llm_config"] # 模型配置
-    
+
     # 从状态中获取是否包含图片的配置，默认为 True
     include_images = state.get("include_images", True)
     document_filenames = state.get("document_filenames")

@@ -166,6 +166,7 @@ def _redirect_target(resp: httpx.Response) -> str | None:
 
 
 def _request_with_proxy(url: str, timeout: float) -> httpx.Response:
+    # 每次调用新建客户端（未复用连接池）：搜索读页频率低（≤2 次/轮），暂不优化
     proxy = _proxy()
     with httpx.Client(
         timeout=timeout,
@@ -178,6 +179,7 @@ def _request_with_proxy(url: str, timeout: float) -> httpx.Response:
 
 
 def _request_pinned(url: str, timeout: float) -> httpx.Response:
+    # 每次调用新建 pinned 客户端（未复用连接池）：搜索读页频率低（≤2 次/轮），暂不优化
     client = build_pinned_sync_client(url, timeout=timeout)
     try:
         return client.get(url, headers=_READ_HEADERS)

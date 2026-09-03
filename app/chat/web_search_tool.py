@@ -72,7 +72,7 @@ _FRESHNESS_INTENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 FreshnessLiteral = Literal["noLimit", "oneDay", "oneWeek", "oneMonth", "oneYear"]
 
-from app.chat.web_image_search import (
+from app.chat.web_image_search import (  # noqa: E402
     _is_https_url,
     _safe_page_url,
     _normalize_image_url,
@@ -109,7 +109,7 @@ from app.chat.web_image_search import (
     _merge_image_web_sources,
     make_web_image_search_tool,
 )
-from app.chat.web_search_providers import (
+from app.chat.web_search_providers import (  # noqa: E402
     _web_search_proxy,
     _bocha_api_key,
     _normalize_ddgs_region,
@@ -134,7 +134,7 @@ from app.chat.web_search_providers import (
     _run_searches,
     _format_result_block,
 )
-from app.chat.web_search_rerank import (
+from app.chat.web_search_rerank import (  # noqa: E402
     _rerank_enabled,
     _build_rerank_document,
     _parse_rerank_results,

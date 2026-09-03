@@ -82,7 +82,7 @@ def run_kb_document_preselect(
     if len(names) == 1:
         meta["reason"] = "single_document_autopick"
         meta["resolved_file_keys"] = names
-        emit_rag_step("📂", "知识库选档", f"仅 1 份文档，自动限定")
+        emit_rag_step("📂", "知识库选档", "仅 1 份文档，自动限定")
         return [names[0]], meta
 
     # 选择模型，用于选档时调用。

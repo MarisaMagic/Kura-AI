@@ -13,32 +13,12 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import urlparse
 
-from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field, field_validator
 
-from app.chat.tools import (
-    _set_last_rag_context,
-    emit_rag_step,
-    fetch_url_disabled_this_turn_msg,
-    get_last_rag_context,
-    is_web_search_allowed_this_turn,
-    log_kb_tool_return_to_terminal,
-    try_acquire_fetch_url_tool_slot,
-    try_acquire_web_image_search_tool_slot,
-    try_acquire_web_search_tool_slot,
-    web_image_search_disabled_this_turn_msg,
-    web_search_disabled_this_turn_msg,
-)
-from app.chat.web_search_authority import apply_authority_ranking, authority_score, registrable_domain
-from app.chat.web_search_reader import fetch_page, read_top_pages
 from app.settings import settings
-from app.utils.content_guard import guard_untrusted_content
-from app.utils.ssrf import is_safe_http_page_url, is_safe_https_image_url
 
 logger = logging.getLogger(__name__)
 

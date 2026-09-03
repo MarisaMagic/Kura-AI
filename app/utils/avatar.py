@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.settings import settings
 from app.utils.signed_media import KIND_USER_AVATAR, sign_media_url
 
 ALLOWED_AVATAR_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}

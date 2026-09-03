@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    name: backend (tests + ruff)
+    runs-on: ubuntu-latest
+    env:
+      # 测试套件零外部依赖：不启动 PostgreSQL/Redis/Milvus。
+      # 仅 settings 导入需要这两个变量（引擎惰性创建，不会真正建连）。
+      SECRET_KEY: ci-only-secret-key-for-tests-0123456789abcdef
+      DATABASE_URL: postgresql+psycopg://ci:ci@127.0.0.1:5432/ci_db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install ruff
+      - name: Lint (ruff)
+        run: ruff check app scripts
+      - name: Run tests
+        run: python -m unittest discover -s tests -t .
+
+  frontend:
+    name: frontend (lint + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint (eslint)
+        run: pnpm lint
+      - name: Build
+        run: pnpm build

@@ -241,7 +241,7 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
             if not is_editor_preview_session(session_id):
                 await touch_recent_agent(user_id, request.agent_id)
         # 如果发生异常，则返回错误信息
-        except Exception as e:
+        except Exception:
             logger.exception("chat_stream_endpoint failed")
             err = {"type": "error", "content": "对话生成失败，请稍后重试"}
             yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
