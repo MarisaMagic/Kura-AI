@@ -124,7 +124,7 @@ python-magic==0.4.27
 python-multipart==0.0.20
 python-oxmsg==0.0.2
 pytz==2024.2
-pywin32==312
+pywin32==312; sys_platform == 'win32'
 PyYAML==6.0.2
 RapidFuzz==3.14.5
 redis==7.4.0
