@@ -1,10 +1,14 @@
 import 'virtual:svg-icons-register'
 
-/** 离线注册 iconify 图标，避免运行时请求 api.iconify.design（文件由 predev/prebuild 生成） */
+/**
+ * 离线注册 iconify 图标，避免运行时请求 api.iconify.design（文件由 predev/prebuild 生成）。
+ * 动态导入：~1MB 图标集合不进主 chunk 关键路径，集合加载完成后 Iconify 组件自动补渲染。
+ */
 import { addCollection } from '@iconify/vue'
-import offlineIconCollections from '@/assets/js/offline-icons'
 
-offlineIconCollections.forEach((collection) => addCollection(collection))
+import('@/assets/js/offline-icons').then((mod) => {
+  mod.default.forEach((collection) => addCollection(collection))
+})
 
 /** 重置样式 */
 import '@/styles/reset.css'

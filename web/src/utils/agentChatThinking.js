@@ -87,3 +87,16 @@ export function lastThinkingStepLabel(m) {
   }
   return ''
 }
+
+/**
+ * 思考胶囊文案：排队提示 > 最近工具步骤 > 思考中 / 思考结束。
+ * @param {object} m 消息行（含 pending / queuedWaiting / thinkingItems）
+ * @param {Function} t vue-i18n 的 $t
+ */
+export function thinkingPillLabel(m, t) {
+  if (m?.pending && m.queuedWaiting) {
+    return t('views.agents.chat_feed_queued', { n: m.queuedWaiting })
+  }
+  if (m?.pending) return lastThinkingStepLabel(m) || t('views.agents.chat_feed_thinking')
+  return t('views.agents.chat_feed_thinking_done')
+}

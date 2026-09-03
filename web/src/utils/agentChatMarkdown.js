@@ -200,7 +200,12 @@ function isSafeChatHref(url) {
   if (!host || BLOCKED_CHAT_HOSTS.has(host) || host.endsWith('.localhost')) return false
   if (isLiteralIpHost(host)) {
     // 来源页允许公网字面量 IP，禁止回环/私网形态（与后端页面校验一致：只拦明显内网）
-    if (host.includes(':') || host === '127.0.0.1' || host.startsWith('127.') || host === '0.0.0.0') {
+    if (
+      host.includes(':') ||
+      host === '127.0.0.1' ||
+      host.startsWith('127.') ||
+      host === '0.0.0.0'
+    ) {
       return false
     }
     if (/^(10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[0-1])\.)/.test(host)) return false

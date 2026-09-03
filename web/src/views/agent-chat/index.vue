@@ -2,96 +2,92 @@
   <AppPage :show-footer="false" scroll-in-parent class="agent-chat-page !p-0">
     <div class="agent-chat-layout">
       <n-spin :show="pageLoading" class="agent-chat-spin">
-          <div v-if="loadError" class="agent-chat-error">
-            {{ $t('views.agents.chat_error_load_agent') }}
-          </div>
-          <template v-else>
-            <div class="agent-chat-main">
+        <div v-if="loadError" class="agent-chat-error">
+          {{ $t('views.agents.chat_error_load_agent') }}
+        </div>
+        <template v-else>
+          <div class="agent-chat-main">
             <div
               ref="bodyScrollRef"
               class="agent-chat-body"
               :class="{ 'agent-chat-body--feed': sessionPhase === 'chat' }"
               @scroll.passive="onBodyScroll"
             >
-            <transition name="agent-chat-fade">
-              <div v-if="sessionPhase === 'intro'" key="intro" class="agent-chat-intro">
-                <n-avatar
-                  round
-                  :size="120"
-                  :src="agentAvatarSrc"
-                  object-fit="cover"
-                  class="agent-chat-intro-avatar"
-                />
-                <h2 class="agent-chat-intro-name">{{ agent?.name }}</h2>
-                <p class="agent-chat-intro-sub">{{ introDescription }}</p>
-                <p class="agent-chat-intro-creator">
-                  <TheIcon icon="mdi:account-outline" :size="16" />
-                  <span>{{ $t('views.agents.chat_label_creator') }} · {{ creatorName }}</span>
-                </p>
-                <div
-                  v-if="hasIntroOpeningText"
-                  class="agent-chat-intro-opening"
-                >
-                  <n-spin v-if="introOpeningRunning && !introOpeningDisplayed" size="small" />
-                  <div
-                    v-else-if="introOpeningDisplayed"
-                    class="agent-chat-intro-opening-md agent-chat-md"
-                    v-html="renderAgentChatMarkdown(introOpeningDisplayed)"
+              <transition name="agent-chat-fade">
+                <div v-if="sessionPhase === 'intro'" key="intro" class="agent-chat-intro">
+                  <n-avatar
+                    round
+                    :size="120"
+                    :src="agentAvatarSrc"
+                    object-fit="cover"
+                    class="agent-chat-intro-avatar"
                   />
+                  <h2 class="agent-chat-intro-name">{{ agent?.name }}</h2>
+                  <p class="agent-chat-intro-sub">{{ introDescription }}</p>
+                  <p class="agent-chat-intro-creator">
+                    <TheIcon icon="mdi:account-outline" :size="16" />
+                    <span>{{ $t('views.agents.chat_label_creator') }} · {{ creatorName }}</span>
+                  </p>
+                  <div v-if="hasIntroOpeningText" class="agent-chat-intro-opening">
+                    <n-spin v-if="introOpeningRunning && !introOpeningDisplayed" size="small" />
+                    <div
+                      v-else-if="introOpeningDisplayed"
+                      class="agent-chat-md agent-chat-intro-opening-md"
+                      v-html="renderAgentChatMarkdown(introOpeningDisplayed)"
+                    />
+                  </div>
                 </div>
+              </transition>
+
+              <div v-if="sessionPhase === 'chat'" class="agent-chat-feed agent-chat-feed--virtual">
+                <ChatMessageList
+                  ref="messageListRef"
+                  :messages="messages"
+                  :chat-agent-id="chatAgentId"
+                  :session-id="sessionId"
+                  :agent-avatar-src="agentAvatarSrc"
+                  :agent-name="agent?.name || '—'"
+                  :sending="sending"
+                  :switching-branch="switchingBranch"
+                  :confirming-mcp-ids="confirmingMcpIds"
+                  @toggle-thinking="toggleThinking"
+                  @mcp-approve="approveMcpConfirmation"
+                  @md-click="onAgentMdClick"
+                  @switch-version="switchAssistantVersion"
+                  @regenerate="regenerateAssistant"
+                  @copy-plain="copyAssistantPlain"
+                  @copy-md="copyAssistantMarkdown"
+                  @scroll="onBodyScroll"
+                />
               </div>
-            </transition>
-
-            <div v-if="sessionPhase === 'chat'" class="agent-chat-feed agent-chat-feed--virtual">
-              <ChatMessageList
-                ref="messageListRef"
-                :messages="messages"
-                :chat-agent-id="chatAgentId"
-                :session-id="sessionId"
-                :agent-avatar-src="agentAvatarSrc"
-                :agent-name="agent?.name || '—'"
-                :sending="sending"
-                :switching-branch="switchingBranch"
-                :confirming-mcp-ids="confirmingMcpIds"
-                @toggle-thinking="toggleThinking"
-                @mcp-approve="approveMcpConfirmation"
-                @md-click="onAgentMdClick"
-                @switch-version="switchAssistantVersion"
-                @regenerate="regenerateAssistant"
-                @copy-plain="copyAssistantPlain"
-                @copy-md="copyAssistantMarkdown"
-                @scroll="onBodyScroll"
-              />
             </div>
-
-          </div>
-          <div class="agent-chat-toolbar">
-            <div class="agent-chat-toolbar-fade"></div>
-            <div class="agent-chat-toolbar-inner">
-              <n-button size="small" round quaternary @click="restartChat">
-                <template #icon>
-                  <TheIcon icon="mdi:plus-circle-outline" :size="18" />
-                </template>
-                {{ $t('views.agents.chat_button_restart') }}
-              </n-button>
-              <span v-if="showGoBottomButton" class="agent-chat-toolbar-go">
-                <n-tooltip :show-arrow="false" placement="top-end">
-                  <template #trigger>
-                    <n-button
-                      quaternary
-                      circle
-                      size="small"
-                      :aria-label="$t('views.agents.chat_go_bottom')"
-                      @click="() => scrollBodyToBottom(true, { force: true })"
-                    >
-                      <TheIcon icon="mdi:chevron-double-down" :size="20" />
-                    </n-button>
+            <div class="agent-chat-toolbar">
+              <div class="agent-chat-toolbar-fade"></div>
+              <div class="agent-chat-toolbar-inner">
+                <n-button size="small" round quaternary @click="restartChat">
+                  <template #icon>
+                    <TheIcon icon="mdi:plus-circle-outline" :size="18" />
                   </template>
-                  {{ $t('views.agents.chat_go_bottom') }}
-                </n-tooltip>
-              </span>
+                  {{ $t('views.agents.chat_button_restart') }}
+                </n-button>
+                <span v-if="showGoBottomButton" class="agent-chat-toolbar-go">
+                  <n-tooltip :show-arrow="false" placement="top-end">
+                    <template #trigger>
+                      <n-button
+                        quaternary
+                        circle
+                        size="small"
+                        :aria-label="$t('views.agents.chat_go_bottom')"
+                        @click="() => scrollBodyToBottom(true, { force: true })"
+                      >
+                        <TheIcon icon="mdi:chevron-double-down" :size="20" />
+                      </n-button>
+                    </template>
+                    {{ $t('views.agents.chat_go_bottom') }}
+                  </n-tooltip>
+                </span>
+              </div>
             </div>
-          </div>
           </div>
 
           <footer class="agent-chat-footer">
@@ -104,7 +100,11 @@
                     class="agent-chat-file-box agent-chat-file-box--pending"
                     :title="f.name"
                   >
-                    <TheIcon :icon="chatAttachmentIcon(f)" :size="18" class="agent-chat-file-box-icon" />
+                    <TheIcon
+                      :icon="chatAttachmentIcon(f)"
+                      :size="18"
+                      class="agent-chat-file-box-icon"
+                    />
                     <span class="agent-chat-file-box-name">{{ f.name }}</span>
                     <button
                       type="button"
@@ -153,7 +153,9 @@
                       size="small"
                       @update:value="onKbToggle"
                     />
-                    <span class="agent-chat-kb-toggle-label">{{ $t('views.agents.chat_kb_retrieval') }}</span>
+                    <span class="agent-chat-kb-toggle-label">{{
+                      $t('views.agents.chat_kb_retrieval')
+                    }}</span>
                   </div>
                   <div class="agent-chat-kb-toggle">
                     <n-switch
@@ -162,14 +164,20 @@
                       size="small"
                       @update:value="onWebToggle"
                     />
-                    <span class="agent-chat-kb-toggle-label">{{ $t('views.agents.chat_web_search') }}</span>
+                    <span class="agent-chat-kb-toggle-label">{{
+                      $t('views.agents.chat_web_search')
+                    }}</span>
                   </div>
                   <n-button
                     :type="sending ? 'warning' : 'primary'"
                     circle
                     class="agent-chat-send"
                     :disabled="!sending && sendDisabled"
-                    :title="sending ? $t('views.agents.chat_button_stop') : $t('views.agents.chat_button_send')"
+                    :title="
+                      sending
+                        ? $t('views.agents.chat_button_stop')
+                        : $t('views.agents.chat_button_send')
+                    "
                     @click="sending ? stopActiveChatGeneration() : submitMessage()"
                   >
                     <TheIcon :icon="sending ? 'mdi:stop' : 'mdi:arrow-up'" :size="20" />
@@ -641,9 +649,7 @@ async function submitMessage() {
   const userMsg = {
     id: `u-${Date.now()}`,
     role: 'user',
-    content:
-      rawInput ||
-      (attachmentIds.length ? t('views.agents.chat_msg_attachment_only') : ''),
+    content: rawInput || (attachmentIds.length ? t('views.agents.chat_msg_attachment_only') : ''),
     attachments: attachmentsForDisplay.length ? attachmentsForDisplay : undefined,
   }
 
@@ -1435,11 +1441,21 @@ html.dark .agent-chat-user-text {
 .agent-chat-toolbar-fade {
   position: absolute;
   inset: 0;
-  background: linear-gradient(to bottom, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.85) 45%, #ffffff 75%);
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.85) 45%,
+    #ffffff 75%
+  );
 }
 
 html.dark .agent-chat-toolbar-fade {
-  background: linear-gradient(to bottom, rgba(24, 24, 28, 0) 0%, rgba(24, 24, 28, 0.85) 45%, #18181c 75%);
+  background: linear-gradient(
+    to bottom,
+    rgba(24, 24, 28, 0) 0%,
+    rgba(24, 24, 28, 0.85) 45%,
+    #18181c 75%
+  );
 }
 
 .agent-chat-toolbar-inner {
@@ -1888,8 +1904,8 @@ html.dark .agent-chat-md :deep(a) {
 }
 
 .agent-chat-md :deep(code) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
-    monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
 }
 
 .agent-chat-md :deep(pre code) {

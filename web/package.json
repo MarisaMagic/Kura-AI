@@ -50,7 +50,7 @@
   },
   "lint-staged": {
     "*.{js,vue}": [
-      "eslint --ext .js,.vue ."
+      "eslint"
     ]
   },
   "eslintConfig": {

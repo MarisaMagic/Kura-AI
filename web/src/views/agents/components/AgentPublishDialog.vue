@@ -2,7 +2,11 @@
   <n-modal
     :show="show"
     preset="card"
-    :title="mode === 'publish' ? $t('views.agents.publish_dialog_title_publish') : $t('views.agents.publish_dialog_title_manage')"
+    :title="
+      mode === 'publish'
+        ? $t('views.agents.publish_dialog_title_publish')
+        : $t('views.agents.publish_dialog_title_manage')
+    "
     style="width: 560px"
     :mask-closable="false"
     @update:show="onUpdateShow"
@@ -35,7 +39,13 @@
             @click="toggleUser(u)"
             @keydown.enter.prevent="toggleUser(u)"
           >
-            <n-avatar round :size="32" :src="u.avatar" object-fit="cover" class="publish-user-avatar" />
+            <n-avatar
+              round
+              :size="32"
+              :src="u.avatar"
+              object-fit="cover"
+              class="publish-user-avatar"
+            />
             <div class="publish-user-text">
               <span class="publish-user-name">{{ displayName(u) }}</span>
               <span class="publish-user-email">{{ u.email }}</span>
@@ -86,7 +96,11 @@
           :disabled="mode === 'publish' && !selectedMap.size"
           @click="onConfirm"
         >
-          {{ mode === 'publish' ? $t('views.agents.publish_confirm') : $t('views.agents.publish_save') }}
+          {{
+            mode === 'publish'
+              ? $t('views.agents.publish_confirm')
+              : $t('views.agents.publish_save')
+          }}
         </n-button>
       </div>
     </template>

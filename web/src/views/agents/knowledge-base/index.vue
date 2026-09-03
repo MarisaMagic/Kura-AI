@@ -69,19 +69,10 @@
             >
               <n-upload-dragger>
                 <div class="agent-kb-drop-inner">
-                  <TheIcon
-                    icon="mdi:cloud-upload-outline"
-                    :size="36"
-                    class="agent-kb-drop-icon"
-                  />
+                  <TheIcon icon="mdi:cloud-upload-outline" :size="36" class="agent-kb-drop-icon" />
                   <div class="agent-kb-drop-title">{{ $t('views.agents.kb_upload_drop') }}</div>
                   <div class="agent-kb-drop-formats">
-                    <n-tag
-                      v-for="fmt in uploadFormats"
-                      :key="fmt"
-                      size="tiny"
-                      :bordered="false"
-                    >
+                    <n-tag v-for="fmt in uploadFormats" :key="fmt" size="tiny" :bordered="false">
                       {{ fmt }}
                     </n-tag>
                   </div>
@@ -114,7 +105,10 @@
                     @click="detailOpen = !detailOpen"
                   >
                     {{ $t('views.agents.kb_detail_toggle') }}
-                    <TheIcon :icon="detailOpen ? 'mdi:chevron-up' : 'mdi:chevron-down'" :size="16" />
+                    <TheIcon
+                      :icon="detailOpen ? 'mdi:chevron-up' : 'mdi:chevron-down'"
+                      :size="16"
+                    />
                   </button>
                 </div>
               </div>
@@ -139,11 +133,7 @@
                       <span class="agent-kb-task-name" :title="task.filename">{{
                         task.filename
                       }}</span>
-                      <n-tag
-                        size="tiny"
-                        :type="taskStatusMeta(task).type"
-                        :bordered="false"
-                      >
+                      <n-tag size="tiny" :type="taskStatusMeta(task).type" :bordered="false">
                         {{ taskStatusMeta(task).label }}
                       </n-tag>
                     </div>
@@ -429,7 +419,11 @@ const sortedPendingFiles = computed(() =>
 )
 
 function extFromName(name) {
-  return (String(name || '').split('.').pop() || '').toLowerCase()
+  return (
+    String(name || '')
+      .split('.')
+      .pop() || ''
+  ).toLowerCase()
 }
 
 function fileKindKey(fileType, name) {

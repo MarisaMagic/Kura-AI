@@ -81,7 +81,7 @@ const methodOptions = [
 
 function formatJSON(data) {
   try {
-    return typeof data === 'string' 
+    return typeof data === 'string'
       ? JSON.stringify(JSON.parse(data), null, 2)
       : JSON.stringify(data, null, 2)
   } catch (e) {

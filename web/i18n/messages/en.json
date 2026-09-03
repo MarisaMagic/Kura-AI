@@ -262,6 +262,7 @@
       "chat_popover_kb_short": "Knowledge base",
       "chat_feed_ai_badge": "AI",
       "chat_feed_thinking": "Thinking…",
+      "chat_feed_queued": "Queued… (~{n} task(s) ahead)",
       "chat_feed_thinking_done": "Thinking finished",
       "chat_feed_thinking_placeholder": "No retrieval steps yet. Empty if the knowledge tool was not used.",
       "chat_thinking_text_label": "Thinking",

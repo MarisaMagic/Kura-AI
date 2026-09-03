@@ -10,7 +10,8 @@ export function chatAttachmentIcon(att) {
   if (kind === 'image' || mime.startsWith('image/')) return 'mdi:file-image-outline'
   if (kind === 'table' || mime.includes('spreadsheet') || /\.(csv|xlsx?|xls)$/i.test(name))
     return 'mdi:table-large'
-  if (kind === 'document' || mime === 'application/pdf' || /\.pdf$/i.test(name)) return 'mdi:file-pdf-box'
+  if (kind === 'document' || mime === 'application/pdf' || /\.pdf$/i.test(name))
+    return 'mdi:file-pdf-box'
   return 'mdi:file-document-outline'
 }
 
@@ -26,7 +27,9 @@ export function useChatComposer({ t }) {
   function onUploadChange(options) {
     const rawList = options.fileList || []
     if (rawList.length > MAX_CHAT_ATTACHMENTS) {
-      window.$message?.warning(t('views.agents.chat_attachments_limit', { n: MAX_CHAT_ATTACHMENTS }))
+      window.$message?.warning(
+        t('views.agents.chat_attachments_limit', { n: MAX_CHAT_ATTACHMENTS })
+      )
     }
     const fileList = rawList.slice(0, MAX_CHAT_ATTACHMENTS)
     pendingFiles.value = fileList.map((item) => {

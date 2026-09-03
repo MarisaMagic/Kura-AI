@@ -7,7 +7,7 @@
       </n-alert>
 
       <div v-if="!isPublished" class="publish-panel-row">
-        <n-button type="primary" :loading="acting" @click="dialogMode = 'publish'; dialogShow = true">
+        <n-button type="primary" :loading="acting" @click="openDialog('publish')">
           <template #icon>
             <TheIcon icon="material-symbols:publish-rounded" :size="18" />
           </template>
@@ -24,7 +24,7 @@
           </span>
         </div>
         <div class="publish-panel-actions">
-          <n-button secondary type="primary" :loading="acting" @click="dialogMode = 'manage'; dialogShow = true">
+          <n-button secondary type="primary" :loading="acting" @click="openDialog('manage')">
             <template #icon>
               <TheIcon icon="material-symbols:group-add-outline-rounded" :size="18" />
             </template>
@@ -96,6 +96,11 @@ async function loadShares() {
   } catch {
     shareUsers.value = []
   }
+}
+
+function openDialog(mode) {
+  dialogMode.value = mode
+  dialogShow.value = true
 }
 
 async function onOffline() {

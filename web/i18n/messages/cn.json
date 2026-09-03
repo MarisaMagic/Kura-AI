@@ -262,6 +262,7 @@
       "chat_popover_kb_short": "知识库",
       "chat_feed_ai_badge": "AI",
       "chat_feed_thinking": "思考中…",
+      "chat_feed_queued": "排队中…（前方约 {n} 个任务）",
       "chat_feed_thinking_done": "思考结束",
       "chat_feed_thinking_placeholder": "暂无检索步骤。若未使用知识库工具，此处可能为空。",
       "chat_thinking_text_label": "思考过程",

@@ -18,39 +18,41 @@
           {{ $t('views.agents.chat_error_load_agent') }}
         </div>
         <template v-else>
+          <div
+            v-if="sidebarSessions.length === 0"
+            class="layout-sider-history-placeholder layout-sider-history-placeholder--muted"
+          >
+            {{ $t('views.agents.chat_sidebar_empty') }}
+          </div>
+          <template v-else>
             <div
-              v-if="sidebarSessions.length === 0"
-              class="layout-sider-history-placeholder layout-sider-history-placeholder--muted"
+              v-for="s in sidebarSessions"
+              :key="sessionRowKey(s)"
+              class="layout-sider-history-session"
+              :class="{
+                'layout-sider-history-session--active': isSessionActive(s),
+                'layout-sider-history-session--enter': isNewlyAdded(s),
+                'layout-sider-history-session--menu-open': menuOpenKey === sessionRowKey(s),
+              }"
             >
-              {{ $t('views.agents.chat_sidebar_empty') }}
-            </div>
-            <template v-else>
-              <div
-                v-for="s in sidebarSessions"
-                :key="sessionRowKey(s)"
-                class="layout-sider-history-session"
-                :class="{
-                  'layout-sider-history-session--active': isSessionActive(s),
-                  'layout-sider-history-session--enter': isNewlyAdded(s),
-                  'layout-sider-history-session--menu-open': menuOpenKey === sessionRowKey(s),
-                }"
+              <button
+                type="button"
+                class="layout-sider-history-session-main"
+                :title="displayTitle(s)"
+                @click="openSession(s)"
               >
-                <button
-                  type="button"
-                  class="layout-sider-history-session-main"
-                  :title="displayTitle(s)"
-                  @click="openSession(s)"
-                >
-                  <span class="layout-sider-history-session-title">{{ displayTitle(s) }}</span>
-                  <span v-if="s.agent_name" class="layout-sider-history-session-meta">{{ s.agent_name }}</span>
-                </button>
-                <n-dropdown
-                  trigger="click"
-                  placement="bottom-end"
-                  :options="sessionMenuOptions"
-                  @update:show="(show) => onMenuDropdownShow(show, s)"
-                  @select="(key) => onMenuSelect(key, s)"
-                >
+                <span class="layout-sider-history-session-title">{{ displayTitle(s) }}</span>
+                <span v-if="s.agent_name" class="layout-sider-history-session-meta">{{
+                  s.agent_name
+                }}</span>
+              </button>
+              <n-dropdown
+                trigger="click"
+                placement="bottom-end"
+                :options="sessionMenuOptions"
+                @update:show="(show) => onMenuDropdownShow(show, s)"
+                @select="(key) => onMenuSelect(key, s)"
+              >
                 <n-button
                   quaternary
                   circle
@@ -138,7 +140,9 @@
                   @click="openSession(s)"
                 >
                   <span class="layout-sider-history-session-title">{{ displayTitle(s) }}</span>
-                  <span v-if="s.agent_name" class="layout-sider-history-session-meta">{{ s.agent_name }}</span>
+                  <span v-if="s.agent_name" class="layout-sider-history-session-meta">{{
+                    s.agent_name
+                  }}</span>
                 </button>
                 <n-dropdown
                   trigger="click"

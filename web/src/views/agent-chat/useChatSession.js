@@ -53,7 +53,8 @@ function readKbPreference(agentId, sid) {
 
 function writeKbPreference(agentId, sid, val) {
   try {
-    if (agentId && sid) sessionStorage.setItem(kbToggleStorageKey(agentId, sid), val ? 'true' : 'false')
+    if (agentId && sid)
+      sessionStorage.setItem(kbToggleStorageKey(agentId, sid), val ? 'true' : 'false')
   } catch {
     /* ignore */
   }
@@ -72,7 +73,8 @@ function readWebPreference(agentId, sid) {
 
 function writeWebPreference(agentId, sid, val) {
   try {
-    if (agentId && sid) sessionStorage.setItem(webToggleStorageKey(agentId, sid), val ? 'true' : 'false')
+    if (agentId && sid)
+      sessionStorage.setItem(webToggleStorageKey(agentId, sid), val ? 'true' : 'false')
   } catch {
     /* ignore */
   }

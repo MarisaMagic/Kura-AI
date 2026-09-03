@@ -60,13 +60,7 @@
                 @click="$emit('toggle-thinking', m)"
               >
                 <TheIcon icon="mdi:lightbulb-outline" :size="16" class="agent-chat-thinking-icon" />
-                <span>{{
-                  m.pending && lastThinkingStepLabel(m)
-                    ? lastThinkingStepLabel(m)
-                    : m.pending
-                      ? $t('views.agents.chat_feed_thinking')
-                      : $t('views.agents.chat_feed_thinking_done')
-                }}</span>
+                <span>{{ thinkingPillLabel(m, $t) }}</span>
                 <TheIcon
                   :icon="m.thinkingOpen ? 'mdi:chevron-up' : 'mdi:chevron-down'"
                   :size="18"
@@ -98,13 +92,13 @@
                     </div>
                   </template>
                 </div>
-                <p
-                  v-if="!m.thinkingItems?.length"
-                  class="agent-chat-thinking-placeholder"
-                >
+                <p v-if="!m.thinkingItems?.length" class="agent-chat-thinking-placeholder">
                   {{ $t('views.agents.chat_feed_thinking_placeholder') }}
                 </p>
-                <details v-if="m.ragTrace && Object.keys(m.ragTrace).length" class="agent-chat-rag-trace">
+                <details
+                  v-if="m.ragTrace && Object.keys(m.ragTrace).length"
+                  class="agent-chat-rag-trace"
+                >
                   <summary>{{ $t('views.agents.chat_thinking_trace_summary') }}</summary>
                   <div class="agent-chat-rag-trace-lines">
                     <div v-if="m.ragTrace.retrieval_mode" class="agent-chat-trace-line">
@@ -326,8 +320,12 @@ import { ref } from 'vue'
 import { NAvatar, NButton, NTooltip, NVirtualList } from 'naive-ui'
 import TheIcon from '@/components/icon/TheIcon.vue'
 import ChatAttachmentItem from './ChatAttachmentItem.vue'
-import { renderAgentChatMarkdown, safeExternalHref, toSameOriginMediaUrl } from '@/utils/agentChatMarkdown'
-import { lastThinkingStepLabel } from '@/utils/agentChatThinking'
+import {
+  renderAgentChatMarkdown,
+  safeExternalHref,
+  toSameOriginMediaUrl,
+} from '@/utils/agentChatMarkdown'
+import { thinkingPillLabel } from '@/utils/agentChatThinking'
 
 defineProps({
   messages: { type: Array, default: () => [] },

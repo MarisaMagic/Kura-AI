@@ -25,7 +25,9 @@
           <div class="mcp-server-main">
             <div class="mcp-server-title-row">
               <span class="mcp-server-name">{{ srv.name }}</span>
-              <n-tag size="tiny" :bordered="false" class="mcp-transport-tag">{{ srv.transport }}</n-tag>
+              <n-tag size="tiny" :bordered="false" class="mcp-transport-tag">{{
+                srv.transport
+              }}</n-tag>
               <n-tag v-if="!srv.enabled" size="tiny" type="warning" :bordered="false">
                 {{ $t('views.agents.mcp_disabled_tag') }}
               </n-tag>
@@ -80,7 +82,10 @@
     >
       <n-form label-placement="top" :show-require-mark="true">
         <n-form-item :label="$t('views.agents.mcp_form_name')" required>
-          <n-input v-model:value="editorForm.name" :placeholder="$t('views.agents.mcp_form_name_ph')" />
+          <n-input
+            v-model:value="editorForm.name"
+            :placeholder="$t('views.agents.mcp_form_name_ph')"
+          />
         </n-form-item>
         <n-form-item :label="$t('views.agents.mcp_form_url')" required>
           <n-input v-model:value="editorForm.url" placeholder="https://example.com/mcp" />
@@ -112,13 +117,23 @@
                 placeholder="Bearer ..."
                 class="mcp-header-value"
               />
-              <n-button size="tiny" quaternary type="error" @click="editorForm.headersList.splice(idx, 1)">
+              <n-button
+                size="tiny"
+                quaternary
+                type="error"
+                @click="editorForm.headersList.splice(idx, 1)"
+              >
                 <template #icon>
                   <TheIcon icon="mdi:close" :size="14" />
                 </template>
               </n-button>
             </div>
-            <n-button size="tiny" dashed block @click="editorForm.headersList.push({ key: '', value: '' })">
+            <n-button
+              size="tiny"
+              dashed
+              block
+              @click="editorForm.headersList.push({ key: '', value: '' })"
+            >
               <template #icon>
                 <TheIcon icon="mdi:plus" :size="14" />
               </template>

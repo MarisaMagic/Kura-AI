@@ -12,7 +12,13 @@ const baseApi = import.meta.env.VITE_BASE_API || '/api/v1'
 /**
  * 编辑器右侧预览试聊（独立 session，不写入 recent、不刷新侧栏）。
  */
-export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval, useWebSearch, t }) {
+export function useAgentPreviewChat({
+  agentId,
+  sessionId,
+  useKnowledgeRetrieval,
+  useWebSearch,
+  t,
+}) {
   const messages = ref([])
   const sessionPhase = ref('intro')
   const sending = ref(false)
@@ -50,11 +56,13 @@ export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval,
       // job_id 未知（创建请求在途被中断）：按会话兜底取消活动任务，避免孤儿任务阻塞后续对话
       try {
         await fetch(
-          `${baseApi}/user-agent/chat/active_job/cancel?agent_id=${aid}&session_id=${encodeURIComponent(sid)}`,
+          `${baseApi}/user-agent/chat/active_job/cancel?agent_id=${aid}&session_id=${encodeURIComponent(
+            sid
+          )}`,
           {
             method: 'POST',
             credentials: 'include',
-          headers: { token, 'Content-Type': 'application/json' },
+            headers: { token, 'Content-Type': 'application/json' },
           }
         )
       } catch {
@@ -78,7 +86,13 @@ export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval,
     sending.value = false
   }
 
-  async function postJobAndConsumeStream({ regenerate, message, attachmentIds, assistantIdx, mcpApprovedPendingId = null }) {
+  async function postJobAndConsumeStream({
+    regenerate,
+    message,
+    attachmentIds,
+    assistantIdx,
+    mcpApprovedPendingId = null,
+  }) {
     const aid = unref(agentId)
     const sid = unref(sessionId)
     const token = getToken()
@@ -124,7 +138,9 @@ export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval,
         jobId = errBody.detail?.existing_job_id
         if (!jobId) {
           throw new Error(
-            typeof errBody.detail === 'string' ? errBody.detail : errBody.detail?.message || '任务冲突'
+            typeof errBody.detail === 'string'
+              ? errBody.detail
+              : errBody.detail?.message || '任务冲突'
           )
         }
         const pj = readPreviewPendingJob(aid, sid)
@@ -147,11 +163,14 @@ export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval,
 
       activeJobId.value = jobId
 
-      const streamRes = await fetch(`${baseApi}/user-agent/chat/jobs/${jobId}/stream?since_seq=${startSeq}`, {
-        credentials: 'include',
-        headers: { token },
-        signal: ac.signal,
-      })
+      const streamRes = await fetch(
+        `${baseApi}/user-agent/chat/jobs/${jobId}/stream?since_seq=${startSeq}`,
+        {
+          credentials: 'include',
+          headers: { token },
+          signal: ac.signal,
+        }
+      )
 
       if (!streamRes.ok) {
         let detail = `HTTP ${streamRes.status}`
@@ -281,7 +300,9 @@ export function useAgentPreviewChat({ agentId, sessionId, useKnowledgeRetrieval,
         const row = messages.value[idx]
         messages.value[idx] = {
           ...row,
-          mcpConfirmations: (row.mcpConfirmations || []).filter((x) => x.pending_id !== item.pending_id),
+          mcpConfirmations: (row.mcpConfirmations || []).filter(
+            (x) => x.pending_id !== item.pending_id
+          ),
         }
       }
       if (approve && idx !== -1) {

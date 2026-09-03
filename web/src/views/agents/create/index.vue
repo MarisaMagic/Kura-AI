@@ -7,7 +7,9 @@
             <header class="agent-page-header">
               <h1 class="agent-page-title">{{ $t('views.agents.title_create_agent') }}</h1>
               <div class="agent-page-header-actions">
-                <n-button secondary @click="clearAllConfig">{{ $t('views.agents.button_clear_config') }}</n-button>
+                <n-button secondary @click="clearAllConfig">{{
+                  $t('views.agents.button_clear_config')
+                }}</n-button>
                 <n-button type="primary" :loading="saving" @click="handleSubmit">
                   {{ $t('views.agents.button_save_config') }}
                 </n-button>
@@ -122,7 +124,7 @@ function saveCreateDraft() {
   if (agentId.value) return
   const payload = {
     v: CREATE_DRAFT_VERSION,
-      form: { ...form.value, api_key: '', sub_api_key: '' },
+    form: { ...form.value, api_key: '', sub_api_key: '' },
     dialogueOpen: dialogueOpen.value,
     advancedOpen: advancedOpen.value,
     avatarDataUrl: draftAvatarDataUrl.value || null,
@@ -131,10 +133,7 @@ function saveCreateDraft() {
     sessionStorage.setItem(CREATE_DRAFT_KEY, JSON.stringify(payload))
   } catch {
     try {
-      sessionStorage.setItem(
-        CREATE_DRAFT_KEY,
-        JSON.stringify({ ...payload, avatarDataUrl: null })
-      )
+      sessionStorage.setItem(CREATE_DRAFT_KEY, JSON.stringify({ ...payload, avatarDataUrl: null }))
     } catch {
       /* ignore */
     }

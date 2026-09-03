@@ -105,12 +105,10 @@ export default {
     return fetch(`${base}/user-agent/chat/attachments/preview?${q}`, {
       credentials: 'include',
       headers,
-    }).then(
-      async (res) => {
-        if (!res.ok) throw new Error(String(res.status))
-        return res.blob()
-      }
-    )
+    }).then(async (res) => {
+      if (!res.ok) throw new Error(String(res.status))
+      return res.blob()
+    })
   },
   deleteAgentChatSession: ({ agent_id, session_id }) =>
     request.delete(`/user-agent/chat/sessions/${encodeURIComponent(session_id)}`, {

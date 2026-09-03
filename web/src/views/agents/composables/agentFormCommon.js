@@ -37,8 +37,16 @@ export function dataURLtoBlob(dataurl) {
 
 export function buildAgentFormRules(t, { isEdit = false, getForm = null } = {}) {
   const rules = {
-    name: { required: true, message: () => t('views.agents.rule_name'), trigger: ['input', 'blur'] },
-    model_name: { required: true, message: () => t('views.agents.rule_model_name'), trigger: ['input', 'blur'] },
+    name: {
+      required: true,
+      message: () => t('views.agents.rule_name'),
+      trigger: ['input', 'blur'],
+    },
+    model_name: {
+      required: true,
+      message: () => t('views.agents.rule_model_name'),
+      trigger: ['input', 'blur'],
+    },
   }
   if (!isEdit) {
     rules.api_key = {

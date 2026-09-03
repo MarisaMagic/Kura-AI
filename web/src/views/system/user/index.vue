@@ -398,11 +398,11 @@ const validateAddUser = {
       <h1>部门列表</h1>
       <br />
       <NTree
-        block-line
         :data="deptOption"
         key-field="id"
         label-field="name"
         default-expand-all
+        block-line
         :node-props="nodeProps"
       >
       </NTree>

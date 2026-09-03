@@ -37,7 +37,9 @@ export function attachmentsFromHistoryRow(row, t) {
     if (!b || typeof b !== 'object') continue
     if (b.type === 'image_ref') {
       out.push({
-        name: (b.filename && String(b.filename).trim()) || t('views.agents.chat_attachment_image_fallback'),
+        name:
+          (b.filename && String(b.filename).trim()) ||
+          t('views.agents.chat_attachment_image_fallback'),
         kind: 'image',
         mime: b.mime || '',
         attachmentId: b.attachment_id != null ? String(b.attachment_id) : '',

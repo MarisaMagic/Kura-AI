@@ -83,7 +83,9 @@ export function useChatMcpConfirm({
         const row = messages.value[idx]
         messages.value[idx] = {
           ...row,
-          mcpConfirmations: (row.mcpConfirmations || []).filter((x) => x.pending_id !== item.pending_id),
+          mcpConfirmations: (row.mcpConfirmations || []).filter(
+            (x) => x.pending_id !== item.pending_id
+          ),
         }
       }
       if (approve && idx !== -1) {

@@ -7,7 +7,6 @@ import TheIcon from '@/components/icon/TheIcon.vue'
 import AgentAvatarCropModal from '@/views/agents/components/AgentAvatarCropModal.vue'
 import { useUserStore } from '@/store'
 import api from '@/api'
-import { is } from '~/src/utils'
 
 const { t } = useI18n()
 const userStore = useUserStore()

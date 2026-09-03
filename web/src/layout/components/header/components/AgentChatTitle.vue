@@ -82,23 +82,32 @@
             {{ $t('views.agents.chat_popover_history_title') }}
           </div>
           <ul v-if="historyLoading" class="agent-chat-popover-history-list">
-            <li class="agent-chat-popover-history-placeholder">{{
-              $t('views.agents.chat_popover_history_loading')
-            }}</li>
+            <li class="agent-chat-popover-history-placeholder">
+              {{ $t('views.agents.chat_popover_history_loading') }}
+            </li>
           </ul>
           <ul v-else-if="historySessions.length === 0" class="agent-chat-popover-history-list">
             <li class="agent-chat-popover-history-placeholder">
               {{ $t('views.agents.chat_popover_history_empty') }}
             </li>
           </ul>
-          <ul v-else class="agent-chat-popover-history-list agent-chat-popover-history-list--scroll">
-            <li v-for="s in historySessions" :key="s.session_id" class="agent-chat-popover-history-item">
+          <ul
+            v-else
+            class="agent-chat-popover-history-list agent-chat-popover-history-list--scroll"
+          >
+            <li
+              v-for="s in historySessions"
+              :key="s.session_id"
+              class="agent-chat-popover-history-item"
+            >
               <button
                 type="button"
                 class="agent-chat-popover-history-item-main"
                 @click="openHistorySession(s.session_id)"
               >
-                <span class="agent-chat-popover-history-title-text">{{ displaySessionTitle(s) }}</span>
+                <span class="agent-chat-popover-history-title-text">{{
+                  displaySessionTitle(s)
+                }}</span>
                 <span class="agent-chat-popover-history-meta">{{ sessionMetaLine(s) }}</span>
               </button>
               <button

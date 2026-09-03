@@ -76,6 +76,7 @@ export function useChatJobStream({
         content: resumed ? data.content || '' : (row.content || '') + (data.content || ''),
         mcpExecuting: resumed ? false : row.mcpExecuting,
         pending: false,
+        queuedWaiting: undefined,
         thinkingOpen: row.thinkingOpen ?? false,
         ragTrace: row.ragTrace ?? null,
       }
@@ -87,12 +88,15 @@ export function useChatJobStream({
         thinkingItems: applyThinkingItem(cur.thinkingItems, item, !!data.append),
         thinkingOpen: true,
         pending: cur.pending,
+        queuedWaiting: undefined,
       }
       if (data.moved_from_content && item.type === 'text') {
         const text = item.text || ''
         const curContent = cur.content || ''
         patch.content =
-          text && curContent.endsWith(text) ? curContent.slice(0, curContent.length - text.length) : curContent
+          text && curContent.endsWith(text)
+            ? curContent.slice(0, curContent.length - text.length)
+            : curContent
         patch.pending = true
       }
       messages.value[idx] = patch
@@ -143,6 +147,14 @@ export function useChatJobStream({
         mcpConfirmations: list,
         pending: cur.pending,
       }
+    } else if (data.type === 'queued') {
+      // 并发闸门排队提示：生成开始前先收到该事件
+      const cur = messages.value[idx]
+      messages.value[idx] = {
+        ...cur,
+        queuedWaiting: Math.max(1, Number(data.waiting) || 1),
+        pending: true,
+      }
     } else if (data.type === 'done') {
       const row = messages.value[idx]
       messages.value[idx] = {
@@ -158,7 +170,7 @@ export function useChatJobStream({
     let buffer = ''
     let seq = initialSeq
 
-    while (true) {
+    for (;;) {
       let chunk
       try {
         chunk = await reader.read()
@@ -221,7 +233,9 @@ export function useChatJobStream({
     } else if (token && aid && sessionId.value) {
       try {
         await fetch(
-          `${baseApi}/user-agent/chat/active_job/cancel?agent_id=${aid}&session_id=${encodeURIComponent(sessionId.value)}`,
+          `${baseApi}/user-agent/chat/active_job/cancel?agent_id=${aid}&session_id=${encodeURIComponent(
+            sessionId.value
+          )}`,
           {
             method: 'POST',
             credentials: 'include',
@@ -300,7 +314,9 @@ export function useChatJobStream({
         jobId = errBody.detail?.existing_job_id
         if (!jobId) {
           throw new Error(
-            typeof errBody.detail === 'string' ? errBody.detail : errBody.detail?.message || '任务冲突'
+            typeof errBody.detail === 'string'
+              ? errBody.detail
+              : errBody.detail?.message || '任务冲突'
           )
         }
         const pj = readPendingChatJob(agentId, sessionId.value)
@@ -328,11 +344,14 @@ export function useChatJobStream({
 
       activeJobId.value = jobId
 
-      const streamRes = await fetch(`${baseApi}/user-agent/chat/jobs/${jobId}/stream?since_seq=${startSeq}`, {
-        credentials: 'include',
-        headers: { token },
-        signal: ac.signal,
-      })
+      const streamRes = await fetch(
+        `${baseApi}/user-agent/chat/jobs/${jobId}/stream?since_seq=${startSeq}`,
+        {
+          credentials: 'include',
+          headers: { token },
+          signal: ac.signal,
+        }
+      )
 
       if (!streamRes.ok) {
         let detail = `HTTP ${streamRes.status}`
@@ -456,7 +475,11 @@ export function useChatJobStream({
       const decoder = new TextDecoder()
       if (!reader) return
       await readChatJobSseStream(reader, decoder, idx, pj.job_id, agentId, sinceSeq)
-      if (pj.regenerate && !streamStoppedByUser.value && !messages.value[idx]?.mcpConfirmations?.length) {
+      if (
+        pj.regenerate &&
+        !streamStoppedByUser.value &&
+        !messages.value[idx]?.mcpConfirmations?.length
+      ) {
         await reloadSessionMessages(agentId)
       }
       await recentAgentsStore.touch(agentId)

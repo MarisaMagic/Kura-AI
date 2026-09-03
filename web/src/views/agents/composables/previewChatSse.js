@@ -48,6 +48,7 @@ export function applyPreviewChatSsePayload(data, messagesRef, idx) {
       content: resumed ? data.content || '' : (row.content || '') + (data.content || ''),
       mcpExecuting: resumed ? false : row.mcpExecuting,
       pending: false,
+      queuedWaiting: undefined,
       thinkingOpen: row.thinkingOpen ?? false,
       ragTrace: row.ragTrace ?? null,
     }
@@ -59,6 +60,7 @@ export function applyPreviewChatSsePayload(data, messagesRef, idx) {
       thinkingItems: applyThinkingItem(cur.thinkingItems, item, !!data.append),
       thinkingOpen: true,
       pending: cur.pending,
+      queuedWaiting: undefined,
     }
     if (data.moved_from_content && item.type === 'text') {
       const text = item.text || ''
@@ -115,6 +117,14 @@ export function applyPreviewChatSsePayload(data, messagesRef, idx) {
       mcpConfirmations: confirmations,
       pending: cur.pending,
     }
+  } else if (data.type === 'queued') {
+    // 并发闸门排队提示：生成开始前先收到该事件
+    const cur = list[idx]
+    list[idx] = {
+      ...cur,
+      queuedWaiting: Math.max(1, Number(data.waiting) || 1),
+      pending: true,
+    }
   } else if (data.type === 'done') {
     const row = list[idx]
     list[idx] = {
@@ -143,7 +153,7 @@ export async function readPreviewChatJobSseStream({
   let buffer = ''
   let seq = initialSeq
 
-  while (true) {
+  for (;;) {
     let chunk
     try {
       chunk = await reader.read()

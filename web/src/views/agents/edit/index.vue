@@ -7,7 +7,12 @@
             <header class="agent-page-header">
               <h1 class="agent-page-title">{{ $t('views.agents.title_edit_agent') }}</h1>
               <div class="agent-page-header-actions">
-                <n-button type="primary" :loading="saving" :disabled="pageLoading" @click="handleSubmit">
+                <n-button
+                  type="primary"
+                  :loading="saving"
+                  :disabled="pageLoading"
+                  @click="handleSubmit"
+                >
                   {{ $t('views.agents.button_save_config') }}
                 </n-button>
               </div>

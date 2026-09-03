@@ -1,4 +1,5 @@
 <template>
+  <!-- eslint-disable vue/no-mutating-props -- 见 <script setup> 顶部说明：form 为父组件传入的可编辑草稿对象契约 -->
   <n-form
     ref="formInnerRef"
     class="agent-form"
@@ -49,9 +50,16 @@
           <n-input v-model:value="form.name" :placeholder="$t('views.agents.placeholder_name')" />
         </n-form-item>
         <n-form-item path="model_name" :label="$t('views.agents.label_model_name')">
-          <n-input v-model:value="form.model_name" :placeholder="$t('views.agents.placeholder_model_name')" />
+          <n-input
+            v-model:value="form.model_name"
+            :placeholder="$t('views.agents.placeholder_model_name')"
+          />
         </n-form-item>
-        <n-form-item path="base_url" :label="$t('views.agents.label_base_url')" :show-require-mark="false">
+        <n-form-item
+          path="base_url"
+          :label="$t('views.agents.label_base_url')"
+          :show-require-mark="false"
+        >
           <n-input
             v-model:value="form.base_url"
             :placeholder="$t('views.agents.placeholder_base_url')"
@@ -63,15 +71,27 @@
             type="password"
             show-password-on="click"
             :placeholder="
-              hasSavedApiKey ? $t('views.agents.placeholder_api_key_edit') : $t('views.agents.placeholder_api_key')
+              hasSavedApiKey
+                ? $t('views.agents.placeholder_api_key_edit')
+                : $t('views.agents.placeholder_api_key')
             "
           />
         </n-form-item>
         <n-form-item :label="$t('views.agents.label_description')">
-          <n-input v-model:value="form.description" type="textarea" :rows="2" :placeholder="$t('views.agents.placeholder_description')" />
+          <n-input
+            v-model:value="form.description"
+            type="textarea"
+            :rows="2"
+            :placeholder="$t('views.agents.placeholder_description')"
+          />
         </n-form-item>
         <n-form-item :label="$t('views.agents.label_system_prompt')">
-          <n-input v-model:value="form.system_prompt" type="textarea" :rows="4" :placeholder="$t('views.agents.placeholder_system_prompt')" />
+          <n-input
+            v-model:value="form.system_prompt"
+            type="textarea"
+            :rows="4"
+            :placeholder="$t('views.agents.placeholder_system_prompt')"
+          />
         </n-form-item>
         <n-form-item :show-label="false" class="agent-enable-row-item">
           <div class="agent-enable-row">
@@ -102,7 +122,11 @@
         @keydown.enter.prevent="toggleDialogue"
       >
         <span class="section-header__title">{{ $t('views.agents.label_dialogue') }}</span>
-        <span class="section-header__chevron" :class="{ 'is-collapsed': !dialogueOpen }" aria-hidden="true">
+        <span
+          class="section-header__chevron"
+          :class="{ 'is-collapsed': !dialogueOpen }"
+          aria-hidden="true"
+        >
           <TheIcon icon="material-symbols:keyboard-arrow-down-rounded" :size="22" />
         </span>
       </header>
@@ -128,7 +152,11 @@
         @keydown.enter.prevent="toggleAdvanced"
       >
         <span class="section-header__title">{{ $t('views.agents.label_advanced') }}</span>
-        <span class="section-header__chevron" :class="{ 'is-collapsed': !advancedOpen }" aria-hidden="true">
+        <span
+          class="section-header__chevron"
+          :class="{ 'is-collapsed': !advancedOpen }"
+          aria-hidden="true"
+        >
           <TheIcon icon="material-symbols:keyboard-arrow-down-rounded" :size="22" />
         </span>
       </header>
@@ -143,7 +171,9 @@
               :tooltip="true"
               class="agent-temperature-slider"
             />
-            <span class="agent-temperature-value" aria-live="polite">{{ temperatureSliderLabel }}</span>
+            <span class="agent-temperature-value" aria-live="polite">{{
+              temperatureSliderLabel
+            }}</span>
           </div>
         </n-form-item>
       </div>
@@ -159,31 +189,49 @@
         @keydown.enter.prevent="subLlmOpen = !subLlmOpen"
       >
         <span class="section-header__title">{{ $t('views.agents.label_sub_llm') }}</span>
-        <span class="section-header__chevron" :class="{ 'is-collapsed': !subLlmOpen }" aria-hidden="true">
+        <span
+          class="section-header__chevron"
+          :class="{ 'is-collapsed': !subLlmOpen }"
+          aria-hidden="true"
+        >
           <TheIcon icon="material-symbols:keyboard-arrow-down-rounded" :size="22" />
         </span>
       </header>
       <div v-show="subLlmOpen" class="section-body">
         <div class="agent-sub-hint">{{ $t('views.agents.hint_sub_llm') }}</div>
-        <n-form-item path="sub_model_name" :label="$t('views.agents.label_sub_model_name')" :show-require-mark="false">
+        <n-form-item
+          path="sub_model_name"
+          :label="$t('views.agents.label_sub_model_name')"
+          :show-require-mark="false"
+        >
           <n-input
             v-model:value="form.sub_model_name"
             :placeholder="$t('views.agents.placeholder_sub_model_name')"
           />
         </n-form-item>
-        <n-form-item path="sub_base_url" :label="$t('views.agents.label_sub_base_url')" :show-require-mark="false">
+        <n-form-item
+          path="sub_base_url"
+          :label="$t('views.agents.label_sub_base_url')"
+          :show-require-mark="false"
+        >
           <n-input
             v-model:value="form.sub_base_url"
             :placeholder="$t('views.agents.placeholder_base_url')"
           />
         </n-form-item>
-        <n-form-item path="sub_api_key" :label="$t('views.agents.label_sub_api_key')" :show-require-mark="false">
+        <n-form-item
+          path="sub_api_key"
+          :label="$t('views.agents.label_sub_api_key')"
+          :show-require-mark="false"
+        >
           <n-input
             v-model:value="form.sub_api_key"
             type="password"
             show-password-on="click"
             :placeholder="
-              hasSubApiKey ? $t('views.agents.placeholder_api_key_edit') : $t('views.agents.placeholder_sub_api_key')
+              hasSubApiKey
+                ? $t('views.agents.placeholder_api_key_edit')
+                : $t('views.agents.placeholder_sub_api_key')
             "
           />
         </n-form-item>
@@ -191,12 +239,7 @@
           <n-button secondary size="small" :loading="subTesting" @click="onTestSubLlm">
             {{ $t('views.agents.button_test_sub_llm') }}
           </n-button>
-          <n-button
-            v-if="agentId && subCustomized"
-            tertiary
-            size="small"
-            @click="onResetSubLlm"
-          >
+          <n-button v-if="agentId && subCustomized" tertiary size="small" @click="onResetSubLlm">
             {{ $t('views.agents.button_reset_sub_llm') }}
           </n-button>
         </div>
@@ -229,9 +272,21 @@
 </template>
 
 <script setup>
+/* eslint-disable vue/no-mutating-props -- 父组件传入可编辑的草稿对象（form），子组件按字段 v-model 就地编辑属
+性，而非重新赋值 props 本身；改造为 emits 会让父组件 15+ 处绑定全部改写，属既有约定的组件契约。 */
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { NAlert, NButton, NForm, NFormItem, NImage, NInput, NSlider, NSwitch, NUpload } from 'naive-ui'
+import {
+  NAlert,
+  NButton,
+  NForm,
+  NFormItem,
+  NImage,
+  NInput,
+  NSlider,
+  NSwitch,
+  NUpload,
+} from 'naive-ui'
 import TheIcon from '@/components/icon/TheIcon.vue'
 import AgentAvatarCropModal from '@/views/agents/components/AgentAvatarCropModal.vue'
 import AgentPublishPanel from '@/views/agents/components/AgentPublishPanel.vue'
@@ -254,7 +309,12 @@ const props = defineProps({
   sharedCount: { type: Number, default: 0 },
 })
 
-const emit = defineEmits(['avatar-change', 'update:dialogueOpen', 'update:advancedOpen', 'publish-changed'])
+const emit = defineEmits([
+  'avatar-change',
+  'update:dialogueOpen',
+  'update:advancedOpen',
+  'publish-changed',
+])
 
 const formInnerRef = ref(null)
 const innerUploadKey = ref(0)
