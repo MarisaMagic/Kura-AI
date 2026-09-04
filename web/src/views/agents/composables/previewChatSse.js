@@ -134,9 +134,6 @@ export function applyPreviewChatSsePayload(data, messagesRef, idx) {
       stoppedByUser: data.cancelled ? true : row.stoppedByUser,
     }
   }
-  if (messagesRef.value) {
-    messagesRef.value = [...list]
-  }
 }
 
 export async function readPreviewChatJobSseStream({
@@ -194,7 +191,6 @@ export async function readPreviewChatJobSseStream({
     const list = messagesRef.value ?? messagesRef
     if (list[idx]?.pending) {
       list[idx] = { ...list[idx], pending: false }
-      if (messagesRef.value) messagesRef.value = [...list]
     }
   }
 }

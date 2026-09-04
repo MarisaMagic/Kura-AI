@@ -131,10 +131,9 @@ onUnmounted(() => {
 
 .agent-chat-attachment-thumb {
   display: block;
-  max-width: min(220px, 100%);
-  max-height: 200px;
-  width: auto;
-  height: auto;
+  width: 220px;
+  max-width: 100%;
+  height: 132px;
   border-radius: 10px;
   border: 1px solid #e5e7eb;
   object-fit: contain;
@@ -147,12 +146,23 @@ html.dark .agent-chat-attachment-thumb {
   background: rgba(255, 255, 255, 0.06);
 }
 
+/* 加载中与加载完成同盒：固定 220×132 框，图片就绪零位移 */
 .agent-chat-attachment-spinner {
-  min-height: 48px;
-  min-width: 48px;
+  width: 220px;
+  max-width: 100%;
+  height: 132px;
   display: flex;
   align-items: center;
   justify-content: center;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  background: #f9fafb;
+  box-sizing: border-box;
+}
+
+html.dark .agent-chat-attachment-spinner {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .agent-chat-file-box {

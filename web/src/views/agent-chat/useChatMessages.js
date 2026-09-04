@@ -121,9 +121,22 @@ export function useChatMessages({
     try {
       const res = await api.getAgentChatSessionMessages(agentId, sessionId.value)
       const rows = res.data?.messages || []
-      messages.value = rows.map(mapRow)
+      const list = rows.map(mapRow)
+      // 复用流式阶段的行 id：虚拟列表按 key 缓存行高与 DOM，
+      // id 不变则整表不 remount、滚动位置不动，用户展开的思考面板也保留
+      const prev = messages.value
+      list.forEach((row, i) => {
+        const old = prev[i]
+        if (!old || old.role !== row.role) return
+        row.id = old.id
+        if (old.thinkingOpen !== undefined && row.role === 'assistant') {
+          row.thinkingOpen = old.thinkingOpen
+        }
+      })
+      messages.value = list
       await nextTick()
-      scrollBodyToBottom(false, { force: true })
+      // 尊重粘底意图：流式期间上翻阅读的用户，完成后不再被强制拉回底部
+      scrollBodyToBottom()
     } catch (e) {
       console.warn('reload session messages:', e)
     }

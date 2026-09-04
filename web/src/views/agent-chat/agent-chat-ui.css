@@ -50,6 +50,7 @@ html.dark .agent-chat-spin .n-spin-body {
   background: #ffffff;
   scrollbar-width: thin;
   scrollbar-color: rgba(15, 23, 42, 0.14) transparent;
+  overflow-anchor: none;
 }
 
 html.dark .agent-chat-body {

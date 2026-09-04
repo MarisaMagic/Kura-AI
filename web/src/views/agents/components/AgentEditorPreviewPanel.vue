@@ -57,6 +57,18 @@
             <div
               v-for="m in messages"
               :key="m.id"
+              v-memo="[
+                m.content,
+                m.thinkingItems,
+                m.thinkingOpen,
+                m.pending,
+                m.queuedWaiting,
+                m.errorText,
+                m.stoppedByUser,
+                m.sources,
+                m.mcpConfirmations,
+                m.ragTrace,
+              ]"
               class="agent-chat-feed-item"
               :class="{ 'agent-chat-feed-item--user': m.role === 'user' }"
             >
@@ -105,7 +117,11 @@
                     <div v-show="m.thinkingOpen" class="agent-chat-thinking-panel">
                       <div v-if="m.thinkingItems?.length" class="agent-chat-thinking-steps">
                         <template v-for="(item, sIdx) in m.thinkingItems" :key="sIdx">
-                          <div v-if="item.type === 'step'" class="agent-chat-thinking-step-line">
+                          <div
+                            v-if="item.type === 'step'"
+                            v-memo="[item]"
+                            class="agent-chat-thinking-step-line"
+                          >
                             <span class="agent-chat-thinking-step-icon">{{
                               item.icon || '▸'
                             }}</span>
@@ -116,6 +132,7 @@
                           </div>
                           <div
                             v-else-if="item.type === 'text'"
+                            v-memo="[item]"
                             class="agent-chat-thinking-step-line agent-chat-thinking-step-line--text"
                           >
                             <span class="agent-chat-thinking-step-icon">💭</span>
@@ -297,7 +314,7 @@
 </template>
 
 <script setup>
-import { computed, ref, toRef, watch } from 'vue'
+import { computed, onUnmounted, ref, toRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { NAlert, NAvatar, NButton, NInput, NSpin, NSwitch } from 'naive-ui'
 import TheIcon from '@/components/icon/TheIcon.vue'
@@ -451,12 +468,41 @@ watch(
   () => scrollBodyToBottom()
 )
 
+// 最后一条消息内容变化时跟随滚动：预览面板非虚拟列表，
+// 节流至 ~100ms 一次，避免每个 SSE 事件都触发一次滚动写入
+let contentScrollTimer = null
+let contentScrollLast = 0
+function scheduleContentScroll() {
+  const now = Date.now()
+  const elapsed = now - contentScrollLast
+  if (elapsed >= 100) {
+    contentScrollLast = now
+    if (contentScrollTimer != null) {
+      clearTimeout(contentScrollTimer)
+      contentScrollTimer = null
+    }
+    scrollBodyToBottom()
+    return
+  }
+  if (contentScrollTimer == null) {
+    contentScrollTimer = setTimeout(() => {
+      contentScrollTimer = null
+      contentScrollLast = Date.now()
+      scrollBodyToBottom()
+    }, 100 - elapsed)
+  }
+}
+
 watch(
-  () => messages.value.map((m) => m.content).join(''),
-  () => scrollBodyToBottom()
+  () => messages.value[messages.value.length - 1]?.content ?? '',
+  () => scheduleContentScroll()
 )
 
 watch(introOpeningDisplayed, () => scrollBodyToBottom())
+
+onUnmounted(() => {
+  if (contentScrollTimer != null) clearTimeout(contentScrollTimer)
+})
 </script>
 
 <style scoped>

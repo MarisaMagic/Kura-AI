@@ -119,6 +119,9 @@ function applyCitationAndImageRules(inst) {
     ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options))
   inst.renderer.rules.image = (tokens, idx, options, env, self) => {
     tokens[idx].attrSet('referrerpolicy', 'no-referrer')
+    // 流式正文里的图片惰性加载 + 异步解码，避免加载完成的回流行打断滚动位置
+    tokens[idx].attrSet('loading', 'lazy')
+    tokens[idx].attrSet('decoding', 'async')
     return defaultImageRender(tokens, idx, options, env, self)
   }
 }
@@ -296,7 +299,7 @@ export function renderAgentChatMarkdown(text, sources) {
   try {
     return DOMPurify.sanitize(raw, {
       USE_PROFILES: { html: true },
-      ADD_ATTR: ['referrerpolicy'],
+      ADD_ATTR: ['referrerpolicy', 'loading', 'decoding'],
     })
   } finally {
     DOMPurify.removeHook('uponSanitizeAttribute')

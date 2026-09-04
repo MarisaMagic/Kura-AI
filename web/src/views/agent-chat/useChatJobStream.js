@@ -1,9 +1,15 @@
-import { ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { getToken } from '@/utils'
 import { applyThinkingItem } from '@/utils/agentChatThinking'
 import { useAgentSidebarStore, useRecentAgentsStore } from '@/store'
 
 const PENDING_JOB_PREFIX = 'kura_ai_chat_job_'
+
+/** pending job 快照写入节流间隔（sessionStorage 是同步写，避免每事件一次） */
+const JOB_SNAPSHOT_SAVE_MS = 250
+
+/** 流式行 markdown 渲染节流：renderVersion 每窗口最多 bump 一次 */
+const RENDER_THROTTLE_MS = 100
 
 export function pendingJobStorageKey(agentId, sid) {
   return `${PENDING_JOB_PREFIX}${agentId}_${sid}`
@@ -66,6 +72,107 @@ export function useChatJobStream({
   const recentAgentsStore = useRecentAgentsStore()
   const agentSidebarStore = useAgentSidebarStore()
 
+  // —— pending job 快照节流：页面隐藏/卸载时强制落盘，
+  //    保证刷新恢复用的 since_seq 不落后于实际消费进度 ——
+  let lastSnapshotSaveAt = 0
+  let snapshotTimer = null
+  let pendingSnapshot = null
+
+  function flushJobSnapshot() {
+    if (snapshotTimer) {
+      clearTimeout(snapshotTimer)
+      snapshotTimer = null
+    }
+    if (pendingSnapshot) {
+      savePendingChatJob(pendingSnapshot.agentId, pendingSnapshot.sid, pendingSnapshot.payload)
+      pendingSnapshot = null
+    }
+  }
+
+  function cancelJobSnapshot() {
+    if (snapshotTimer) {
+      clearTimeout(snapshotTimer)
+      snapshotTimer = null
+    }
+    pendingSnapshot = null
+  }
+
+  function scheduleJobSnapshot(agentId, payload) {
+    if (!agentId || !sessionId.value || !payload?.job_id) return
+    pendingSnapshot = { agentId, sid: sessionId.value, payload }
+    const now = Date.now()
+    if (now - lastSnapshotSaveAt >= JOB_SNAPSHOT_SAVE_MS) {
+      lastSnapshotSaveAt = now
+      flushJobSnapshot()
+    } else if (!snapshotTimer) {
+      snapshotTimer = setTimeout(() => {
+        lastSnapshotSaveAt = Date.now()
+        flushJobSnapshot()
+      }, JOB_SNAPSHOT_SAVE_MS)
+    }
+  }
+
+  function flushJobSnapshotOnExit() {
+    if (document.visibilityState === 'hidden') flushJobSnapshot()
+  }
+
+  onMounted(() => {
+    window.addEventListener('pagehide', flushJobSnapshot)
+    document.addEventListener('visibilitychange', flushJobSnapshotOnExit)
+  })
+
+  onUnmounted(() => {
+    window.removeEventListener('pagehide', flushJobSnapshot)
+    document.removeEventListener('visibilitychange', flushJobSnapshotOnExit)
+    cancelJobSnapshot()
+  })
+
+  // —— 流式行 markdown 渲染节流：
+  //    正文仍按 token 实时累积，但 renderVersion / displayContent 快照每
+  //    ~100ms 才推进一次，ChatMessageItem 的 computed 只依赖快照 ——
+  let renderFlushTimer = null
+  let pendingRenderRow = null
+
+  function bumpRenderVersion(row) {
+    if (!row) return
+    row.renderVersion = (row.renderVersion || 0) + 1
+    row.renderVersionAt = Date.now()
+    row.displayContent = row.content
+  }
+
+  function scheduleRenderVersion(row) {
+    if (!row) return
+    if (!row.renderVersionAt || Date.now() - row.renderVersionAt >= RENDER_THROTTLE_MS) {
+      if (renderFlushTimer) {
+        clearTimeout(renderFlushTimer)
+        renderFlushTimer = null
+        pendingRenderRow = null
+      }
+      bumpRenderVersion(row)
+      return
+    }
+    // 每次调度都改为最新行对象：applyChatSsePayload 每事件换新对象，
+    // 若 bump 落在旧引用上，renderVersion/displayContent 会写入脱离列表的孤儿行
+    pendingRenderRow = row
+    if (!renderFlushTimer) {
+      renderFlushTimer = setTimeout(() => {
+        renderFlushTimer = null
+        const target = pendingRenderRow
+        pendingRenderRow = null
+        if (target) bumpRenderVersion(target)
+      }, RENDER_THROTTLE_MS)
+    }
+  }
+
+  function flushRenderVersion(row) {
+    if (renderFlushTimer) {
+      clearTimeout(renderFlushTimer)
+      renderFlushTimer = null
+      pendingRenderRow = null
+    }
+    if (row) bumpRenderVersion(row)
+  }
+
   function applyChatSsePayload(data, idx) {
     if (idx === -1) return
     if (data.type === 'content') {
@@ -80,6 +187,7 @@ export function useChatJobStream({
         thinkingOpen: row.thinkingOpen ?? false,
         ragTrace: row.ragTrace ?? null,
       }
+      scheduleRenderVersion(messages.value[idx])
     } else if (data.type === 'thinking_item') {
       const cur = messages.value[idx]
       const item = data.item || {}
@@ -124,6 +232,7 @@ export function useChatJobStream({
         thinkingOpen: cur.thinkingOpen ?? false,
         ragTrace: cur.ragTrace ?? null,
       }
+      flushRenderVersion(messages.value[idx])
     } else if (data.type === 'cancelled') {
       const cur = messages.value[idx]
       messages.value[idx] = {
@@ -135,6 +244,7 @@ export function useChatJobStream({
         ragTrace: cur.ragTrace ?? null,
         errorText: undefined,
       }
+      flushRenderVersion(messages.value[idx])
     } else if (data.type === 'mcp_confirmation_required') {
       const cur = messages.value[idx]
       const item = data.confirmation || {}
@@ -163,6 +273,7 @@ export function useChatJobStream({
         mcpExecuting: false,
         stoppedByUser: data.cancelled ? true : row.stoppedByUser,
       }
+      flushRenderVersion(messages.value[idx])
     }
   }
 
@@ -197,8 +308,9 @@ export function useChatJobStream({
           const data = JSON.parse(dataStr)
           applyChatSsePayload(data, idx)
           seq += 1
-          savePendingChatJob(agentId, sessionId.value, { job_id: jobId, seq })
+          scheduleJobSnapshot(agentId, { job_id: jobId, seq })
           if (data.type === 'done') {
+            cancelJobSnapshot()
             clearPendingChatJob(agentId, sessionId.value)
           }
         } catch (e) {
@@ -211,6 +323,7 @@ export function useChatJobStream({
       const row = messages.value[idx]
       messages.value[idx] = { ...row, pending: false }
     }
+    flushRenderVersion(idx !== -1 ? messages.value[idx] : null)
   }
 
   async function stopActiveChatGeneration() {
@@ -250,7 +363,10 @@ export function useChatJobStream({
     streamAbortController.value = null
     activeJobId.value = null
     activeAssistantIdx.value = -1
-    if (aid && sessionId.value) clearPendingChatJob(aid, sessionId.value)
+    if (aid && sessionId.value) {
+      cancelJobSnapshot()
+      clearPendingChatJob(aid, sessionId.value)
+    }
     if (ix >= 0 && messages.value[ix]?.role === 'assistant') {
       const row = messages.value[ix]
       messages.value[ix] = {
@@ -259,6 +375,7 @@ export function useChatJobStream({
         stoppedByUser: true,
         errorText: undefined,
       }
+      flushRenderVersion(messages.value[ix])
     }
     sending.value = false
   }
@@ -490,7 +607,7 @@ export function useChatJobStream({
       activeJobId.value = null
       activeAssistantIdx.value = -1
       sending.value = false
-      scrollBodyToBottom(false, { force: true })
+      scrollBodyToBottom()
       agentSidebarStore.bumpRefresh()
     }
   }
