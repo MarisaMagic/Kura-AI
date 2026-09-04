@@ -45,7 +45,7 @@
               <n-spin v-if="introOpeningRunning && !introOpeningDisplayed" size="small" />
               <div
                 v-else-if="introOpeningDisplayed"
-                class="agent-chat-intro-opening-md agent-chat-md"
+                class="agent-chat-md agent-chat-intro-opening-md"
                 v-html="renderAgentChatMarkdown(introOpeningDisplayed)"
               />
             </div>
@@ -117,11 +117,7 @@
                     <div v-show="m.thinkingOpen" class="agent-chat-thinking-panel">
                       <div v-if="m.thinkingItems?.length" class="agent-chat-thinking-steps">
                         <template v-for="(item, sIdx) in m.thinkingItems" :key="sIdx">
-                          <div
-                            v-if="item.type === 'step'"
-                            v-memo="[item]"
-                            class="agent-chat-thinking-step-line"
-                          >
+                          <div v-if="item.type === 'step'" class="agent-chat-thinking-step-line">
                             <span class="agent-chat-thinking-step-icon">{{
                               item.icon || '▸'
                             }}</span>
@@ -132,7 +128,6 @@
                           </div>
                           <div
                             v-else-if="item.type === 'text'"
-                            v-memo="[item]"
                             class="agent-chat-thinking-step-line agent-chat-thinking-step-line--text"
                           >
                             <span class="agent-chat-thinking-step-icon">💭</span>

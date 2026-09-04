@@ -33,9 +33,7 @@
       <div class="agent-chat-feed-col">
         <div class="agent-chat-feed-head">
           <span class="agent-chat-feed-name">{{ agentName }}</span>
-          <span class="agent-chat-feed-ai-badge">{{
-            $t('views.agents.chat_feed_ai_badge')
-          }}</span>
+          <span class="agent-chat-feed-ai-badge">{{ $t('views.agents.chat_feed_ai_badge') }}</span>
         </div>
 
         <div class="agent-chat-thinking-wrap">
@@ -56,11 +54,7 @@
           <div v-show="message.thinkingOpen" class="agent-chat-thinking-panel">
             <div v-if="message.thinkingItems?.length" class="agent-chat-thinking-steps">
               <template v-for="(item, sIdx) in message.thinkingItems" :key="sIdx">
-                <div
-                  v-if="item.type === 'step'"
-                  v-memo="[item]"
-                  class="agent-chat-thinking-step-line"
-                >
+                <div v-if="item.type === 'step'" class="agent-chat-thinking-step-line">
                   <span class="agent-chat-thinking-step-icon">{{ item.icon || '▸' }}</span>
                   <span class="agent-chat-thinking-step-label">{{ item.label }}</span>
                   <span v-if="item.detail" class="agent-chat-thinking-step-detail">{{
@@ -69,7 +63,6 @@
                 </div>
                 <div
                   v-else-if="item.type === 'text'"
-                  v-memo="[item]"
                   class="agent-chat-thinking-step-line agent-chat-thinking-step-line--text"
                 >
                   <span class="agent-chat-thinking-step-icon">💭</span>
@@ -127,9 +120,7 @@
             <div class="agent-chat-msg-error-text">{{ message.errorText }}</div>
           </div>
           <div
-            v-if="
-              !message.pending && message.stoppedByUser && !(message.errorText || '').trim()
-            "
+            v-if="!message.pending && message.stoppedByUser && !(message.errorText || '').trim()"
             class="agent-chat-msg-stopped"
             role="status"
           >
@@ -224,9 +215,7 @@
               circle
               size="small"
               class="agent-chat-copy-btn"
-              :disabled="
-                sending || switchingBranch || (message.versionIndex || 1) <= 1
-              "
+              :disabled="sending || switchingBranch || (message.versionIndex || 1) <= 1"
               :aria-label="$t('views.agents.chat_version_prev_tooltip')"
               @click="emit('switch-version', message, -1)"
             >

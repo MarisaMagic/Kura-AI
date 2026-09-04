@@ -790,7 +790,7 @@ class RewriteMediaUrlsTests(unittest.TestCase):
         self.assertIn("/^https:\\/\\//i.test(target)", self.js_src)
         self.assertIn("不要把 https:// 外链图改写成 /api/v1/media/", self.js_src)
         self.assertIn("referrerpolicy", self.js_src)
-        self.assertIn("ADD_ATTR: ['referrerpolicy']", self.js_src)
+        self.assertIn("ADD_ATTR: ['referrerpolicy', 'loading', 'decoding']", self.js_src)
 
     def test_rewrite_keeps_https_image(self):
         if not self.node:
