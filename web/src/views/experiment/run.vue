@@ -64,7 +64,7 @@ function renderCharts() {
     chart = chart || echarts.init(chartRef.value)
     chart.setOption({
       tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      legend: { data: ['Hit@k', 'MRR', 'Recall@k'] },
+      legend: { top: 0, left: 'center', data: ['Hit@k', 'MRR', 'Recall@k'] },
       grid: { left: 40, right: 16, top: 40, bottom: 60 },
       xAxis: {
         type: 'category',
@@ -103,7 +103,7 @@ function renderCharts() {
     oodChart = oodChart || echarts.init(oodChartRef.value)
     oodChart.setOption({
       tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-      legend: { data: ['门控拒答率'] },
+      legend: { top: 0, left: 'center', data: ['门控拒答率'] },
       grid: { left: 40, right: 16, top: 40, bottom: 60 },
       xAxis: {
         type: 'category',
