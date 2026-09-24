@@ -103,7 +103,11 @@ watch(
       runName.value = ''
       submitting.value = false
       // 数据集题数可能小于当前选项（如全量集切到小样本），避免静默截断
-      if (questionLimit.value > 0 && props.questionCount && questionLimit.value > props.questionCount) {
+      if (
+        questionLimit.value > 0 &&
+        props.questionCount &&
+        questionLimit.value > props.questionCount
+      ) {
         questionLimit.value = props.questionCount
       }
     }
