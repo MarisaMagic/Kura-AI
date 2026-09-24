@@ -18,6 +18,10 @@ db.sqlite3.bak
 data/
 
 .cursor/
+.lr-agent/
+
+docs/
+
 .env
 
 migrations/
