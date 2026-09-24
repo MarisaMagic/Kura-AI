@@ -17,7 +17,7 @@ RUN python /tmp/filter_requirements.py \
     && rm -f /tmp/requirements.txt /tmp/requirements-linux.txt /tmp/filter_requirements.py
 
 COPY app ./app
-COPY run.py ./
+COPY run.py worker.py ./
 
 # 管理端数据在 PostgreSQL；用户文件（头像/文档/附件）在对象存储 MinIO；/app/app/logs 为日志目录
 RUN mkdir -p /app/app/logs

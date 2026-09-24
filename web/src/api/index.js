@@ -135,6 +135,14 @@ export default {
   /** 查询知识库上传任务进度 */
   getKbUploadStatus: (params = {}, config = {}) =>
     request.get('/user-agent/kb/upload/status', { params, timeout: 30000, ...config }),
+  /** 批量查询知识库上传任务进度：一次传 <=200 个 task_id（逗号分隔），大批量上传时替代逐任务轮询 */
+  getKbUploadStatusBatch: (taskIds, config = {}) =>
+    request.get('/user-agent/kb/upload/status/batch', {
+      params: { task_ids: (taskIds || []).join(',') },
+      timeout: 30000,
+      noErrorMessage: true,
+      ...config,
+    }),
   /** 取消知识库上传任务 */
   cancelKbUploadTask: (params = {}, config = {}) =>
     request.post('/user-agent/kb/upload/cancel', null, { params, timeout: 30000, ...config }),

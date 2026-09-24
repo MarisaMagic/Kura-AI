@@ -49,6 +49,29 @@ class RedisCache:
             logger.warning("Redis get_json 失败 key={}: {}", key, e)
             return None
 
+    def mget_json(self, keys: list[str]) -> dict[str, Any]:
+        """
+        一次 MGET 批量读取 JSON（批任务状态轮询场景，避免 N 次往返打满事件循环）。
+        :param keys: 不含前缀的 key 列表
+        :return: {key: 反序列化对象}，缺失/损坏的 key 不返回
+        """
+        if not keys:
+            return {}
+        try:
+            values = self._get_client().mget([self._key(k) for k in keys])
+        except Exception as e:
+            logger.warning("Redis mget_json 失败 keys={}: {}", len(keys), e)
+            return {}
+        out: dict[str, Any] = {}
+        for key, raw in zip(keys, values):
+            if not raw:
+                continue
+            try:
+                out[key] = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+        return out
+
     def set_json(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         """
         将 Python 对象序列化转换为 JSON 字符串，并存储到 Redis 中
@@ -140,6 +163,57 @@ class RedisCache:
         try:
             payload = json.dumps(value, ensure_ascii=False)
             return int(self._get_client().rpush(self._key(key), payload))
+        except Exception:
+            return 0
+
+    def brpoplpush_json(self, src: str, dst: str, timeout: int = 5) -> Optional[Any]:
+        """
+        阻塞式可靠出队：从 src 弹出元素并原子写入 dst（处理中列表），超时返回 None。
+        消费方处理完成后再 LREM dst —— 进程崩溃时元素仍留在 dst，可被回收重投。
+        """
+        try:
+            raw = self._get_client().brpoplpush(self._key(src), self._key(dst), timeout)
+            return json.loads(raw) if raw else None
+        except Exception as e:
+            logger.warning("Redis brpoplpush_json 失败 src={}: {}", src, e)
+            return None
+
+    def lrem_json(self, key: str, value: Any) -> int:
+        """从列表中移除与 value 相等的 JSON 元素（全部移除），返回移除数量。"""
+        try:
+            payload = json.dumps(value, ensure_ascii=False)
+            return int(self._get_client().lrem(self._key(key), 0, payload))
+        except Exception:
+            return 0
+
+    def lrem_raw(self, key: str, raw: str) -> int:
+        """按原始字符串移除列表元素（回收损坏/无法反序列化的条目）。"""
+        try:
+            return int(self._get_client().lrem(self._key(key), 0, raw))
+        except Exception:
+            return 0
+
+    def sadd_json(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+        """Set 追加元素并刷新 TTL（用户活动任务集合等）。"""
+        try:
+            client = self._get_client()
+            client.sadd(self._key(key), json.dumps(value, ensure_ascii=False))
+            if ttl:
+                client.expire(self._key(key), ttl)
+            return True
+        except Exception as e:
+            logger.warning("Redis sadd_json 失败 key={}: {}", key, e)
+            return False
+
+    def srem_json(self, key: str, value: Any) -> None:
+        try:
+            self._get_client().srem(self._key(key), json.dumps(value, ensure_ascii=False))
+        except Exception:
+            pass
+
+    def scard(self, key: str) -> int:
+        try:
+            return int(self._get_client().scard(self._key(key)))
         except Exception:
             return 0
 

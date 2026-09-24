@@ -55,6 +55,9 @@ def make_middlewares():
                 r".*user-agent/chat/stream$",  # POST 直连 SSE，勿缓冲整包写入审计
                 r".*user-agent/chat/jobs/[^/]+/stream$",  # Job 订阅 SSE（刷新可重连），勿缓冲
                 r".*user-agent/kb/upload$",
+                # 上传任务进度轮询：高频只读接口，写审计会引发 PG 写风暴并拖垮全站
+                r".*upload/status$",
+                r".*upload/status/batch$",
                 r".*user-agent/chat/attachments/upload$",
                 "/api/v1/media/",  # 静态头像等二进制，勿写入审计 JSON
                 "/docs",

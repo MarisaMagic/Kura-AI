@@ -32,6 +32,43 @@ services:
       S3_BUCKET: ${S3_BUCKET:-kura-user-files}
       S3_ACCESS_KEY: ${MINIO_APP_ROOT_USER}
       S3_SECRET_KEY: ${MINIO_APP_ROOT_PASSWORD}
+      # 文档上传受理后进入 Redis 队列，由 kb-worker 独立进程处理（不再占用 API 进程）
+      KB_UPLOAD_MODE: "queue"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      standalone:
+        condition: service_healthy
+      minio-app:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # 文档解析/向量化独立进程：与 API 隔离，队列消费 + 崩溃恢复 + 优雅退出
+  kb-worker:
+    container_name: kura-ai-kb-worker
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.backend
+    command: ["python", "worker.py"]
+    env_file:
+      - .env
+    environment:
+      UVICORN_HOST: "0.0.0.0"
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-langchain_app}
+      ADMIN_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-langchain_app}
+      REDIS_URL: redis://redis:6379/0
+      MILVUS_HOST: standalone
+      MILVUS_PORT: "19530"
+      AUTH_TRUST_X_FORWARDED_FOR: "true"
+      PUBLIC_API_BASE: ${PROD_PUBLIC_API_BASE:-}
+      S3_ENDPOINT: minio-app:9000
+      S3_SECURE: "false"
+      S3_BUCKET: ${S3_BUCKET:-kura-user-files}
+      S3_ACCESS_KEY: ${MINIO_APP_ROOT_USER}
+      S3_SECRET_KEY: ${MINIO_APP_ROOT_PASSWORD}
+      KB_UPLOAD_MODE: "queue"
     depends_on:
       postgres:
         condition: service_healthy

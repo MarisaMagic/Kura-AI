@@ -124,7 +124,7 @@
             </div>
             <n-collapse-transition :show="detailOpen">
               <div class="agent-kb-tasks">
-                <div v-for="task in tasks" :key="task.key" class="agent-kb-task">
+                <div v-for="task in visibleTasks" :key="task.key" class="agent-kb-task">
                   <div class="agent-kb-task-head">
                     <div class="agent-kb-task-title">
                       <span :class="fileKindClass('', task.filename)">
@@ -159,6 +159,9 @@
                   >
                     {{ taskStageText(task) }}
                   </div>
+                </div>
+                <div v-if="hiddenTaskCount" class="agent-kb-task-more">
+                  {{ $t('views.agents.kb_hidden_tasks', { n: hiddenTaskCount }) }}
                 </div>
               </div>
             </n-collapse-transition>
@@ -254,7 +257,7 @@
           </p>
           <div class="agent-kb-file-list">
             <div
-              v-for="item in sortedPendingFiles"
+              v-for="item in visiblePendingFiles"
               :key="`${item.name}_${item.size}`"
               class="agent-kb-file-row"
               :class="{ 'agent-kb-file-row-invalid': item.overLimit }"
@@ -273,6 +276,9 @@
                   </span>
                 </div>
               </div>
+            </div>
+            <div v-if="hiddenPendingCount" class="agent-kb-file-more">
+              {{ $t('views.agents.kb_hidden_files', { n: hiddenPendingCount }) }}
             </div>
           </div>
           <template #footer>
@@ -295,7 +301,7 @@
 </template>
 
 <script setup>
-import { computed, h, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import {
@@ -317,6 +323,14 @@ import {
 import AppPage from '@/components/page/AppPage.vue'
 import TheIcon from '@/components/icon/TheIcon.vue'
 import api from '@/api'
+import {
+  formatFileSize,
+  formatModified,
+  fileKindIcon,
+  fileKindTagType,
+  makeFileKindClass,
+  useUploadBatch,
+} from '@/composables/useUploadBatch'
 import { DEFAULT_AVATAR } from '@/views/agents/composables/agentFormCommon.js'
 
 const { t } = useI18n()
@@ -329,16 +343,99 @@ const tableLoading = ref(false)
 const agentId = ref(Number(route.params.agentId) || 0)
 const agent = ref(null)
 const list = ref([])
-const uploadRef = ref(null)
 const uploadFormats = ['PDF', 'Word', 'Excel', 'TXT', 'MD']
 
-const MAX_FILE_BYTES = 50 * 1024 * 1024 // 与后端 KB_UPLOAD_MAX_BYTES 默认值一致
-const maxFileMb = Math.round(MAX_FILE_BYTES / (1024 * 1024))
-const showConfirmModal = ref(false)
-const pendingFiles = ref([])
-let batchSeq = 0
-const reportedBatches = new Set()
-const detailOpen = ref(false)
+const fileKindClass = makeFileKindClass('agent-kb-kind-')
+
+// 共享上传内核：限并发上传 + 批量轮询 + 进度节流 + 断点恢复（见 composables/useUploadBatch.js）
+const {
+  tasks,
+  visibleTasks,
+  hiddenTaskCount,
+  pendingFiles,
+  visiblePendingFiles,
+  hiddenPendingCount,
+  showConfirmModal,
+  detailOpen,
+  uploadRef,
+  maxFileMb,
+  validPendingFiles,
+  pendingValidTotalSize,
+  batchSummary,
+  overallPercent,
+  overallStatus,
+  hasFinishedTasks,
+  isTaskActive,
+  isTaskFailed,
+  clampPercent,
+  taskProgressStatus,
+  taskStatusMeta,
+  taskStageText,
+  clearFinishedTasks,
+  restoreTasks,
+  onUploadChange,
+  cancelConfirm,
+  onConfirmModalShowUpdate,
+  confirmUpload,
+  cancelTask,
+  openFilePicker,
+} = useUploadBatch({
+  scopeId: agentId.value,
+  storagePrefix: 'kura_ai_kb_upload_',
+  upload: async (file, onProgress) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await api.uploadKbDocument(agentId.value, fd, onProgress, {
+      noErrorMessage: true,
+    })
+    return res?.data?.task_id
+  },
+  statusBatch: async (taskIds) => {
+    const res = await api.getKbUploadStatusBatch(taskIds)
+    return res?.data?.items || {}
+  },
+  cancel: (taskId) => api.cancelKbUploadTask({ task_id: taskId }, { noErrorMessage: true }),
+  onListChanged: () => {
+    fetchList()
+  },
+  texts: {
+    statusUploading: () => t('views.agents.kb_task_status_uploading'),
+    statusQueued: () => t('views.agents.kb_task_status_queued'),
+    statusProcessing: () => t('views.agents.kb_task_status_processing'),
+    statusCompleted: () => t('views.agents.kb_task_status_completed'),
+    statusFailed: () => t('views.agents.kb_task_status_failed'),
+    statusCancelled: () => t('views.agents.kb_task_status_cancelled'),
+    stageUploading: () => t('views.agents.kb_stage_uploading'),
+    stageUnchanged: () => t('views.agents.kb_upload_unchanged'),
+    stageDone: () => t('views.agents.kb_stage_done'),
+    stageCancelled: () => t('views.agents.kb_upload_cancelled_title'),
+    stageTimeoutFallback: () => t('views.agents.kb_upload_timeout_title'),
+    stageFailedFallback: () => t('views.agents.kb_upload_failed_title'),
+    stageQueueUpload: () => t('views.agents.kb_stage_queue_upload'),
+    stageQueueUploadWithPos: (n) => t('views.agents.kb_stage_queue_upload_pos', { n }),
+    stageQueueProcess: () => t('views.agents.kb_stage_queued'),
+    stageParsing: () => t('views.agents.kb_stage_parsing'),
+    stageChunking: () => t('views.agents.kb_stage_chunking'),
+    stageEmbedding: () => t('views.agents.kb_stage_embedding'),
+    stageWriting: () => t('views.agents.kb_stage_writing'),
+    stageProcessing: () => t('views.agents.kb_stage_processing'),
+    batchAllDone: (total) => t('views.agents.kb_batch_done_all', { total }),
+    batchPartial: ({ total, done, failed, throttled }) => {
+      const base = t('views.agents.kb_batch_done_partial', { total, done, failed })
+      return throttled
+        ? `${base}${t('views.agents.kb_batch_throttled_hint', { n: throttled })}`
+        : base
+    },
+    cancelRequested: () => t('views.agents.kb_upload_cancel_requested'),
+    cancelFailed: () => t('views.agents.kb_upload_cancel_failed'),
+    statusLost: () => t('views.agents.kb_upload_status_lost'),
+    taskGone: () => t('views.agents.kb_upload_gone'),
+    uploadFailed: () => t('views.agents.kb_upload_failed_title'),
+    uploadNoTaskId: () => t('views.agents.kb_upload_no_task_id'),
+    uploadBusy: () => t('views.agents.kb_upload_busy'),
+    uploadRetryHint: (attempt, max) => t('views.agents.kb_upload_retry_hint', { attempt, max }),
+  },
+})
 
 const keyword = ref('')
 const typeFilter = ref('all')
@@ -376,104 +473,6 @@ const kbStats = computed(() => {
   return { docs: docs.length, chunks, types }
 })
 
-const POLL_INTERVAL_MS = 500
-const STORAGE_PREFIX = 'kura_ai_kb_upload_'
-const TERMINAL_STATUSES = ['completed', 'failed', 'timeout', 'cancelled']
-const tasks = ref([])
-let taskSeq = 0
-
-const batchSummary = computed(() => {
-  const total = tasks.value.length
-  const done = tasks.value.filter((task) => task.status === 'completed').length
-  const active = tasks.value.filter((task) => isTaskActive(task)).length
-  return { total, done, active, failed: total - done - active }
-})
-
-const overallPercent = computed(() => {
-  if (!tasks.value.length) return 0
-  const sum = tasks.value.reduce((acc, task) => acc + clampPercent(task.percent), 0)
-  return Math.round(sum / tasks.value.length)
-})
-
-const overallStatus = computed(() => {
-  if (!tasks.value.length) return 'default'
-  const allTerminal = tasks.value.every((task) => TERMINAL_STATUSES.includes(task.status))
-  if (!allTerminal) return 'default'
-  if (tasks.value.some((task) => isTaskFailed(task.status))) return 'error'
-  if (tasks.value.some((task) => task.status === 'cancelled')) return 'warning'
-  return 'success'
-})
-
-const hasFinishedTasks = computed(() =>
-  tasks.value.some((task) => TERMINAL_STATUSES.includes(task.status))
-)
-
-const validPendingFiles = computed(() => pendingFiles.value.filter((item) => !item.overLimit))
-
-const pendingValidTotalSize = computed(() =>
-  validPendingFiles.value.reduce((sum, item) => sum + (Number(item.size) || 0), 0)
-)
-
-const sortedPendingFiles = computed(() =>
-  [...pendingFiles.value].sort((a, b) => Number(b.overLimit) - Number(a.overLimit))
-)
-
-function extFromName(name) {
-  return (
-    String(name || '')
-      .split('.')
-      .pop() || ''
-  ).toLowerCase()
-}
-
-function fileKindKey(fileType, name) {
-  const type = String(fileType || '').toLowerCase()
-  const ext = extFromName(name)
-  if (type === 'pdf' || ext === 'pdf') return 'pdf'
-  if (type === 'word' || ext === 'doc' || ext === 'docx') return 'word'
-  if (type === 'excel' || ext === 'xls' || ext === 'xlsx') return 'excel'
-  if (ext === 'md' || ext === 'markdown') return 'md'
-  return 'text'
-}
-
-function fileKindIcon(fileType, name) {
-  const key = fileKindKey(fileType, name)
-  if (key === 'pdf') return 'mdi:file-pdf-box'
-  if (key === 'word') return 'mdi:file-word-box'
-  if (key === 'excel') return 'mdi:file-excel-box'
-  if (key === 'md') return 'simple-icons:markdown'
-  return 'mdi:file-document-outline'
-}
-
-function fileKindClass(fileType, name) {
-  return `agent-kb-kind-${fileKindKey(fileType, name)}`
-}
-
-function fileKindTagType(fileType, name) {
-  const key = fileKindKey(fileType, name)
-  if (key === 'pdf') return 'error'
-  if (key === 'word') return 'info'
-  if (key === 'excel') return 'success'
-  return 'default'
-}
-
-function formatFileSize(bytes) {
-  const n = Number(bytes)
-  if (!Number.isFinite(n) || n < 0) return '-'
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`
-}
-
-function formatModified(ts) {
-  const d = new Date(ts)
-  if (Number.isNaN(d.getTime())) return ''
-  const pad = (v) => String(v).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
-    d.getHours()
-  )}:${pad(d.getMinutes())}`
-}
-
 function formatUpdatedAt(iso) {
   if (!iso) return '-'
   return String(iso).replace('T', ' ').slice(0, 16)
@@ -491,214 +490,6 @@ function goChat() {
 function goEdit() {
   if (!agentId.value) return
   router.push({ name: 'AgentEdit', params: { id: String(agentId.value) } })
-}
-
-function openFilePicker() {
-  uploadRef.value?.openOpenFileDialog?.()
-}
-
-function storageKey() {
-  return `${STORAGE_PREFIX}${agentId.value}`
-}
-
-function persistActiveTasks() {
-  const active = tasks.value
-    .filter((task) => task.taskId && !TERMINAL_STATUSES.includes(task.status))
-    .map((task) => ({ task_id: task.taskId, filename: task.filename }))
-  try {
-    if (active.length) sessionStorage.setItem(storageKey(), JSON.stringify(active))
-    else sessionStorage.removeItem(storageKey())
-  } catch (e) {
-    /* sessionStorage 不可用时忽略 */
-  }
-}
-
-function makeTask({ filename = '', taskId = null, batchId = null } = {}) {
-  const task = reactive({
-    key: `task_${++taskSeq}`,
-    taskId,
-    batchId,
-    filename,
-    status: 'uploading',
-    stage: 'uploading',
-    percent: 0,
-    done: null,
-    total: null,
-    error: '',
-    result: null,
-    timer: null,
-    pollErrors: 0,
-  })
-  tasks.value.push(task)
-  return task
-}
-
-function clearTimer(task) {
-  if (task.timer) {
-    clearTimeout(task.timer)
-    task.timer = null
-  }
-}
-
-function isTaskActive(task) {
-  return ['uploading', 'queued', 'processing', 'running'].includes(task.status)
-}
-
-function isTaskFailed(status) {
-  return status === 'failed' || status === 'timeout'
-}
-
-function clampPercent(percent) {
-  const n = Number(percent)
-  if (!Number.isFinite(n)) return 0
-  return Math.min(100, Math.max(0, Math.round(n)))
-}
-
-function taskProgressStatus(status) {
-  if (status === 'completed') return 'success'
-  if (status === 'failed' || status === 'timeout') return 'error'
-  if (status === 'cancelled') return 'warning'
-  if (status === 'uploading' || status === 'queued') return 'info'
-  return 'default'
-}
-
-function taskStatusMeta(task) {
-  if (task.status === 'completed') {
-    return { type: 'success', label: t('views.agents.kb_task_status_completed') }
-  }
-  if (task.status === 'failed' || task.status === 'timeout') {
-    return { type: 'error', label: t('views.agents.kb_task_status_failed') }
-  }
-  if (task.status === 'cancelled') {
-    return { type: 'warning', label: t('views.agents.kb_task_status_cancelled') }
-  }
-  if (task.status === 'uploading') {
-    return { type: 'info', label: t('views.agents.kb_task_status_uploading') }
-  }
-  if (task.status === 'queued') {
-    return { type: 'info', label: t('views.agents.kb_task_status_queued') }
-  }
-  return { type: 'info', label: t('views.agents.kb_task_status_processing') }
-}
-
-function taskStageText(task) {
-  if (task.status === 'uploading') return t('views.agents.kb_stage_uploading')
-  if (task.status === 'completed') {
-    return task.result?.unchanged
-      ? t('views.agents.kb_upload_unchanged')
-      : t('views.agents.kb_stage_done')
-  }
-  if (task.status === 'timeout') return task.error || t('views.agents.kb_upload_timeout_title')
-  if (task.status === 'cancelled') return t('views.agents.kb_upload_cancelled_title')
-  if (task.status === 'failed') return task.error || t('views.agents.kb_upload_failed_title')
-  if (task.status === 'queued') return t('views.agents.kb_stage_queued')
-  const stageTexts = {
-    parsing: t('views.agents.kb_stage_parsing'),
-    chunking: t('views.agents.kb_stage_chunking'),
-    embedding: t('views.agents.kb_stage_embedding'),
-    writing: t('views.agents.kb_stage_writing'),
-  }
-  let label = stageTexts[task.stage] || t('views.agents.kb_stage_processing')
-  if (task.stage === 'embedding' && task.done != null && task.total != null) {
-    label = `${label}（${task.done}/${task.total}）`
-  }
-  return label
-}
-
-function startPolling(task) {
-  clearTimer(task)
-  const tick = async () => {
-    clearTimer(task)
-    if (!task.taskId) return
-    try {
-      const res = await api.getKbUploadStatus({ task_id: task.taskId }, { noErrorMessage: true })
-      const meta = res?.data
-      if (!meta || !meta.status) throw new Error('empty status')
-      task.pollErrors = 0
-      task.status = meta.status === 'running' ? 'processing' : meta.status
-      task.stage = meta.stage || task.stage
-      task.percent = Number(meta.percent ?? task.percent ?? 0)
-      task.done = meta.done ?? null
-      task.total = meta.total ?? null
-      task.error = meta.error || ''
-      task.result = meta.result || null
-      if (TERMINAL_STATUSES.includes(task.status)) {
-        finishTask(task)
-        return
-      }
-      task.timer = setTimeout(tick, POLL_INTERVAL_MS)
-    } catch (e) {
-      const httpStatus = Number(e?.code || 0)
-      if (httpStatus === 404) {
-        task.status = 'failed'
-        task.error = t('views.agents.kb_upload_gone')
-        finishTask(task)
-        return
-      }
-      if (httpStatus === 401 || httpStatus === 403) {
-        clearTimer(task)
-        persistActiveTasks()
-        return
-      }
-      task.pollErrors += 1
-      if (task.pollErrors === 2) fetchList()
-      if (task.pollErrors > 3) {
-        task.status = 'failed'
-        task.error = t('views.agents.kb_upload_status_lost')
-        finishTask(task)
-        return
-      }
-      task.timer = setTimeout(tick, 1000)
-    }
-  }
-  task.timer = setTimeout(tick, POLL_INTERVAL_MS)
-}
-
-function maybeReportBatch(batchId) {
-  if (batchId == null || reportedBatches.has(batchId)) return
-  const batchTasks = tasks.value.filter((task) => task.batchId === batchId)
-  if (!batchTasks.length) return
-  if (!batchTasks.every((task) => TERMINAL_STATUSES.includes(task.status))) return
-  reportedBatches.add(batchId)
-  const total = batchTasks.length
-  const done = batchTasks.filter((task) => task.status === 'completed').length
-  const failed = total - done
-  if (failed === 0) {
-    message.success(t('views.agents.kb_batch_done_all', { total }))
-  } else {
-    message.warning(t('views.agents.kb_batch_done_partial', { total, done, failed }), {
-      duration: 8000,
-    })
-  }
-}
-
-function finishTask(task) {
-  clearTimer(task)
-  persistActiveTasks()
-  fetchList()
-  maybeReportBatch(task.batchId)
-}
-
-function clearFinishedTasks() {
-  tasks.value.forEach((task) => {
-    if (!isTaskActive(task)) clearTimer(task)
-  })
-  tasks.value = tasks.value.filter((task) => isTaskActive(task))
-}
-
-function restoreTasks() {
-  let saved = []
-  try {
-    saved = JSON.parse(sessionStorage.getItem(storageKey()) || '[]')
-  } catch (e) {
-    saved = []
-  }
-  saved.forEach((item) => {
-    if (!item?.task_id) return
-    const task = makeTask({ filename: item.filename || '', taskId: item.task_id })
-    task.status = 'queued'
-    startPolling(task)
-  })
 }
 
 const columns = [
@@ -794,88 +585,6 @@ async function fetchList() {
   }
 }
 
-function onUploadChange(options) {
-  const f = options.file?.file
-  uploadRef.value?.clear()
-  if (!f) return
-  const name = f.name || ''
-  const size = Number(f.size) || 0
-  if (!pendingFiles.value.some((p) => p.name === name && p.size === size)) {
-    pendingFiles.value.push({
-      file: f,
-      name,
-      ext: extFromName(name),
-      size,
-      modifiedAt: f.lastModified || null,
-      overLimit: size > MAX_FILE_BYTES,
-    })
-  }
-  showConfirmModal.value = true
-}
-
-function cancelConfirm() {
-  pendingFiles.value = []
-  showConfirmModal.value = false
-}
-
-function onConfirmModalShowUpdate(v) {
-  if (!v) cancelConfirm()
-}
-
-function confirmUpload() {
-  const items = validPendingFiles.value
-  if (!items.length) return
-  const batchId = ++batchSeq
-  pendingFiles.value = []
-  showConfirmModal.value = false
-  items.forEach((item) => {
-    const task = makeTask({ filename: item.name, batchId })
-    uploadOne(task, item.file)
-  })
-}
-
-async function uploadOne(task, file) {
-  const fd = new FormData()
-  fd.append('file', file)
-  try {
-    const res = await api.uploadKbDocument(
-      agentId.value,
-      fd,
-      (ev) => {
-        if (ev?.total) {
-          task.percent = Math.min(100, Math.round((ev.loaded / ev.total) * 100))
-        }
-      },
-      { noErrorMessage: true }
-    )
-    const taskId = res?.data?.task_id
-    if (!taskId) throw new Error('no task id')
-    task.taskId = taskId
-    task.status = 'queued'
-    task.percent = 0
-    persistActiveTasks()
-    startPolling(task)
-  } catch (e) {
-    task.status = 'failed'
-    task.error = e?.message || t('views.agents.kb_upload_failed_title')
-    maybeReportBatch(task.batchId)
-  }
-}
-
-async function cancelTask(task) {
-  if (!task.taskId) return
-  try {
-    await api.cancelKbUploadTask({ task_id: task.taskId }, { noErrorMessage: true })
-    task.status = 'cancelled'
-    task.percent = 0
-    clearTimer(task)
-    persistActiveTasks()
-    message.info(t('views.agents.kb_upload_cancel_requested'))
-  } catch (e) {
-    message.error(e?.message || t('views.agents.kb_upload_cancel_failed'))
-  }
-}
-
 async function handleDelete(displayFilename) {
   try {
     await api.deleteKbDocument({
@@ -900,10 +609,6 @@ onMounted(async () => {
   } finally {
     pageLoading.value = false
   }
-})
-
-onUnmounted(() => {
-  tasks.value.forEach(clearTimer)
 })
 </script>
 
@@ -1249,6 +954,14 @@ html.dark .agent-kb-tasks::-webkit-scrollbar-thumb {
 }
 .agent-kb-task-stage-error {
   color: var(--n-error-color);
+}
+.agent-kb-task-more,
+.agent-kb-file-more {
+  padding: 8px 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--n-text-color-3);
 }
 .agent-kb-overview {
   padding: 14px 16px;

@@ -297,18 +297,27 @@ def _upload_kb_images_and_rewrite_paths(
         c["image_path"] = rel
 
 
+def _sha256_file(path: str) -> str:
+    """流式计算文件哈希（避免把整份文档读入内存）。"""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def run_ingest_pipeline_sync(
     *,
     kb_scope: str,
     user_id: int,
     agent_id: int,
     display_filename: str,
-    content: bytes,
+    source_path: str,
     progress_cb: Callable[[str, int, int], None] | None = None,
     guard: KbUploadTaskGuard | None = None,
 ) -> dict:
     """
-    同步执行单文档入库流水线（由 kb_job 在后台工作线程调用，不阻塞事件循环）。
+    同步执行单文档入库流水线（由 kb_job 在后台工作线程/独立 worker 调用，不阻塞事件循环）。
 
     「先处理后替换」语义：
     - 解析 + 全部向量生成成功之前不碰旧数据；失败/超时/取消时旧文档原样保留，仅清理本次临时产物。
@@ -319,7 +328,7 @@ def run_ingest_pipeline_sync(
     :param user_id: 用户ID
     :param agent_id: 智能体ID
     :param display_filename: 展示文件名
-    :param content: 文件内容字节
+    :param source_path: 源文件本地路径（调用方负责生命周期与清理）
     :param progress_cb: 阶段进度回调
     :param guard: 协作式中止检查
     :return: 文档元数据字典（unchanged 表示内容未变化跳过重建）
@@ -333,7 +342,7 @@ def run_ingest_pipeline_sync(
         raise ValueError("未配置 EMBEDDING_API_KEY，无法生成向量")
 
     check.checkpoint()
-    content_hash = hashlib.sha256(content).hexdigest()
+    content_hash = _sha256_file(source_path)
 
     # 同展示名且内容未变化：直接返回现有元数据，不解析不重建
     db = SessionLocal()
@@ -370,16 +379,13 @@ def run_ingest_pipeline_sync(
     images_prefix = _document_images_key_prefix(user_id, agent_id, display_filename)
     doc_mime = mimetypes.guess_type(display_filename)[0] or "application/octet-stream"
 
-    suffix = Path(display_filename).suffix.lower() or ".bin"
     with tempfile.TemporaryDirectory(prefix="kura_kb_") as tmpdir:
-        tmp_doc_path = Path(tmpdir) / f"source{suffix}"
-        tmp_doc_path.write_bytes(content)
         images_tmp_root = Path(tmpdir) / "images"
 
         report("parsing", 0, 1)
         try:
             chunks = _multimodal_loader.load_document(
-                str(tmp_doc_path), display_filename, kb_scope, user_id, agent_id,
+                str(source_path), display_filename, kb_scope, user_id, agent_id,
                 images_root_dir=str(images_tmp_root),
             )
         except Exception as e:
@@ -442,7 +448,7 @@ def run_ingest_pipeline_sync(
 
         # 全部向量生成成功：上传图片与文档本体到对象存储；图片 chunk 的 image_path 改写为相对 relpath
         _upload_kb_images_and_rewrite_paths(chunks, images_tmp_root)
-        obs.save_bytes(doc_key, content, content_type=doc_mime)
+        obs.save_file(doc_key, source_path, content_type=doc_mime)
     # 临时目录（文档副本 + 抽取图片）随 with 退出自动清理
 
     # 替换落库临界区（同名并发上传互斥，后完成者生效；纯写入、无嵌入调用，数秒内完成）

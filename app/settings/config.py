@@ -173,8 +173,31 @@ class Settings(BaseSettings):
     KB_UPLOAD_MAX_BYTES: int = 50 * 1024 * 1024
     # 同时并行处理的文档数上限；超出在队列等待（status=queued）
     KB_UPLOAD_MAX_PARALLEL: int = 8
+    # 受理模式：queue=独立 worker 进程消费（生产推荐）；inline=API 进程线程池（本地开发）
+    KB_UPLOAD_MODE: str = "inline"
+    # 独立 worker 的处理线程数（KB_UPLOAD_MODE=queue 时生效）
+    KB_WORKER_THREADS: int = 4
+    # 全局排队 + 处理中任务数上限（0 表示不限制）；超过返回 429 让前端稍后重试
+    KB_UPLOAD_QUEUE_MAX: int = 500
+    # 单用户活动任务（排队 + 处理中）上限（0 表示不限制）
+    KB_UPLOAD_USER_MAX_ACTIVE: int = 600
+    # 用户活动任务集合 TTL（秒）：worker 崩溃未清理的陈旧计数在此期限内自动过期
+    KB_UPLOAD_USER_ACTIVE_TTL_SECONDS: int = 7200
+    # worker 崩溃回收阈值（秒）：processing 中任务心跳超过该时长才会被重投/判死
+    KB_UPLOAD_STALE_SECONDS: int = 900
+    # 受理阶段的 pending 对象 key 前缀（处理后由 worker 删除）
+    KB_UPLOAD_PENDING_PREFIX: str = "pending-uploads"
     # 同名文档「替换落库」阶段的 Redis 互斥锁 TTL（秒）
     KB_UPLOAD_SWAP_LOCK_TTL_SECONDS: int = 600
+    # 嵌入调用失败（429 限流 / 5xx / 网络抖动）的最大自动重试次数（指数退避 + 抖动）
+    KB_UPLOAD_EMBEDDING_MAX_RETRIES: int = 3
+    # 重试退避基数（秒）：第 n 次重试等待 base * 2**(n-1)，上限 KB_UPLOAD_EMBEDDING_RETRY_MAX_SECONDS
+    KB_UPLOAD_EMBEDDING_RETRY_BASE_SECONDS: float = 1.0
+    KB_UPLOAD_EMBEDDING_RETRY_MAX_SECONDS: float = 8.0
+    # 全局并发调用嵌入 API 的上限（跨所有上传线程共享），避免并发过高触发服务商限流
+    EMBEDDING_MAX_CONCURRENCY: int = 4
+    # 等待嵌入并发额度的最长时间（秒），超时按调用失败处理
+    EMBEDDING_CONCURRENCY_WAIT_SECONDS: int = 120
 
     # 智能体知识库文档在对象存储 bucket 内的 key 前缀：user_agent_docs/user_{id}/{agent_id}/
     USER_AGENT_KB_DOCS_ROOT: str = "user_agent_docs"

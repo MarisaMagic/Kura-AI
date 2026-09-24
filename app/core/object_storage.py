@@ -12,7 +12,7 @@ import os
 import tempfile
 import threading
 from contextlib import contextmanager
-from typing import Iterator, Optional, Tuple
+from typing import Any, Iterator, Optional, Tuple
 
 from loguru import logger
 from minio import Minio
@@ -97,6 +97,28 @@ def save_file(key: str, file_path: str, content_type: str = "application/octet-s
     return key
 
 
+def save_stream(
+    key: str,
+    stream: Any,
+    length: int,
+    content_type: str = "application/octet-stream",
+) -> str:
+    """
+    从可读文件对象流式上传（上传受理直接落 pending 区，不把整份文件读进内存）。
+    :param stream: 已定位到起始位置的可读对象（BytesIO / SpooledTemporaryFile 等）
+    :param length: 字节数（minio 需要显式长度）
+    """
+    key = _validate_key(key)
+    get_client().put_object(
+        settings.S3_BUCKET,
+        key,
+        stream,
+        length=int(length),
+        content_type=content_type,
+    )
+    return key
+
+
 def read_bytes(key: str) -> bytes:
     key = _validate_key(key)
     resp = None
@@ -177,16 +199,26 @@ def delete_prefix(prefix: str) -> int:
 
 @contextmanager
 def download_temp(key: str, suffix: str = "") -> Iterator[str]:
-    """下载对象到本地临时文件，供只接受本地路径的解析库使用；退出自动删除。"""
+    """下载对象到本地临时文件（流式写盘，不整份读入内存）；退出自动删除。"""
     key = _validate_key(key)
     if not suffix:
         suffix = os.path.splitext(key)[1]
     fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    resp = None
     try:
+        resp = get_client().get_object(settings.S3_BUCKET, key)
         with os.fdopen(fd, "wb") as f:
-            f.write(read_bytes(key))
+            for chunk in resp.stream(1024 * 1024):
+                f.write(chunk)
         yield tmp_path
+    except S3Error as e:
+        if e.code in _NOT_FOUND_CODES:
+            raise ObjectNotFoundError(key) from e
+        raise
     finally:
+        if resp is not None:
+            resp.close()
+            resp.release_conn()
         try:
             os.remove(tmp_path)
         except OSError:
