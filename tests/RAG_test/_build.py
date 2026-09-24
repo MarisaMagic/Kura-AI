@@ -1,24 +1,35 @@
-"""从 CRUD-RAG 抽取 Kura-AI 闭集 RAG 评测包（1doc / 2doc / 3doc）。"""
+"""从 CRUD-RAG 抽取 Kura-AI 闭集 RAG 评测包（1doc / 2doc / 3doc）。
+
+默认输出到脚本同级目录（tests/RAG_test/<task>/），抽取 80 题 + 10 OOD。
+可用 --n-cases 0 抽全量合格样本、--ood-count 扩大留出集、--out-root 输出到仓库外。
+
+留出集（held-out）语义：ood_count 条样本先被划出且**不写入 documents/**，
+题目进 ood_questions.json，用于测「知识库中未找到相关资料」的拒答。
+"""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 SEED = 42
-N_CASES = 80
-N_OOD = 10
+DEFAULT_N_CASES = 80
+DEFAULT_OOD_COUNT = 10
 MIN_NEWS_LEN = 200
 
+# 80 题基准配额；--n-cases 变化时按比例缩放
 STRATUM_QUOTA = {
     "multi": 15,
     "numeric": 40,
     "named": 25,
 }
+QUOTA_BASE = sum(STRATUM_QUOTA.values())
 
 TASK_NEWS_KEYS = {
     "1doc": ("news1",),
@@ -99,11 +110,14 @@ def classify(item: dict) -> str:
     return "other"
 
 
-def is_eligible(item: dict, task: str) -> bool:
+def is_eligible(item: dict, task: str, *, apply_filter: bool = True) -> bool:
     question = (item.get("questions") or "").strip()
     answer = (item.get("answers") or "").strip()
     if not question or not answer or not (item.get("ID") or "").strip():
         return False
+    if not apply_filter:
+        # 仅要求待用新闻存在且非空
+        return all((item.get(k) or "").strip() for k in news_keys(task))
     for key in news_keys(task):
         if len(clean_news(item.get(key) or "")) < MIN_NEWS_LEN:
             return False
@@ -118,26 +132,39 @@ def take_stratum(pool: list[dict], n: int, used: set[str], rng: random.Random) -
     return picked
 
 
-def stratified_sample(eligible: list[dict], rng: random.Random) -> list[dict]:
+def scaled_quota(n_cases: int) -> dict[str, int]:
+    """把 80 题基准配额按比例缩放到 n_cases，余数补给 numeric。"""
+    quota = {k: int(round(n_cases * v / QUOTA_BASE)) for k, v in STRATUM_QUOTA.items()}
+    diff = n_cases - sum(quota.values())
+    quota["numeric"] = max(0, quota["numeric"] + diff)
+    return quota
+
+
+def stratified_sample(eligible: list[dict], rng: random.Random, n_cases: int) -> list[dict]:
+    if n_cases >= len(eligible):
+        picked = list(eligible)
+        rng.shuffle(picked)
+        return picked
+
     by_stratum: dict[str, list[dict]] = defaultdict(list)
     for item in eligible:
         by_stratum[classify(item)].append(item)
 
+    quota = scaled_quota(n_cases)
     used: set[str] = set()
     selected: list[dict] = []
-    for name, quota in STRATUM_QUOTA.items():
-        selected.extend(take_stratum(by_stratum.get(name, []), quota, used, rng))
+    for name in STRATUM_QUOTA:  # 保持与既有 80 题抽取一致的顺序
+        selected.extend(take_stratum(by_stratum.get(name, []), quota.get(name, 0), used, rng))
 
-    if len(selected) < N_CASES:
+    if len(selected) < n_cases:
         leftover = [x for x in eligible if x["ID"] not in used]
         rng.shuffle(leftover)
-        need = N_CASES - len(selected)
-        extra = leftover[:need]
+        extra = leftover[: n_cases - len(selected)]
         selected.extend(extra)
         used.update(x["ID"] for x in extra)
 
     rng.shuffle(selected)
-    return selected[:N_CASES]
+    return selected[:n_cases]
 
 
 def file_stem(item_id: str, news_key: str, task: str) -> str:
@@ -174,29 +201,49 @@ def write_documents(docs_dir: Path, item: dict, task: str) -> None:
         path.write_text(f"# {title}\n\n{body}\n", encoding="utf-8")
 
 
-def build_task(task: str, source: Path, root: Path) -> None:
+def build_task(
+    task: str,
+    source: Path,
+    raw: dict,
+    out_root: Path,
+    *,
+    n_cases: int,
+    ood_count: int,
+    apply_filter: bool,
+) -> dict:
     source_key = TASK_SOURCE_KEY[task]
-    with source.open(encoding="utf-8") as f:
-        raw = json.load(f)
     items = raw.get(source_key) or []
     if not items:
         raise SystemExit(f"{source_key} is empty")
 
-    eligible = [x for x in items if is_eligible(x, task)]
-    if len(eligible) < N_CASES:
-        raise SystemExit(f"{task}: eligible samples {len(eligible)} < {N_CASES}")
+    eligible = [x for x in items if is_eligible(x, task, apply_filter=apply_filter)]
+    if not eligible:
+        raise SystemExit(f"{task}: no eligible samples")
+    if ood_count >= len(eligible):
+        raise SystemExit(f"{task}: ood_count {ood_count} >= eligible {len(eligible)}")
 
     rng = random.Random(SEED)
-    selected = stratified_sample(eligible, rng)
-    selected_ids = {x["ID"] for x in selected}
 
-    unused = [x for x in eligible if x["ID"] not in selected_ids]
-    rng.shuffle(unused)
-    ood_items = unused[:N_OOD]
-    if len(ood_items) < N_OOD:
-        raise SystemExit(f"{task}: not enough unused samples for OOD: {len(ood_items)}")
+    take_all = n_cases <= 0 or n_cases >= len(eligible) - ood_count
+    if take_all:
+        # 先划出留出集，其余全部作为库内题
+        shuffled = list(eligible)
+        rng.shuffle(shuffled)
+        ood_items = shuffled[:ood_count]
+        selected = shuffled[ood_count:]
+        if n_cases > 0 and n_cases < len(eligible) - ood_count:
+            print(f"[warn] {task}: n_cases {n_cases} 超过可用池，已取全部 {len(selected)} 题")
+    else:
+        selected = stratified_sample(eligible, rng, n_cases)
+        selected_ids = {x["ID"] for x in selected}
+        unused = [x for x in eligible if x["ID"] not in selected_ids]
+        rng.shuffle(unused)
+        ood_items = unused[:ood_count]
 
-    out_dir = root / task
+    if len(ood_items) < ood_count:
+        raise SystemExit(f"{task}: not enough held-out samples: {len(ood_items)} < {ood_count}")
+
+    out_dir = out_root / task
     docs_dir = out_dir / "documents"
     docs_dir.mkdir(parents=True, exist_ok=True)
     for old in docs_dir.glob("*.md"):
@@ -205,7 +252,7 @@ def build_task(task: str, source: Path, root: Path) -> None:
         write_documents(docs_dir, item, task)
 
     cases = [to_case(x, task) for x in selected]
-    strata_counts = defaultdict(int)
+    strata_counts: dict[str, int] = defaultdict(int)
     for c in cases:
         strata_counts[c["stratum"]] += 1
 
@@ -230,7 +277,7 @@ def build_task(task: str, source: Path, root: Path) -> None:
     ood = {
         "version": "1.0",
         "purpose": "out-of-kb refusal",
-        "note": f"问题来自未入选的 {task} 样本，对应新闻未写入 documents/，用于测拒答。",
+        "note": f"留出集：{task} 的 {len(ood_items)} 条样本，对应新闻未写入 documents/，用于测拒答。",
         "seed": SEED,
         "n_cases": len(ood_items),
         "cases": [
@@ -250,40 +297,106 @@ def build_task(task: str, source: Path, root: Path) -> None:
     )
 
     print(f"task: {task}")
-    print(f"source: {source}")
-    print(f"eligible: {len(eligible)} / {len(items)}")
+    print(f"eligible: {len(eligible)} / {len(items)} (filter={apply_filter})")
     print(f"in-kb: {len(cases)} strata={dict(strata_counts)}")
     print(f"ood: {len(ood_items)}")
     print(f"documents: {docs_dir} ({dataset['n_documents']} files)")
 
+    return {
+        "source_key": source_key,
+        "n_source": len(items),
+        "n_eligible": len(eligible),
+        "n_cases": len(cases),
+        "n_ood": len(ood_items),
+        "n_documents": dataset["n_documents"],
+        "strata": dict(strata_counts),
+    }
+
+
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write_manifest(out_root: Path, source: Path, subsets: dict, args) -> None:
+    manifest_path = out_root / "manifest.json"
+    existing: dict = {}
+    if manifest_path.is_file():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            existing = {}
+
+    merged = dict(existing.get("subsets") or {})
+    merged.update(subsets)
+
+    manifest = {
+        "version": "1.0",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source_file": str(source),
+        "source_sha256": file_sha256(source),
+        "seed": SEED,
+        "filter": {
+            "enabled": not args.no_filter,
+            "min_news_len": MIN_NEWS_LEN,
+            "answer_support_required": not args.no_filter,
+        },
+        "requested": {"n_cases": args.n_cases, "ood_count": args.ood_count},
+        "subsets": merged,
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build Kura-AI RAG eval packs")
+    parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE, help="CRUD-RAG split_merged.json")
+    parser.add_argument("--task", choices=("all", "1doc", "2doc", "3doc"), default="1doc")
     parser.add_argument(
-        "--source",
-        type=Path,
-        default=DEFAULT_SOURCE,
-        help="CRUD-RAG split_merged.json path",
-    )
-    parser.add_argument(
-        "--task",
-        choices=("1doc", "2doc", "3doc"),
-        default="1doc",
-        help="Which split to build (writes to tests/RAG_test/<task>/)",
-    )
-    parser.add_argument(
-        "--root",
+        "--out-root",
         type=Path,
         default=ROOT,
-        help="RAG_test root directory",
+        help="输出根目录；各子集写入 <out-root>/<task>/",
     )
+    parser.add_argument(
+        "--n-cases",
+        type=int,
+        default=DEFAULT_N_CASES,
+        help="每个子集库内题数；0 表示取全部合格样本（扣除留出集）",
+    )
+    parser.add_argument("--ood-count", type=int, default=DEFAULT_OOD_COUNT, help="每子集留出集（OOD）题数")
+    parser.add_argument("--no-filter", action="store_true", help="跳过合格性过滤（不校验新闻长度与答案可支撑）")
     args = parser.parse_args()
 
     source = args.source.resolve()
     if not source.is_file():
         raise SystemExit(f"source not found: {source}")
+    out_root = args.out_root.resolve()
 
-    build_task(args.task, source, args.root.resolve())
+    with source.open(encoding="utf-8") as f:
+        raw = json.load(f)
+
+    tasks = ["1doc", "2doc", "3doc"] if args.task == "all" else [args.task]
+    subsets: dict = {}
+    for task in tasks:
+        subsets[task] = build_task(
+            task,
+            source,
+            raw,
+            out_root,
+            n_cases=args.n_cases,
+            ood_count=args.ood_count,
+            apply_filter=not args.no_filter,
+        )
+        print()
+
+    write_manifest(out_root, source, subsets, args)
+    print(f"manifest: {out_root / 'manifest.json'}")
 
 
 if __name__ == "__main__":

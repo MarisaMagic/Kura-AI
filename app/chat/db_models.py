@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -142,6 +142,133 @@ class KbImage(Base):
     
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ExpDataset(Base):
+    """
+    实验数据集（RAG 检索评测）：文档 + 问题集的逻辑分组。
+    文档本体复用知识库管线（kb_scope = exp:d{id}，元数据在 mg_kb_documents）。
+    id: 主键
+    name: 数据集名称
+    description: 描述
+    doc_count: 已入库文档数（缓存值，随上传/删除更新）
+    question_count: 问题数（含 OOD）
+    created_by: 创建者用户ID
+    created_at/updated_at: 时间戳
+    """
+
+    __tablename__ = "mg_exp_datasets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    doc_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    question_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_by: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class ExpQuestion(Base):
+    """
+    实验问题集条目。
+    id: 主键
+    dataset_id: 所属数据集
+    ext_id: 外部 ID（如 RAG_test case id）
+    question: 问题文本
+    answer: 参考答案（可空）
+    gold_file_keys: 目标文档文件名列表（命中判定依据；OOD 题为空）
+    stratum: 分层标签（numeric/named/multi 等）
+    is_ood: 是否库外拒答题
+    created_at: 创建时间
+    """
+
+    __tablename__ = "mg_exp_questions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    dataset_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    ext_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    gold_file_keys: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    stratum: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    is_ood: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ExpRun(Base):
+    """
+    实验运行：一次多配置消融对比。
+    id: 主键
+    dataset_id: 数据集
+    name: 运行名称
+    configs: 配置矩阵（JSONB 列表，每项含 retrieval_mode/fusion/rerank/top_k/rrf_k/candidate_multiplier）
+    question_limit: 评测题数上限（0 表示全部）
+    include_ood: 是否包含 OOD 题
+    snapshot: 运行时数据集快照（doc_count/question_count）
+    status: queued/running/completed/cancelled/failed
+    created_by: 创建者用户ID
+    error: 失败原因
+    created_at/finished_at: 时间戳
+    """
+
+    __tablename__ = "mg_exp_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    dataset_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    configs: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    question_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    include_ood: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued", index=True)
+    created_by: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+
+
+class ExpRunResult(Base):
+    """
+    实验运行逐题结果（run × config × question 一行）。
+    id: 主键
+    run_id: 运行ID（级联删除）
+    config_idx: 配置在 configs 中的下标
+    question_id: 问题ID
+    is_ood: 冗余标记，便于聚合
+    retrieved: 文档级检索结果（JSONB 列表：filename/rank/score/chunk 摘要）
+    hit: 是否命中（top_k 内出现任一 gold 文档）
+    hit_rank: 首个 gold 文档的文档级排名（未命中为 0）
+    reciprocal_rank: 1/hit_rank
+    recall: Recall@k（gold 命中占比）
+    top1_score: 首位结果分数（OOD 误命中分析）
+    max_rerank_score: rerank 最高分（未 rerank 为空）
+    rerank_below_min: rerank 分数门控是否判定「无相关资料」
+    latency_ms: 检索耗时
+    error: 单题失败原因
+    created_at: 创建时间
+    """
+
+    __tablename__ = "mg_exp_run_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("mg_exp_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    config_idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    question_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    is_ood: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    retrieved: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    hit_rank: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reciprocal_rank: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    recall: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    top1_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    max_rerank_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rerank_below_min: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error: Mapped[str] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class ChatSession(Base):

@@ -45,6 +45,7 @@ export default defineConfig(({ command, mode }) => {
           manualChunks(id) {
             if (!id.includes('node_modules')) return undefined
             if (id.includes('naive-ui')) return 'vendor-naive-ui'
+            if (id.includes('echarts') || id.includes('zrender')) return 'vendor-echarts'
             if (id.includes('highlight.js')) return 'vendor-highlight'
             if (id.includes('katex') || id.includes('markdown-it-texmath')) return 'vendor-katex'
             if (id.includes('markdown-it') || id.includes('dompurify')) return 'vendor-markdown'

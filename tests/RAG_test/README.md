@@ -72,3 +72,26 @@ python tests/RAG_test/_build.py --task 3doc
 ```
 
 会覆盖对应子目录的 `documents/`、`dataset.json`、`ood_questions.json`。1doc 已测过，不要随意重跑，除非有意换样本。
+
+### 可选参数
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--task` | `1doc` | `1doc` / `2doc` / `3doc` / `all` |
+| `--n-cases` | `80` | 库内题数；`0` = 取全部合格样本 |
+| `--ood-count` | `10` | 每子集留出集（OOD）题数 |
+| `--out-root` | 脚本同级目录 | 输出根目录，各子集写入 `<out-root>/<task>/` |
+| `--no-filter` | 关 | 跳过合格性过滤（不校验新闻长度与答案可支撑） |
+
+留出集语义：`--ood-count` 条样本先被划出且**不写入 `documents/`**，题目进 `ood_questions.json`，
+库内题与 OOD 题无 ID 重叠、无文档交叉。
+
+全量包（1430 题 / 3073 篇 / 300 OOD）生成示例，输出到仓库外：
+
+```sh
+python tests/RAG_test/_build.py --task all --n-cases 0 --ood-count 100 \
+  --out-root D:\LLMProjects\Kura-RAG-eval-full
+```
+
+导入实验平台见 [`scripts/import_rag_test.py`](../../scripts/import_rag_test.py)：全量包必须用
+不同的 `--dataset-prefix`，并支持 `--limit` 分阶段灌库（入库管线按内容哈希去重，可断点续传）。

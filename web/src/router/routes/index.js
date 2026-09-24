@@ -151,6 +151,41 @@ export const basicRoutes = [
     redirect: '/agent-hub',
     isHidden: true,
   },
+  /** 实验平台子页（主页面 /system/experiment 由后端「系统管理」动态菜单注册；勿与其冲突） */
+  {
+    path: '/system/experiment/dataset/:id',
+    component: Layout,
+    isHidden: true,
+    children: [
+      {
+        path: '',
+        name: 'ExpDatasetDetail',
+        component: () => import('@/views/experiment/dataset.vue'),
+        meta: {
+          title: '实验数据集',
+          hidden: true,
+          activeMenu: '实验平台',
+        },
+      },
+    ],
+  },
+  {
+    path: '/system/experiment/run/:id',
+    component: Layout,
+    isHidden: true,
+    children: [
+      {
+        path: '',
+        name: 'ExpRunResult',
+        component: () => import('@/views/experiment/run.vue'),
+        meta: {
+          title: '实验结果',
+          hidden: true,
+          activeMenu: '实验平台',
+        },
+      },
+    ],
+  },
   /** 智能体对话（从智能体中心进入；勿与 /agents 下编辑器路由冲突） */
   {
     path: '/agent-hub/chat/:agentId',

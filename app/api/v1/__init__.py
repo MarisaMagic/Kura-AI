@@ -6,6 +6,7 @@ from .apis import apis_router
 from .auditlog import auditlog_router
 from .base import base_router
 from .depts import depts_router
+from .experiment import router as experiment_router
 from .media import router as media_router
 from .menus import menus_router
 from .roles import roles_router
@@ -29,3 +30,4 @@ v1_router.include_router(menus_router, prefix="/menu", dependencies=[DependPermi
 v1_router.include_router(apis_router, prefix="/api", dependencies=[DependPermission])
 v1_router.include_router(depts_router, prefix="/dept", dependencies=[DependPermission])
 v1_router.include_router(auditlog_router, prefix="/auditlog", dependencies=[DependPermission])
+v1_router.include_router(experiment_router, prefix="/experiment", dependencies=[DependAuth])

@@ -159,4 +159,60 @@ export default {
   testAgentMcpServer: (agentId, data = {}) =>
     request.post(`/user-agent/mcp/servers/test?agent_id=${agentId}`, data, { timeout: 20000 }),
   getAgentMcpPresets: () => request.get('/user-agent/mcp/presets'),
+  /** 实验平台（仅超级管理员） */
+  getExpDatasets: () => request.get('/experiment/datasets', { timeout: 30000 }),
+  createExpDataset: (data = {}) => request.post('/experiment/datasets', data),
+  getExpDatasetDetail: (params = {}) => request.get('/experiment/datasets/detail', { params }),
+  deleteExpDataset: (params = {}) =>
+    request.delete('/experiment/datasets', { params, timeout: 60000 }),
+  getExpDocuments: (params = {}) =>
+    request.get('/experiment/documents', { params, timeout: 30000 }),
+  uploadExpDocument: (datasetId, data, onUploadProgress, config = {}) =>
+    request.post(`/experiment/documents/upload?dataset_id=${datasetId}`, data, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 0,
+      onUploadProgress,
+      ...config,
+    }),
+  getExpUploadStatus: (params = {}, config = {}) =>
+    request.get('/experiment/documents/upload/status', {
+      params,
+      timeout: 30000,
+      noErrorMessage: true,
+      ...config,
+    }),
+  /**
+   * 批量查询上传任务进度：一次传 <=200 个 task_id（逗号分隔），
+   * 大批量上传时替代逐任务轮询，避免把服务端打满。
+   */
+  getExpUploadStatusBatch: (taskIds, config = {}) =>
+    request.get('/experiment/documents/upload/status/batch', {
+      params: { task_ids: (taskIds || []).join(',') },
+      timeout: 30000,
+      noErrorMessage: true,
+      ...config,
+    }),
+  cancelExpUpload: (params = {}, config = {}) =>
+    request.post('/experiment/documents/upload/cancel', null, {
+      params,
+      timeout: 30000,
+      noErrorMessage: true,
+      ...config,
+    }),
+  deleteExpDocument: (params = {}) => request.delete('/experiment/documents', { params }),
+  importExpQuestions: (datasetId, data, replace = false) =>
+    request.post(`/experiment/questions/import?dataset_id=${datasetId}&replace=${replace}`, data, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 60000,
+    }),
+  getExpQuestions: (params = {}) => request.get('/experiment/questions', { params }),
+  deleteExpQuestion: (params = {}) => request.delete('/experiment/questions', { params }),
+  clearExpQuestions: (params = {}) => request.post('/experiment/questions/clear', null, { params }),
+  createExpRun: (data = {}) => request.post('/experiment/runs', data),
+  getExpRuns: (params = {}) => request.get('/experiment/runs', { params }),
+  getExpRunStatus: (params = {}) => request.get('/experiment/runs/status', { params }),
+  cancelExpRun: (params = {}) => request.post('/experiment/runs/cancel', null, { params }),
+  getExpRunResults: (params = {}) =>
+    request.get('/experiment/runs/results', { params, timeout: 60000 }),
+  deleteExpRun: (params = {}) => request.delete('/experiment/runs', { params }),
 }

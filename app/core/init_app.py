@@ -247,6 +247,47 @@ async def ensure_agent_menus():
                 await role.menus.add(hub)
 
 
+async def ensure_experiment_menu():
+    """实验平台（RAG 消融评测）：挂在「系统管理」下，仅超级管理员可见。
+
+    不授予任何角色——普通角色按授权取菜单，超管 usermenu 返回全库菜单（base.py），
+    因此该菜单天然只对超管展示；API 侧另有 DependSuperuser 严格校验。
+    存量库中曾以顶级菜单 /experiment 落库，启动时迁移为系统管理子项。
+    """
+    system = await Menu.filter(path="/system", parent_id=0).first()
+    if not system:
+        return
+    exp_menu = await Menu.filter(parent_id=system.id, path="experiment").first()
+    if not exp_menu:
+        legacy = await Menu.filter(path="/experiment", parent_id=0).first()
+        if legacy:
+            legacy.parent_id = system.id
+            legacy.path = "experiment"
+            legacy.component = "/experiment"
+            legacy.order = 7
+            legacy.icon = legacy.icon or "mdi:flask-outline"
+            await legacy.save()
+            exp_menu = legacy
+        else:
+            exp_menu = await Menu.create(
+                menu_type=MenuType.MENU,
+                name="实验平台",
+                path="experiment",
+                order=7,
+                parent_id=system.id,
+                icon="mdi:flask-outline",
+                is_hidden=False,
+                component="/experiment",
+                keepalive=False,
+                redirect=None,
+            )
+    # 防御性清理：该菜单绝不下放给任何角色（含管理员），否则非超管也能看到入口
+    for role in await Role.all():
+        existing = {m.id for m in await role.menus.all()}
+        if exp_menu.id in existing:
+            await role.menus.remove(exp_menu)
+
+
 async def ensure_user_agent_apis_for_roles():
     """智能体模块 API 同步到所有角色（新接口上线后自动补授权）。"""
     agent_apis = await Api.filter(tags="智能体模块")
@@ -311,5 +352,6 @@ async def init_data():
     await remove_legacy_top_menu_demo()
     await init_apis()
     await init_roles()
+    await ensure_experiment_menu()  # 必须在 init_roles 之后：避免首次种子把实验菜单授予所有角色
     await ensure_user_agent_apis_for_roles()
     await restrict_normal_role_api_grants()

@@ -61,5 +61,15 @@ class PermissionControl:
             raise HTTPException(status_code=403, detail=f"Permission denied method:{method} path:{path}")
 
 
+class SuperuserControl:
+    @classmethod
+    async def is_superuser(cls, current_user: User = Depends(AuthControl.is_authed)) -> "User":
+        """仅超级管理员放行（实验平台等敏感模块；管理员角色也不得访问）。"""
+        if not current_user.is_superuser:
+            raise HTTPException(status_code=403, detail="仅超级管理员可访问")
+        return current_user
+
+
 DependAuth = Depends(AuthControl.is_authed)
 DependPermission = Depends(PermissionControl.has_permission)
+DependSuperuser = Depends(SuperuserControl.is_superuser)
