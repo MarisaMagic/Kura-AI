@@ -88,7 +88,7 @@ services:
 
   standalone:
     container_name: kura-ai-milvus-standalone
-    image: milvusdb/milvus:v2.5.14
+    image: milvusdb/milvus:v2.6.21
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
@@ -111,7 +111,7 @@ services:
       - "etcd"
   attu:
     container_name: kura-ai-milvus-attu
-    image: zilliz/attu:v2.5.11  
+    image: zilliz/attu:v2.6.5  
     environment:
       - MILVUS_URL=standalone:19530  
       - PORT=3000

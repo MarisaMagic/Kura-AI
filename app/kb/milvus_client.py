@@ -5,7 +5,15 @@ Milvus：密集 + 稀疏混合检索，按 kb_scope 隔离。
 
 from __future__ import annotations
 
-from pymilvus import AnnSearchRequest, DataType, Function, FunctionType, MilvusClient, RRFRanker
+from pymilvus import (
+    AnnSearchRequest,
+    DataType,
+    Function,
+    FunctionType,
+    MilvusClient,
+    RRFRanker,
+    WeightedRanker,
+)
 
 from app.settings import settings
 
@@ -140,7 +148,8 @@ class MilvusManager:
         稀疏向量不使用本地 BM25 词表，改为服务端 BM25 Function（bm25_fn）：
         以 text 字段为输入、bm25_sparse 为输出，由 Milvus 在写入时自动计算，
         查询侧直接用文本发起 BM25 检索，彻底消除客户端词表漂移/IDF 失真问题。
-        analyzer 使用 standard（英文按词切分、中文按单字切分，与原有单字 BM25 行为一致）。
+        analyzer 使用内置 chinese（jieba 分词 + cnalphanumonly 过滤，保留中文词、
+        英文字母与数字 token）；变更 analyzer 需重建集合，见 app/kb/migrate_analyzer.py。
 
         索引：
         - dense_embedding: 使用 HNSW 索引
@@ -160,7 +169,13 @@ class MilvusManager:
         schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
         schema.add_field("dense_embedding", DataType.FLOAT_VECTOR, dim=dense_dim)
         schema.add_field("kb_scope", DataType.VARCHAR, max_length=128)
-        schema.add_field("text", DataType.VARCHAR, max_length=2000, enable_analyzer=True)
+        schema.add_field(
+            "text",
+            DataType.VARCHAR,
+            max_length=2000,
+            enable_analyzer=True,
+            analyzer_params={"type": "chinese"},
+        )
         schema.add_field("filename", DataType.VARCHAR, max_length=512)
         schema.add_field("file_type", DataType.VARCHAR, max_length=50)
         schema.add_field("file_path", DataType.VARCHAR, max_length=1024)
@@ -183,9 +198,8 @@ class MilvusManager:
         # BM25 Function 的输出字段（稀疏向量，无需建索引，由服务端在写入时基于 text 计算）
         schema.add_field("bm25_sparse", DataType.SPARSE_FLOAT_VECTOR)
 
-        # 服务端 BM25 稀疏向量（写入时基于 text 自动计算）
-        # 注意：本 Milvus 版本（2.5.x）的 BM25 Function 不接受任何 params（analyzer 配置需 2.6+），
-        # 使用内置 standard 分词器（英文按词、中文按 unicode 词组切分；中文精确单字召回由 dense 腿兜底）。
+        # 服务端 BM25 稀疏向量（写入时基于 text 自动计算）；分词由 text 字段的
+        # analyzer_params（内置 chinese = jieba + cnalphanumonly）决定，需 Milvus 2.6+。
         bm25_function = Function(
             name="bm25_fn",
             function_type=FunctionType.BM25,
@@ -369,14 +383,18 @@ class MilvusManager:
         top_k: int,
         filter_expr: str,
         rrf_k: int = 60,
+        fusion: str = "rrf",
+        weighted_params: list[float] | None = None,
     ) -> list[dict]:
         """
-        混合检索：dense（HNSW）+ 服务端 BM25（bm25_fn，输入为查询文本），RRF 融合。
+        混合检索：dense（HNSW）+ 服务端 BM25（bm25_fn，输入为查询文本），RRF/加权融合。
         :param dense_embedding: 密集向量
         :param query_text: 查询文本（作为 BM25 Function 的输入）
         :param top_k: 限制返回的记录数
         :param filter_expr: 过滤表达式
         :param rrf_k: RRF 参数
+        :param fusion: 融合策略，"rrf"（默认）或 "weighted"（WeightedRanker）
+        :param weighted_params: weighted 融合的两腿权重 [dense_w, sparse_w]，默认 [0.7, 0.3]
         :return: 数据列表
         """
         output_fields = [
@@ -412,10 +430,15 @@ class MilvusManager:
         )
 
         """
-        RRF 重排序
-        RRF 是一种基于 Rerank 的排序算法，用于优化混合检索结果。
+        融合排序：RRF（默认，基于排名的融合）或 WeightedRanker（基于分数的加权融合）。
         """
-        reranker = RRFRanker(k=rrf_k)
+        if str(fusion or "rrf").lower() == "weighted":
+            weights = list(weighted_params or [0.7, 0.3])
+            if len(weights) != 2:
+                weights = [0.7, 0.3]
+            reranker = WeightedRanker(weights[0], weights[1])
+        else:
+            reranker = RRFRanker(k=rrf_k)
         results = self._get_client().hybrid_search(
             collection_name=self.collection_name,
             reqs=[dense_search, sparse_search],
@@ -487,6 +510,74 @@ class MilvusManager:
                 "image_path",    # 图片路径
                 "position_start", "position_end",  # 文本位置
                 "image_position_x", "image_position_y", "image_width", "image_height",  # 图片位置
+            ],
+            filter=filter_expr,
+        )
+        formatted: list[dict] = []
+        for hits in results:
+            for hit in hits:
+                ent = hit.get("entity", {}) or {}
+                cl = ent.get("chunk_level", 0)
+                formatted.append(
+                    {
+                        "id": hit.get("id"),
+                        "text": ent.get("text", ""),
+                        "filename": ent.get("filename", ""),
+                        "file_type": ent.get("file_type", ""),
+                        "page_number": ent.get("page_number", 0),
+                        "chunk_id": ent.get("chunk_id", ""),
+                        "parent_chunk_id": ent.get("parent_chunk_id", ""),
+                        "root_chunk_id": ent.get("root_chunk_id", ""),
+                        "chunk_level": ent.get("chunk_level", 0),
+                        "chunk_idx": ent.get("chunk_idx", 0),
+                        "kb_scope": ent.get("kb_scope", ""),
+                        "content_type": _normalize_content_type(ent.get("content_type"), cl),
+                        "image_path": ent.get("image_path", ""),
+                        "position_start": ent.get("position_start", 0),
+                        "position_end": ent.get("position_end", 0),
+                        "image_position_x": ent.get("image_position_x", 0),
+                        "image_position_y": ent.get("image_position_y", 0),
+                        "image_width": ent.get("image_width", 0),
+                        "image_height": ent.get("image_height", 0),
+                        "score": hit.get("distance", 0.0),
+                    }
+                )
+        return formatted
+
+    def sparse_retrieve(
+        self,
+        query_text: str,
+        top_k: int,
+        filter_expr: str,
+    ) -> list[dict]:
+        """
+        稀疏检索（仅服务端 BM25 腿），用于实验消融对比。
+        :param query_text: 查询文本（作为 BM25 Function 的输入）
+        :param top_k: 限制返回的记录数
+        :param filter_expr: 过滤表达式
+        :return: 数据列表
+        """
+        results = self._get_client().search(
+            collection_name=self.collection_name,
+            data=[query_text],
+            anns_field="bm25_sparse",
+            search_params={"metric_type": "BM25"},
+            limit=top_k,
+            output_fields=[
+                "text",
+                "filename",
+                "file_type",
+                "page_number",
+                "chunk_id",
+                "parent_chunk_id",
+                "root_chunk_id",
+                "chunk_level",
+                "chunk_idx",
+                "kb_scope",
+                "content_type",
+                "image_path",
+                "position_start", "position_end",
+                "image_position_x", "image_position_y", "image_width", "image_height",
             ],
             filter=filter_expr,
         )
