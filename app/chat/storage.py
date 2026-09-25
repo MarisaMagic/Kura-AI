@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from datetime import datetime
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.exc import IntegrityError
 
 from app.chat.cache import cache
@@ -15,11 +17,75 @@ from app.chat.database import SessionLocal
 from app.chat.db_models import ChatAttachment as ChatAttachmentRow
 from app.chat.db_models import ChatMessage as ChatMessageRow
 from app.chat.db_models import ChatSession as ChatSessionRow
+from app.chat.errors import ChatQuotaExceeded
 from app.chat.message_codec import envelope_to_langchain_message, msg_content_to_str, serialize_message_envelope
 from app.chat.preview_session import (
     EDITOR_PREVIEW_SESSION_PREFIX,
     is_editor_preview_session,
 )
+from app.settings import settings
+
+logger = logging.getLogger(__name__)
+
+
+def _int_setting(name: str, default: int) -> int:
+    try:
+        return int(getattr(settings, name, default) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _cap_preview(text: str) -> str:
+    """预览列字符上限（完整正文存 content_json，预览仅用于列表/展示）。"""
+    cap = _int_setting("CHAT_MESSAGE_PREVIEW_CHARS", 2000)
+    s = text or ""
+    if cap > 0 and len(s) > cap:
+        return s[:cap] + "…"
+    return s
+
+
+def _cap_extra_fields(fields: dict) -> dict:
+    """限制助手消息附加 JSON 体积：列表长度上限 + 整体字符兜底（超出丢调试字段）。"""
+
+    def _cap_list(value, name: str, default: int):
+        limit = _int_setting(name, default)
+        if isinstance(value, list) and limit > 0 and len(value) > limit:
+            return value[-limit:]
+        return value
+
+    fields["rag_steps"] = _cap_list(fields.get("rag_steps"), "CHAT_RAG_STEPS_MAX", 50)
+    fields["thinking_items"] = _cap_list(fields.get("thinking_items"), "CHAT_THINKING_ITEMS_MAX", 200)
+    fields["sources"] = _cap_list(fields.get("sources"), "CHAT_SOURCES_MAX", 50)
+    thinking_text = fields.get("thinking_text")
+    if isinstance(thinking_text, str):
+        cap = _int_setting("CHAT_MESSAGE_PREVIEW_CHARS", 2000)
+        if cap > 0 and len(thinking_text) > cap:
+            fields["thinking_text"] = thinking_text[:cap] + "…"
+
+    # 整体字符兜底：先丢纯调试的 rag_trace，再对列表逐步对半裁，直到低于预算
+    budget = _int_setting("CHAT_EXTRA_JSON_MAX_CHARS", 8000)
+    if budget > 0:
+        for _ in range(8):
+            total = 0
+            for key in ("rag_trace", "rag_steps", "thinking_items", "sources", "image_references"):
+                value = fields.get(key)
+                if not value:
+                    continue
+                try:
+                    total += len(json.dumps(value, ensure_ascii=False, default=str))
+                except Exception:  # noqa: BLE001
+                    continue
+            if total <= budget:
+                break
+            if fields.get("rag_trace") is not None:
+                fields["rag_trace"] = None
+                continue
+            for key in ("thinking_items", "rag_steps", "sources", "image_references"):
+                value = fields.get(key)
+                if isinstance(value, list) and value:
+                    fields[key] = value[: max(1, len(value) // 2)]
+                    break
+    return fields
 
 
 class ConversationStorage:
@@ -195,15 +261,17 @@ class ConversationStorage:
         raw_err = extra.get("error_text")
         if raw_err is not None:
             error_text = str(raw_err).strip() or None
-        return {
-            "rag_trace": extra.get("rag_trace"),
-            "rag_steps": extra.get("rag_steps"),
-            "error_text": error_text,
-            "image_references": extra.get("image_references"),
-            "sources": extra.get("sources"),
-            "thinking_text": extra.get("thinking_text"),
-            "thinking_items": extra.get("thinking_items"),
-        }
+        return _cap_extra_fields(
+            {
+                "rag_trace": extra.get("rag_trace"),
+                "rag_steps": extra.get("rag_steps"),
+                "error_text": error_text,
+                "image_references": extra.get("image_references"),
+                "sources": extra.get("sources"),
+                "thinking_text": extra.get("thinking_text"),
+                "thinking_items": extra.get("thinking_items"),
+            }
+        )
 
     def _session_query(self, db, user_id: int, agent_id: int, session_id: str):
         return db.query(ChatSessionRow).filter(
@@ -247,6 +315,78 @@ class ConversationStorage:
                 session.metadata_json = metadata
         return session
 
+    def _enforce_session_quota(self, db, user_id: int, agent_id: int, session_id: str) -> None:
+        """新建会话前检查每用户每智能体会话数上限（已存在则放行）。"""
+        limit = _int_setting("CHAT_MAX_SESSIONS_PER_USER_AGENT", 200)
+        if limit <= 0:
+            return
+        exists = (
+            self._session_query(db, user_id, agent_id, session_id)
+            .with_entities(ChatSessionRow.id)
+            .first()
+        )
+        if exists:
+            return
+        count = int(
+            db.query(func.count(ChatSessionRow.id))
+            .filter(
+                ChatSessionRow.user_id == int(user_id),
+                ChatSessionRow.agent_id == int(agent_id),
+            )
+            .scalar()
+            or 0
+        )
+        if count >= limit:
+            raise ChatQuotaExceeded("session_limit", limit=limit)
+
+    @staticmethod
+    def _enforce_message_quota(current_rows: int, adding: int) -> None:
+        """写入前检查每会话消息行上限（adding 可为负，表示本次净减少）。"""
+        limit = _int_setting("CHAT_MAX_MESSAGES_PER_SESSION", 4000)
+        if limit <= 0:
+            return
+        if int(current_rows) + int(adding) > limit:
+            raise ChatQuotaExceeded("message_limit", limit=limit)
+
+    def check_chat_quota(
+        self, user_id: int, agent_id: int, session_id: str, *, reserve: int = 2
+    ) -> None:
+        """对话入口预检：会话数 / 每会话消息数超限时抛 ChatQuotaExceeded。
+
+        :param reserve: 预计本轮新增的消息行数（普通一轮 = human + ai = 2；重新生成 = 1）
+        """
+        db = SessionLocal()
+        try:
+            session = (
+                self._session_query(db, user_id, agent_id, session_id)
+                .with_entities(ChatSessionRow.id)
+                .first()
+            )
+            if session is None:
+                limit = _int_setting("CHAT_MAX_SESSIONS_PER_USER_AGENT", 200)
+                if limit > 0:
+                    count = int(
+                        db.query(func.count(ChatSessionRow.id))
+                        .filter(
+                            ChatSessionRow.user_id == int(user_id),
+                            ChatSessionRow.agent_id == int(agent_id),
+                        )
+                        .scalar()
+                        or 0
+                    )
+                    if count >= limit:
+                        raise ChatQuotaExceeded("session_limit", limit=limit)
+                return
+            total = int(
+                db.query(func.count(ChatMessageRow.id))
+                .filter(ChatMessageRow.session_ref_id == int(session[0]))
+                .scalar()
+                or 0
+            )
+            self._enforce_message_quota(total, max(0, int(reserve)))
+        finally:
+            db.close()
+
     def _insert_message_row(
         self,
         db,
@@ -258,9 +398,7 @@ class ConversationStorage:
     ) -> ChatMessageRow:
         fields = self._parse_extra(extra)
         envelope = serialize_message_envelope(msg)
-        preview = msg_content_to_str(getattr(msg, "content", ""))
-        if len(preview) > 65500:
-            preview = preview[:65500] + "…"
+        preview = _cap_preview(msg_content_to_str(getattr(msg, "content", "")))
         row = ChatMessageRow(
             session_ref_id=session.id,
             parent_id=parent_id,
@@ -353,6 +491,7 @@ class ConversationStorage:
             return
         db = SessionLocal()
         try:
+            self._enforce_session_quota(db, user_id, agent_id, session_id)
             session = self._get_or_create_session(db, user_id, agent_id, session_id, metadata)
             now = datetime.utcnow()
             # 单次加载全量行：叶子定位与后续缓存回填复用同一份内存数据（原为 3 次全量 SELECT）
@@ -362,6 +501,7 @@ class ConversationStorage:
                 .order_by(ChatMessageRow.id.asc())
                 .all()
             )
+            self._enforce_message_quota(len(rows), len(new_messages))
             path = self._walk_path(rows)
             parent = path[-1] if path else None
             extras = extra_message_data or []
@@ -411,11 +551,35 @@ class ConversationStorage:
             )
             if not parent or parent.message_type != "human":
                 return False
+            # 版本上限：同一 human 下只保留最近 N 个助手版本，超出淘汰最旧
+            version_cap = _int_setting("CHAT_MAX_ASSISTANT_VERSIONS", 5)
+            sibs = (
+                db.query(ChatMessageRow)
+                .filter(
+                    ChatMessageRow.session_ref_id == session.id,
+                    ChatMessageRow.parent_id == parent.id,
+                    ChatMessageRow.message_type == "ai",
+                )
+                .order_by(ChatMessageRow.id.asc())
+                .all()
+            )
+            evict = 0
+            if version_cap > 0 and len(sibs) >= version_cap:
+                evict = len(sibs) - (version_cap - 1)
+            total = int(
+                db.query(func.count(ChatMessageRow.id))
+                .filter(ChatMessageRow.session_ref_id == session.id)
+                .scalar()
+                or 0
+            )
+            self._enforce_message_quota(total, 1 - evict)
             row = self._insert_message_row(
                 db, session, ai_message, extra, datetime.utcnow(), parent_id=parent.id
             )
             db.flush()
             parent.selected_child_id = row.id
+            for old in sibs[:evict]:
+                db.delete(old)
             self._commit_and_refresh_caches(db, session, user_id, agent_id, session_id)
             return True
         finally:
@@ -444,9 +608,7 @@ class ConversationStorage:
             if not row or row.session_ref_id != session.id or row.message_type != "ai":
                 return False
             fields = self._parse_extra(extra)
-            preview = msg_content_to_str(getattr(ai_message, "content", ""))
-            if len(preview) > 65500:
-                preview = preview[:65500] + "…"
+            preview = _cap_preview(msg_content_to_str(getattr(ai_message, "content", "")))
             row.content = preview
             row.content_json = serialize_message_envelope(ai_message)
             row.timestamp = datetime.utcnow()
@@ -804,6 +966,43 @@ class ConversationStorage:
         cache.delete(self._sessions_cache_key(user_id, agent_id))
         cache.delete(self._sessions_all_cache_key(user_id))
         return len(session_ids)
+
+    def purge_idle_sessions(
+        self, before: datetime, *, batch: int = 200, dry_run: bool = False
+    ) -> dict:
+        """清理 updated_at < before 的闲置会话（硬删：级联消息/分段摘要，并清理附件与缓存）。
+
+        :param dry_run: 只统计不删除
+        :return: {"scanned": n, "deleted": n, "sessions": ["user:agent:session", ...]}
+        """
+        out: dict = {"scanned": 0, "deleted": 0, "sessions": []}
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(
+                    ChatSessionRow.user_id,
+                    ChatSessionRow.agent_id,
+                    ChatSessionRow.session_id,
+                )
+                .filter(ChatSessionRow.updated_at < before)
+                .order_by(ChatSessionRow.updated_at.asc())
+                .limit(max(1, int(batch)))
+                .all()
+            )
+        finally:
+            db.close()
+        items = [(int(r[0]), int(r[1]), str(r[2])) for r in rows]
+        out["scanned"] = len(items)
+        out["sessions"] = [f"{u}:{a}:{s}" for u, a, s in items]
+        if dry_run:
+            return out
+        for uid, aid, sid in items:
+            try:
+                if self.delete_session(uid, aid, sid):
+                    out["deleted"] += 1
+            except Exception:  # noqa: BLE001
+                logger.exception("purge_idle_sessions failed session=%s", sid)
+        return out
 
     def purge_orphan_chat_data(self, existing_agent_ids: set[int]) -> int:
         """

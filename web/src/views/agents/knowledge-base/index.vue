@@ -64,7 +64,7 @@
               :show-file-list="false"
               :default-upload="false"
               multiple
-              accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.md"
+              accept=".pdf,.docx,.xlsx,.txt,.md,.markdown,.csv,.py,.js,.ts,.tsx,.jsx,.java,.go,.rs,.c,.h,.cpp,.cs,.rb,.php,.swift,.kt,.scala,.sh,.ps1,.sql,.yaml,.yml,.toml,.ini,.json,.xml,.html,.css,.vue"
               @change="onUploadChange"
             >
               <n-upload-dragger>
@@ -343,7 +343,7 @@ const tableLoading = ref(false)
 const agentId = ref(Number(route.params.agentId) || 0)
 const agent = ref(null)
 const list = ref([])
-const uploadFormats = ['PDF', 'Word', 'Excel', 'TXT', 'MD']
+const uploadFormats = ['PDF', 'Word', 'Excel', 'TXT', 'MD', 'CSV', 'Code']
 
 const fileKindClass = makeFileKindClass('agent-kb-kind-')
 
@@ -1092,6 +1092,10 @@ html.dark .agent-kb-tasks::-webkit-scrollbar-thumb {
 :deep(.agent-kb-kind-md),
 .agent-kb-kind-md {
   color: #546e7a;
+}
+:deep(.agent-kb-kind-code),
+.agent-kb-kind-code {
+  color: #8e24aa;
 }
 :deep(.agent-kb-kind-text),
 .agent-kb-kind-text {

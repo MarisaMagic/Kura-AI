@@ -28,6 +28,8 @@ class _RequestState:
         "last_rag_context",
         "knowledge_calls",
         "memory_calls",
+        "memory_write_calls",
+        "memory_forget_calls",
         "history_calls",
         "image_kb_calls",
         "web_search_calls",
@@ -48,6 +50,8 @@ class _RequestState:
         self.last_rag_context: dict | None = None
         self.knowledge_calls = 0
         self.memory_calls = 0
+        self.memory_write_calls = 0
+        self.memory_forget_calls = 0
         self.history_calls = 0
         self.image_kb_calls = 0
         self.web_search_calls = 0
@@ -202,6 +206,8 @@ def reset_tool_call_guards() -> None:
     with state._lock:
         state.knowledge_calls = 0
         state.memory_calls = 0
+        state.memory_write_calls = 0
+        state.memory_forget_calls = 0
         state.history_calls = 0
         state.image_kb_calls = 0
         state.web_search_calls = 0
@@ -270,6 +276,27 @@ def try_acquire_user_memory_tool_slot() -> bool:
         if state.memory_calls >= 1:
             return False
         state.memory_calls += 1
+        return True
+
+
+def try_acquire_user_memory_write_slot(limit: int = 3) -> bool:
+    """同一轮对话允许有限次长期记忆写入（save_user_memory）；成功占用返回 True。"""
+    state = _state()
+    n = max(1, int(limit or 1))
+    with state._lock:
+        if state.memory_write_calls >= n:
+            return False
+        state.memory_write_calls += 1
+        return True
+
+
+def try_acquire_user_memory_forget_slot() -> bool:
+    """同一轮对话仅允许一次长期记忆删除（forget_user_memory）；成功占用返回 True。"""
+    state = _state()
+    with state._lock:
+        if state.memory_forget_calls >= 1:
+            return False
+        state.memory_forget_calls += 1
         return True
 
 

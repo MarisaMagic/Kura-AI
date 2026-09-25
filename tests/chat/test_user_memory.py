@@ -124,6 +124,26 @@ class UserMemoryTest(unittest.TestCase):
         self.assertEqual(um.purge_user_memory_for_agent(2), 2)
         self.assertEqual(um.list_user_facts(1, 2), [])
 
+    def test_delete_by_keyword(self):
+        um.store_user_facts(
+            1,
+            2,
+            [self._fact(subject="回答语言"), self._fact(subject="输出格式", content="用 Markdown 表格")],
+        )
+        self.assertEqual(um.delete_user_facts(1, 2, keyword="Markdown"), 1)
+        self.assertEqual(len(um.list_user_facts(1, 2)), 1)
+
+    def test_delete_all(self):
+        um.store_user_facts(1, 2, [self._fact()])
+        um.store_user_facts(1, 2, [self._fact(subject="输出格式", content="请用表格呈现")])
+        self.assertEqual(um.delete_user_facts(1, 2, all=True), 2)
+        self.assertEqual(um.list_user_facts(1, 2), [])
+
+    def test_delete_without_args_is_noop(self):
+        um.store_user_facts(1, 2, [self._fact()])
+        self.assertEqual(um.delete_user_facts(1, 2), 0)
+        self.assertEqual(len(um.list_user_facts(1, 2)), 1)
+
 
 class ReadUserMemoryToolTest(unittest.TestCase):
     def test_tool_registered_and_limits_calls(self):
@@ -144,6 +164,78 @@ class ReadUserMemoryToolTest(unittest.TestCase):
         self.assertIn("用中文", first)
         self.assertIn("TOOL_CALL_LIMIT_REACHED", second)
         listed.assert_called_once_with(1, 2, keyword="语言")
+
+
+class SaveForgetToolTest(unittest.TestCase):
+    def test_save_maps_chinese_type_and_writes(self):
+        from app.chat.tools import reset_tool_call_guards
+        from app.chat.user_memory_tool import make_save_user_memory_tool
+
+        reset_tool_call_guards()
+        tool = make_save_user_memory_tool(1, 2)
+        self.assertEqual(tool.name, "save_user_memory")
+        with mock.patch.object(
+            um, "store_user_facts", return_value={"inserted": 1, "skipped": 0, "updated": 0}
+        ) as stored:
+            out = tool.func(subject="回答语言", content="始终用中文", type="偏好")
+        self.assertIn("已记住", out)
+        fact = stored.call_args.args[2][0]
+        self.assertEqual(fact["type"], "preference")
+        self.assertEqual(fact["subject"], "回答语言")
+
+    def test_save_rejects_invalid_type(self):
+        from app.chat.tools import reset_tool_call_guards
+        from app.chat.user_memory_tool import make_save_user_memory_tool
+
+        reset_tool_call_guards()
+        tool = make_save_user_memory_tool(1, 2)
+        out = tool.func(subject="x", content="yyyy", type="decision")
+        self.assertIn("类型无效", out)
+
+    def test_save_write_slot_limit(self):
+        from app.chat.tools import reset_tool_call_guards
+        from app.chat.user_memory_tool import make_save_user_memory_tool
+
+        reset_tool_call_guards()
+        tool = make_save_user_memory_tool(1, 2)
+        with mock.patch.object(settings, "CHAT_MEMORY_WRITE_MAX_PER_TURN", 1), mock.patch.object(
+            um, "store_user_facts", return_value={"inserted": 1, "skipped": 0, "updated": 0}
+        ):
+            first = tool.func(subject="a", content="内容一")
+            second = tool.func(subject="b", content="内容二")
+        self.assertIn("已记住", first)
+        self.assertIn("TOOL_CALL_LIMIT_REACHED", second)
+
+    def test_forget_requires_arg_or_all(self):
+        from app.chat.tools import reset_tool_call_guards
+        from app.chat.user_memory_tool import make_forget_user_memory_tool
+
+        reset_tool_call_guards()
+        tool = make_forget_user_memory_tool(1, 2)
+        self.assertIn("请提供 keyword", tool.func())
+
+    def test_forget_by_keyword(self):
+        from app.chat.tools import reset_tool_call_guards
+        from app.chat.user_memory_tool import make_forget_user_memory_tool
+
+        reset_tool_call_guards()
+        tool = make_forget_user_memory_tool(1, 2)
+        with mock.patch.object(um, "delete_user_facts", return_value=2) as deleted:
+            out = tool.func(keyword="语言")
+        self.assertIn("已删除 2 条", out)
+        deleted.assert_called_once_with(1, 2, keyword="语言", all=False)
+
+    def test_forget_slot_limit(self):
+        from app.chat.tools import reset_tool_call_guards
+        from app.chat.user_memory_tool import make_forget_user_memory_tool
+
+        reset_tool_call_guards()
+        tool = make_forget_user_memory_tool(1, 2)
+        with mock.patch.object(um, "delete_user_facts", return_value=1):
+            first = tool.func(keyword="a")
+            second = tool.func(keyword="b")
+        self.assertIn("已删除", first)
+        self.assertIn("TOOL_CALL_LIMIT_REACHED", second)
 
 
 if __name__ == "__main__":

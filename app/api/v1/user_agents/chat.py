@@ -23,6 +23,7 @@ from app.chat.chat_job import (
     verify_job_owner,
 )
 from app.chat.preview_session import is_editor_preview_session
+from app.chat.errors import ChatQuotaExceeded
 from app.chat.storage import storage
 from app.controllers.user_agent import user_agent_controller
 from app.controllers.user_agent_recent import list_recent_agents_public, touch_recent_agent
@@ -62,6 +63,17 @@ def _check_chat_rate_limit(user_id: int) -> None:
         limit=int(getattr(settings, "CHAT_RATE_LIMIT_PER_MINUTE", 20)),
         window_seconds=60,
     )
+
+
+def _check_chat_quota(user_id: int, agent_id: int, session_id: str, *, reserve: int = 2) -> None:
+    """对话入口存储配额预检：会话数 / 每会话消息数超限时抛 429。
+
+    :param reserve: 预计本轮新增消息行数（普通一轮 = 2，重新生成 = 1）
+    """
+    try:
+        storage.check_chat_quota(user_id, agent_id, session_id, reserve=reserve)
+    except ChatQuotaExceeded as e:
+        raise HTTPException(status_code=429, detail=e.detail) from e
 
 
 def _cached_tools_tokens(agent_id: int) -> int:
@@ -186,6 +198,7 @@ async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     session_id = (request.session_id or "default_session").strip() or "default_session"
+    _check_chat_quota(user_id, request.agent_id, session_id, reserve=2)
     try:
         # 放到线程池执行：chat_with_agent_sync 内部会用 asyncio.run 加载 MCP 工具，
         # 需运行在无活动事件循环的线程中；同时避免同步 LLM 调用阻塞事件循环。
@@ -204,6 +217,8 @@ async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(
         if not is_editor_preview_session(session_id):
             await touch_recent_agent(user_id, request.agent_id)
         return Success(data=ChatResponse(**resp).model_dump())
+    except ChatQuotaExceeded as e:
+        raise HTTPException(status_code=429, detail=e.detail) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
@@ -233,6 +248,7 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     # 获取会话ID
     session_id = (request.session_id or "default_session").strip() or "default_session"
+    _check_chat_quota(user_id, request.agent_id, session_id, reserve=1 if request.regenerate else 2)
 
     # 定义事件生成器
     async def event_generator():
@@ -291,6 +307,7 @@ async def create_chat_job_endpoint(request: ChatRequest, current_user: User = De
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     # 获取会话ID
     session_id = (request.session_id or "default_session").strip() or "default_session"
+    _check_chat_quota(user_id, request.agent_id, session_id, reserve=1 if request.regenerate else 2)
     # 创建异步对话 Job
     job_id, is_dup = await create_chat_job(
         user_id=user_id,

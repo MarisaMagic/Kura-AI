@@ -70,6 +70,24 @@ def init_chat_db() -> None:
         conn.execute(
             text("ALTER TABLE mg_kb_documents ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64)")
         )
+        conn.execute(
+            text(
+                "ALTER TABLE mg_kb_documents ADD COLUMN IF NOT EXISTS"
+                " chunk_pipeline_version INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE mg_kb_parent_chunks ADD COLUMN IF NOT EXISTS"
+                " block_type VARCHAR(20) NOT NULL DEFAULT 'text'"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE mg_kb_parent_chunks ADD COLUMN IF NOT EXISTS"
+                " code_language VARCHAR(40) NOT NULL DEFAULT ''"
+            )
+        )
         # 消息树：parent_id / selected_child_id（存量线性会话回填为单链树）
         conn.execute(
             text("ALTER TABLE mg_chat_messages ADD COLUMN IF NOT EXISTS parent_id INTEGER")

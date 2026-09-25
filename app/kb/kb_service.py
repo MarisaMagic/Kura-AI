@@ -22,6 +22,10 @@ from app.kb.multimodal_document_loader import MultimodalDocumentLoader, _filenam
 from app.kb.multimodal_milvus_writer import MultimodalMilvusWriter
 from app.kb.parent_chunk_store import ParentChunkStore
 from app.settings import settings
+from app.utils.document_types import (
+    SUPPORTED_UPLOAD_HINT,
+    allowed_upload_extension as _allowed_upload_extension,
+)
 
 os.environ.setdefault("PGCLIENTENCODING", "UTF8")
 
@@ -55,17 +59,12 @@ def normalize_display_filename(raw: str) -> str:
 
 def allowed_upload_extension(filename: str) -> bool:
     """
-    允许上传的文件扩展名, 支持 PDF、Word、Excel、TXT、Markdown 文档
+    允许上传的文件扩展名：PDF、Word(.docx)、Excel(.xlsx)、TXT、Markdown、CSV 与常见代码文件。
+    旧版 .doc/.xls 由加载库不支持，显式拒绝（见 app.utils.document_types.reject_reason）。
     :param filename: 文件名
     :return: 是否允许上传
     """
-    fl = filename.lower()
-    return (
-        fl.endswith(".pdf")
-        or fl.endswith((".docx", ".doc"))
-        or fl.endswith((".xlsx", ".xls"))
-        or fl.endswith((".txt", ".md"))
-    )
+    return _allowed_upload_extension(filename)
 
 
 _KB_FILENAMES_TTL = 3600
@@ -337,14 +336,15 @@ def run_ingest_pipeline_sync(
     report = progress_cb or (lambda stage, done, total: None)
 
     if not allowed_upload_extension(display_filename):
-        raise ValueError("仅支持 PDF、Word、Excel、TXT、Markdown 文档")
+        raise ValueError(SUPPORTED_UPLOAD_HINT)
     if not (settings.EMBEDDING_API_KEY or "").strip():
         raise ValueError("未配置 EMBEDDING_API_KEY，无法生成向量")
 
     check.checkpoint()
     content_hash = _sha256_file(source_path)
+    pipeline_version = max(0, int(getattr(settings, "KB_CHUNK_PIPELINE_VERSION", 0) or 0))
 
-    # 同展示名且内容未变化：直接返回现有元数据，不解析不重建
+    # 同展示名且内容与分块管线版本均未变化：直接返回现有元数据，不解析不重建
     db = SessionLocal()
     try:
         existing = (
@@ -355,7 +355,12 @@ def run_ingest_pipeline_sync(
             )
             .first()
         )
-        if existing and existing.content_hash and existing.content_hash == content_hash:
+        if (
+            existing
+            and existing.content_hash
+            and existing.content_hash == content_hash
+            and int(existing.chunk_pipeline_version or 0) == pipeline_version
+        ):
             parent_chunks = (
                 db.query(KbParentChunk)
                 .filter(
@@ -402,6 +407,10 @@ def run_ingest_pipeline_sync(
         if not leaf_docs:
             _cleanup_upload_assets(None, images_prefix)
             raise ValueError("未生成可检索叶子分块")
+        max_chunks = max(1, int(getattr(settings, "KB_MAX_CHUNKS_PER_DOC", 20000) or 20000))
+        if len(leaf_docs) > max_chunks:
+            _cleanup_upload_assets(None, images_prefix)
+            raise ValueError(f"文档分块数（{len(leaf_docs)}）超过上限 {max_chunks}，请拆分后重试")
         report("chunking", 1, 1)
         check.checkpoint()
 
@@ -496,6 +505,7 @@ def run_ingest_pipeline_sync(
                 file_type=ft,
                 chunk_count=len(leaf_docs),
                 content_hash=content_hash,
+                chunk_pipeline_version=pipeline_version,
             )
             db.add(rec)
             db.commit()

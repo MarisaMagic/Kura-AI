@@ -15,6 +15,7 @@ from app.models import User
 from app.schemas.base import Fail, Success
 from app.schemas.experiment import ExpDatasetCreate, ExpDocsDelete, ExpRunCreate
 from app.settings import settings
+from app.utils.document_types import SUPPORTED_UPLOAD_HINT, reject_reason
 from app.utils.upload_accept import prepare_document_upload
 
 router = APIRouter(dependencies=[Depends(SuperuserControl.is_superuser)])
@@ -105,8 +106,11 @@ async def exp_upload_document(
     if not service.get_dataset(dataset_id):
         return Fail(code=404, msg="数据集不存在")
     display = kb_service.normalize_display_filename(file.filename or "")
+    legacy = reject_reason(display)
+    if legacy:
+        return Fail(code=400, msg=legacy)
     if not kb_service.allowed_upload_extension(display):
-        return Fail(code=400, msg="仅支持 PDF、Word、Excel、TXT、Markdown 文档")
+        return Fail(code=400, msg=SUPPORTED_UPLOAD_HINT)
     if not (settings.EMBEDDING_API_KEY or "").strip():
         return Fail(code=400, msg="未配置 EMBEDDING_API_KEY，无法生成向量")
     task_id, error = await prepare_document_upload(

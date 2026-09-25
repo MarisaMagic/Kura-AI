@@ -74,13 +74,6 @@ _SUMMARY_SECTIONS = """1. Primary Request and Intent（用户请求与意图）�
 8. Current Work（当前工作）：用**最细颗粒度**描述中断前正在做什么。反例：「正在调试」；正例：「正在调试登录模块的 token 刷新逻辑，已定位到 cookie 过期判断有误，准备修改 auth.ts 的 refreshToken 函数」。
 9. Optional Next Step（下一步）：与 Current Work 直接衔接的下一步。若任务已收尾则写「无」。"""
 
-_FACTS_INSTRUCTION = """另外，在 </summary> 之后追加一个 <facts> 块，输出 JSON 数组，抽取值得跨会话长期记住的**用户稳定偏好与硬约束**：
-- 类型只能是 preference（用户偏好）/ constraint（硬约束）之一；已定方案与关键实体不必输出（摘要正文已覆盖）；
-- 每项形如 {"type":"preference","subject":"回答语言","content":"始终用中文","why":"用户明确要求","how_to_apply":"生成回答时默认中文"}；
-- 相对时间必须转为绝对日期（「周四前」→「2026-03-05 前」）；
-- 不要记录：能从当前对话/知识库/系统提示词推导出的内容、临时任务状态、一次性调试细节；
-- 没有值得记的就输出 []。"""
-
 _SUMMARIZE_PROMPT = """你是会话压缩助手。把「已有摘要」与「被移出上下文的旧对话」合并成一份供后续对话使用的稳定摘要。
 
 {no_tool_warn}
@@ -93,7 +86,6 @@ _SUMMARIZE_PROMPT = """你是会话压缩助手。把「已有摘要」与「被
 （按下面 9 个固定小节组织，每节以「N. 小节名」开头，内容用要点列表）
 {sections}
 </summary>
-{facts_instruction}
 
 硬性要求：
 - 只保留可复用信息：用户目标与约束、已做决定、未完成事项、关键实体（文件名、file_key、attachment_id、URL、ID、数字与结论）；
@@ -274,13 +266,11 @@ def build_summary_prompt(
     dropped_text: str,
     max_chars: int,
     suppress_follow_up: bool = True,
-    with_facts: bool = False,
 ) -> str:
     """构造压缩摘要提示词（供测试与复用）。"""
     return _SUMMARIZE_PROMPT.format(
         no_tool_warn=_NO_TOOL_WARN,
         sections=_SUMMARY_SECTIONS,
-        facts_instruction=_FACTS_INSTRUCTION if with_facts else "",
         max_chars=max(500, int(max_chars)),
         suppress_note=_SUPPRESS_FOLLOWUP_NOTE if suppress_follow_up else "",
         old_summary=(old_summary or "").strip() or "（无）",
@@ -288,17 +278,15 @@ def build_summary_prompt(
     )
 
 
-def parse_summary_output(raw: str) -> tuple[str, list[dict[str, Any]]]:
-    """解析摘要器输出：剥离 <analysis>，取 <summary> 正文；附带解析可选 <facts>。
+def parse_summary_output(raw: str) -> str:
+    """解析摘要器输出：剥离 <analysis>，取 <summary> 正文。
 
     无标签时回退为「全文即摘要」（并去掉可能的代码块围栏）。
-    :return: (摘要正文, facts 列表)
     """
     text = (raw or "").strip()
     if not text:
-        return "", []
+        return ""
 
-    summary = ""
     low = text.lower()
     if "<summary>" in low:
         start = low.index("<summary>") + len("<summary>")
@@ -312,44 +300,7 @@ def parse_summary_output(raw: str) -> tuple[str, list[dict[str, Any]]]:
         if summary.lower().startswith("markdown"):
             summary = summary[len("markdown") :]
         summary = summary.strip()
-
-    facts: list[dict[str, Any]] = []
-    if "<facts>" in low:
-        fstart = low.index("<facts>") + len("<facts>")
-        fend = low.find("</facts>", fstart)
-        blob = (text[fstart:fend] if fend > 0 else text[fstart:]).strip()
-        facts = _parse_facts_json(blob)
-    return summary, facts
-
-
-def _parse_facts_json(blob: str) -> list[dict[str, Any]]:
-    """容错解析 facts JSON 数组。"""
-    import json
-
-    if not blob:
-        return []
-    if blob.startswith("```"):
-        blob = blob.strip("`")
-        if blob.lower().startswith("json"):
-            blob = blob[4:]
-        blob = blob.strip()
-    try:
-        data = json.loads(blob)
-    except (ValueError, TypeError):
-        s, e = blob.find("["), blob.rfind("]")
-        if s < 0 or e <= s:
-            return []
-        try:
-            data = json.loads(blob[s : e + 1])
-        except (ValueError, TypeError):
-            return []
-    if not isinstance(data, list):
-        return []
-    out: list[dict[str, Any]] = []
-    for item in data:
-        if isinstance(item, dict) and str(item.get("content") or item.get("text") or "").strip():
-            out.append(item)
-    return out
+    return summary
 
 
 def _turn_texts(turns: list[list[BaseMessage]]) -> list[str]:
@@ -426,8 +377,7 @@ def run_summarizer(
     llm_config: dict[str, Any],
     max_chars: int,
     suppress_follow_up: bool = True,
-    with_facts: bool = False,
-) -> tuple[str, list[dict[str, Any]]] | None:
+) -> str | None:
     """调用副模型生成结构化摘要；失败返回 None（由调用方计熔断）。"""
     if not (llm_config.get("api_key") or "").strip():
         return None
@@ -436,7 +386,6 @@ def run_summarizer(
         dropped_text=dropped_text,
         max_chars=max_chars,
         suppress_follow_up=suppress_follow_up,
-        with_facts=with_facts,
     )
     try:
         from langchain_core.messages import HumanMessage as HM
@@ -448,12 +397,12 @@ def run_summarizer(
             raw = msg_content_to_str(raw)
         if not raw:
             return None
-        summary, facts = parse_summary_output(raw)
+        summary = parse_summary_output(raw)
         if not summary:
             return None
         if len(summary) > max_chars:
             summary = summary[:max_chars] + "…"
-        return summary, facts
+        return summary
     except Exception as e:  # noqa: BLE001
         logger.warning("会话压缩摘要失败: %s", e, exc_info=True)
         return None
@@ -555,14 +504,6 @@ def _summary_max_chars() -> int:
 
 def _summarizer_input_max_tokens() -> int:
     return max(2000, _int_setting("CHAT_COMPACT_SUMMARIZER_INPUT_TOKENS", 60000))
-
-
-def _facts_enabled() -> bool:
-    """是否让摘要器顺带抽取跨会话用户偏好/约束（与摘要共用同一次调用，几乎零额外成本）。"""
-    if not getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
-        return False
-    v = getattr(settings, "CHAT_USER_MEMORY_ENABLED", True)
-    return True if v is None else bool(v)
 
 
 # ---------------------------------------------------------------------------
@@ -746,7 +687,6 @@ def attempt_compaction(
         llm_config=llm_config,
         max_chars=_summary_max_chars(),
         suppress_follow_up=auto,
-        with_facts=_facts_enabled(),
     )
     if not out:
         # 计数必须在行锁内基于**最新** metadata 递增：用请求开始时读到的快照算，
@@ -764,18 +704,7 @@ def attempt_compaction(
         emit_rag_step("⚠️", "会话压缩失败", "本轮仅截断较早原文，稍后自动重试")
         return result
 
-    summary, facts = out
-    if facts:
-        # 与摘要共用同一次 LLM 调用，抽取用户偏好/约束写入 PG 长期记忆，几乎零额外成本
-        try:
-            from app.chat.user_memory import store_user_facts
-
-            stored = store_user_facts(user_id, agent_id, facts, session_id=session_id)
-            changed = int(stored.get("inserted") or 0) + int(stored.get("updated") or 0)
-            if changed:
-                emit_rag_step("🧠", "长期记忆更新", f"已记住 {changed} 条用户偏好/约束")
-        except Exception:  # noqa: BLE001
-            logger.exception("store_user_facts failed")
+    summary = out
     new_chain, seg_id = _persist_segment(
         session_ref_id=session_ref_id,
         chain=chain,

@@ -261,6 +261,43 @@ def format_user_facts(rows: list[dict[str, Any]], *, max_tokens: int | None = No
     return "\n".join(lines)
 
 
+def delete_user_facts(
+    user_id: int, agent_id: int, *, keyword: str = "", all: bool = False
+) -> int:
+    """删除长期记忆：``all=True`` 清空该用户在本智能体的全部；否则按关键词模糊匹配。
+
+    匹配字段：subject / content / why / how_to_apply。两者都不给返回 0（由调用方提示）。
+    """
+    kw = (keyword or "").strip()
+    if not all and not kw:
+        return 0
+    db = SessionLocal()
+    try:
+        q = db.query(ChatUserMemory).filter(
+            ChatUserMemory.user_id == int(user_id),
+            ChatUserMemory.agent_id == int(agent_id),
+        )
+        if not all:
+            like = f"%{kw}%"
+            q = q.filter(
+                or_(
+                    ChatUserMemory.subject.ilike(like),
+                    ChatUserMemory.content.ilike(like),
+                    ChatUserMemory.why.ilike(like),
+                    ChatUserMemory.how_to_apply.ilike(like),
+                )
+            )
+        n = q.delete(synchronize_session=False)
+        db.commit()
+        return int(n or 0)
+    except Exception:
+        db.rollback()
+        logger.exception("delete_user_facts failed")
+        return 0
+    finally:
+        db.close()
+
+
 def purge_user_memory(user_id: int, agent_id: int) -> int:
     """删除某用户在某智能体下的全部长期记忆；返回删除条数。"""
     db = SessionLocal()

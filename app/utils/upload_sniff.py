@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.utils.document_types import CODE_EXTS, TEXT_EXTS, doc_kind
+
 _JPEG = b"\xff\xd8\xff"
 _PNG = b"\x89PNG\r\n\x1a\n"
 _GIF87 = b"GIF87a"
@@ -12,7 +14,8 @@ _PDF = b"%PDF"
 _ZIP = b"PK\x03\x04"
 _ZIP_EMPTY = b"PK\x05\x06"
 _OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
-_TEXT_EXT = {".txt", ".md", ".csv"}
+# 文本类（含代码/配置）不强制魔数
+_TEXT_EXT = set(TEXT_EXTS) | set(CODE_EXTS)
 _PDF_EXT = {".pdf"}
 _OOXML_EXT = {".docx", ".xlsx"}
 _OLE_EXT = {".doc", ".xls"}
@@ -54,7 +57,8 @@ def assert_upload_magic(filename: str, raw: bytes) -> None:
     ext = Path(filename or "").suffix.lower()
     if not raw:
         raise ValueError("空文件")
-    if ext in _TEXT_EXT:
+    # 文本/代码类不强制魔数（含 Dockerfile 等无扩展名特殊文件）
+    if ext in _TEXT_EXT or doc_kind(filename) == "code":
         return
     if ext in {".jpg", ".jpeg"}:
         if not _is_jpeg(raw):

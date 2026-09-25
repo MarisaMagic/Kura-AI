@@ -44,6 +44,8 @@ class KbDocument(Base):
     file_type: Mapped[str] = mapped_column(String(50), nullable=False, default="")
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 文件内容 sha256，用于同内容重传跳过重建
+    # 分块管线版本：低版本文档即使 content_hash 不变也强制重建（结构感知切分升级用）
+    chunk_pipeline_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
@@ -73,6 +75,9 @@ class KbParentChunk(Base):
     root_chunk_id: Mapped[str] = mapped_column(String(512), nullable=False, default="")
     chunk_level: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     chunk_idx: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 结构化块类型（text/code/table）与代码语言，用于父块合并后的展示还原
+    block_type: Mapped[str] = mapped_column(String(20), nullable=False, default="text")
+    code_language: Mapped[str] = mapped_column(String(40), nullable=False, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
@@ -402,11 +407,11 @@ class ChatCompactSegment(Base):
 
 class ChatUserMemory(Base):
     """
-    跨会话用户长期记忆：只存稳定的**偏好/约束**（从压缩摘要同一次 LLM 调用顺带抽出）。
+    跨会话用户长期记忆：只存稳定的**偏好/约束**（由模型经 save_user_memory 工具自主写入）。
 
     刻意不存会话级记忆（决策/实体）——那类信息已由分段摘要覆盖，模型可用
     read_session_history 翻原文精确取证。因此本表无 Milvus/embedding 依赖，
-    模型通过 read_user_memory 工具按需读取。
+    模型通过 read/save/forget_user_memory 工具自主读写。
 
     :param fact_key: 槽位键 = hash(type|归一化 subject)；同槽位更新覆盖而非堆积
     :param content_hash: 同槽位内容指纹，未变化则跳过写入

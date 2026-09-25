@@ -71,6 +71,79 @@ function rt(value, ...args) {
   return typeof value === 'function' ? value(...args) : value
 }
 
+/** 与后端 app/utils/document_types.py 的 CODE_EXTS 对齐（前端仅用于图标/样式） */
+const CODE_EXTS = new Set([
+  'py',
+  'pyi',
+  'pyw',
+  'js',
+  'jsx',
+  'mjs',
+  'cjs',
+  'ts',
+  'tsx',
+  'java',
+  'kt',
+  'kts',
+  'scala',
+  'groovy',
+  'go',
+  'rs',
+  'c',
+  'h',
+  'cc',
+  'cpp',
+  'cxx',
+  'hpp',
+  'hh',
+  'hxx',
+  'cs',
+  'm',
+  'mm',
+  'rb',
+  'php',
+  'swift',
+  'lua',
+  'pl',
+  'pm',
+  'r',
+  'dart',
+  'vue',
+  'svelte',
+  'sql',
+  'proto',
+  'sh',
+  'bash',
+  'zsh',
+  'fish',
+  'ps1',
+  'bat',
+  'cmd',
+  'yaml',
+  'yml',
+  'toml',
+  'ini',
+  'cfg',
+  'conf',
+  'json',
+  'jsonc',
+  'xml',
+  'html',
+  'htm',
+  'css',
+  'scss',
+  'less',
+  'gradle',
+  'tf',
+])
+const SPECIAL_CODE_NAMES = new Set([
+  'dockerfile',
+  'makefile',
+  'gnumakefile',
+  'cmakelists.txt',
+  'jenkinsfile',
+])
+
 export function extFromName(name) {
   return (
     String(name || '')
@@ -84,8 +157,14 @@ export function fileKindKey(fileType, name) {
   const ext = extFromName(name)
   if (type === 'pdf' || ext === 'pdf') return 'pdf'
   if (type === 'word' || ext === 'doc' || ext === 'docx') return 'word'
-  if (type === 'excel' || ext === 'xls' || ext === 'xlsx') return 'excel'
+  if (type === 'excel' || ext === 'xls' || ext === 'xlsx' || ext === 'csv') return 'excel'
   if (ext === 'md' || ext === 'markdown') return 'md'
+  if (
+    type === 'code' ||
+    CODE_EXTS.has(ext) ||
+    SPECIAL_CODE_NAMES.has(String(name || '').toLowerCase())
+  )
+    return 'code'
   return 'text'
 }
 
@@ -95,6 +174,7 @@ export function fileKindIcon(fileType, name) {
   if (key === 'word') return 'mdi:file-word-box'
   if (key === 'excel') return 'mdi:file-excel-box'
   if (key === 'md') return 'simple-icons:markdown'
+  if (key === 'code') return 'mdi:file-code-outline'
   return 'mdi:file-document-outline'
 }
 
@@ -108,6 +188,7 @@ export function fileKindTagType(fileType, name) {
   if (key === 'pdf') return 'error'
   if (key === 'word') return 'info'
   if (key === 'excel') return 'success'
+  if (key === 'code') return 'warning'
   return 'default'
 }
 

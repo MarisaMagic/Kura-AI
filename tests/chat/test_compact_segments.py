@@ -1,4 +1,4 @@
-"""
+﻿"""
 分段摘要存储与压缩主流程单测：SQLite 内存库替代 PostgreSQL。
 覆盖段链前缀匹配、跨分支隔离、归并判定、幂等 upsert、熔断、失败降级、端到端压缩视图。
 不打真实 LLM（摘要器被 mock）。
@@ -377,7 +377,7 @@ class AttemptCompactionTest(unittest.TestCase):
     def test_success_writes_segment_and_advances_keep_from(self):
         with mock.patch(
             "app.chat.compact.run_summarizer",
-            return_value=("1. Primary Request and Intent\n- 用户要 X", []),
+            return_value="1. Primary Request and Intent\n- 用户要 X",
         ):
             res = self._call(keep_from=0)
         self.assertTrue(res["ok"])
@@ -390,7 +390,7 @@ class AttemptCompactionTest(unittest.TestCase):
     def test_emits_visible_compacting_status(self):
         """同步压缩会阻塞首 token，必须先 emit 一条「进行中」状态供前端展示。"""
         with mock.patch(
-            "app.chat.compact.run_summarizer", return_value=("摘要", [])
+            "app.chat.compact.run_summarizer", return_value="摘要"
         ), mock.patch("app.chat.tools.emit_rag_step") as emit:
             res = self._call(keep_from=0)
         self.assertTrue(res["ok"])
@@ -411,7 +411,7 @@ class AttemptCompactionTest(unittest.TestCase):
             },
         )
         meta = self.storage.get_session_metadata(self.uid, self.aid, self.sid)
-        with mock.patch("app.chat.compact.run_summarizer", return_value=("摘要", [])):
+        with mock.patch("app.chat.compact.run_summarizer", return_value="摘要"):
             res = self._call(keep_from=2, meta=meta, legacy_summary="旧")
         self.assertTrue(res["ok"])
         after = self.storage.get_session_metadata(self.uid, self.aid, self.sid)
@@ -472,7 +472,7 @@ class AttemptCompactionTest(unittest.TestCase):
     def test_manual_instructions_bypass_breaker(self):
         meta = {"compact_failures": {"count": 9, "tripped_at": "x"}}
         with mock.patch.object(settings, "CHAT_COMPACT_MAX_CONSECUTIVE_FAILURES", 3), mock.patch(
-            "app.chat.compact.run_summarizer", return_value=("摘要", [])
+            "app.chat.compact.run_summarizer", return_value="摘要"
         ) as m:
             res = self._call(keep_from=0, meta=meta, auto=False, instructions="重点保留 schema")
         self.assertTrue(res["ok"])
@@ -500,7 +500,7 @@ class AttemptCompactionTest(unittest.TestCase):
             )
             old.append(_seg(i, i + 1, self.turn_keys[i], self.turn_keys[i], summary=f"旧段{i}", seg_id=sid))
         with mock.patch.object(settings, "CHAT_COMPACT_MAX_SEGMENTS", 3), mock.patch(
-            "app.chat.compact.run_summarizer", return_value=("归并后的摘要", [])
+            "app.chat.compact.run_summarizer", return_value="归并后的摘要"
         ) as m:
             res = self._call(keep_from=3, chain=old)
         self.assertTrue(res["ok"])
@@ -519,7 +519,7 @@ class AttemptCompactionTest(unittest.TestCase):
         否则新段 from_index>0，段链「必须从 0 连续」的匹配会返回空链，
         下一轮刚写的摘要被整体忽略、全部原文重新涌回上下文。
         """
-        with mock.patch("app.chat.compact.run_summarizer", return_value=("迁移后的摘要", [])) as m:
+        with mock.patch("app.chat.compact.run_summarizer", return_value="迁移后的摘要") as m:
             res = self._call(keep_from=2, legacy_summary="存量v1摘要内容")
         self.assertTrue(res["ok"])
         self.assertEqual(res["chain"][0]["from_index"], 0)
@@ -549,7 +549,7 @@ class AttemptCompactionTest(unittest.TestCase):
         chain = [_seg(0, 2, self.turn_keys[0], self.turn_keys[1], summary="段一", seg_id=first)]
         with mock.patch.object(settings, "CHAT_COMPACT_MAX_SEGMENTS", 8), mock.patch.object(
             settings, "CHAT_COMPACT_SEGMENTS_TOKEN_BUDGET", 4000
-        ), mock.patch("app.chat.compact.run_summarizer", return_value=("段二", [])):
+        ), mock.patch("app.chat.compact.run_summarizer", return_value="段二"):
             res = self._call(keep_from=2, chain=chain)
         self.assertTrue(res["ok"])
         self.assertEqual(len(res["chain"]), 2)
@@ -779,7 +779,7 @@ class MicroCompactPreprocessingTest(unittest.TestCase):
             settings, "CHAT_MICROCOMPACT_TRIGGER_RATIO", 0.05
         ), mock.patch.object(settings, "CHAT_MICROCOMPACT_KEEP_RECENT", 20), mock.patch.object(
             settings, "CHAT_COMPACT_KEEP_TOKENS", 1000
-        ), mock.patch("app.chat.compact.run_summarizer", return_value=("摘要", [])) as rs:
+        ), mock.patch("app.chat.compact.run_summarizer", return_value="摘要") as rs:
             out, holder = self._build(messages)
         self.assertTrue(rs.called)
         dropped_text = rs.call_args.kwargs["dropped_text"]

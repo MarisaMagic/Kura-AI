@@ -161,6 +161,8 @@ def _image_row_to_retrieval_doc(img: Any, base_score: float, source_text_chunk_i
         "chunk_idx": 0,
         "kb_scope": img.kb_scope,
         "content_type": "image",
+        "block_type": "",
+        "code_language": "",
         "image_path": "",
         "position_start": 0,
         "position_end": 0,

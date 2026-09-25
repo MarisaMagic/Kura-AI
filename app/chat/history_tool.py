@@ -12,6 +12,7 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 
+from app.chat.message_codec import envelope_to_langchain_message, msg_content_to_str
 from app.chat.storage import storage
 from app.chat.tools import (
     emit_rag_step,
@@ -24,6 +25,17 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_CHARS = 12000
 _MAX_KEYWORD_HITS = 8
+
+
+def _full_text_from_record(rec: dict[str, Any]) -> str:
+    """优先从 content_json（完整 envelope）还原正文；content 列只是预览会被截断。"""
+    cj = rec.get("content_json")
+    if isinstance(cj, dict) and cj.get("v"):
+        try:
+            return msg_content_to_str(envelope_to_langchain_message(cj).content)
+        except Exception:  # noqa: BLE001
+            logger.debug("envelope 还原失败，回退 content 预览", exc_info=True)
+    return str(rec.get("content") or "")
 
 
 def _int_setting(name: str, default: int) -> int:
@@ -45,7 +57,7 @@ def read_path_turns(user_id: int, agent_id: int, session_id: str) -> list[dict[s
     cur: dict[str, Any] | None = None
     for rec in records:
         rtype = str(rec.get("type") or "")
-        content = str(rec.get("content") or "")
+        content = _full_text_from_record(rec)
         if rtype == "human":
             cur = {
                 "turn_index": len(turns),

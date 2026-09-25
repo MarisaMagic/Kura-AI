@@ -2,12 +2,32 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 from app.settings import settings
 from app.utils.content_guard import guard_untrusted_content
 from app.utils.signed_media import KIND_KB_IMAGE, sign_media_url
+
+_BACKTICK_RUN_RE = re.compile(r"`+")
+
+
+def _choose_code_fence(text: str) -> str:
+    """选择不会与正文冲突的围栏长度（正文含 ``` 时用更长围栏）。"""
+    longest = 0
+    for match in _BACKTICK_RUN_RE.finditer(text or ""):
+        longest = max(longest, len(match.group(0)))
+    return "`" * max(3, longest + 1)
+
+
+def _render_text_block(text: str, block_type: str, code_language: str) -> str:
+    """代码块补围栏与语言标注，便于模型/前端按代码渲染；表格已是 Markdown 原样返回。"""
+    if block_type == "code" and (text or "").strip():
+        fence = _choose_code_fence(text)
+        lang = (code_language or "").strip()
+        return f"{fence}{lang}\n{text.rstrip()}\n{fence}"
+    return text
 
 
 def _kb_image_public_url(stored_relpath: str) -> str:
@@ -113,7 +133,10 @@ def format_knowledge_retrieval_tool_output(
             )
         else:
             text = result.get("text", "")
-            formatted.append(f"[{i}] {source} (Page {page})\n{text}\nScore: {score:.4f}")
+            block_type = str(result.get("block_type") or "text")
+            code_language = str(result.get("code_language") or "")
+            rendered = _render_text_block(text, block_type, code_language)
+            formatted.append(f"[{i}] {source} (Page {page})\n{rendered}\nScore: {score:.4f}")
             kb_sources.append(
                 {
                     "index": i,
@@ -122,6 +145,8 @@ def format_knowledge_retrieval_tool_output(
                     "chunk_id": result.get("chunk_id", ""),
                     "score": score,
                     "content_type": "text",
+                    "block_type": block_type,
+                    "code_language": code_language,
                 }
             )
 

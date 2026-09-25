@@ -15,6 +15,7 @@ from app.models import User
 from app.schemas.base import Fail, Success
 from app.schemas.kb import KbDeleteResponse, KbDocumentListResponse, KbDocumentItem, KbUploadTaskResponse
 from app.settings import settings
+from app.utils.document_types import SUPPORTED_UPLOAD_HINT, reject_reason
 from app.utils.upload_accept import prepare_document_upload
 
 router = APIRouter()
@@ -53,8 +54,11 @@ async def kb_upload(
         return Fail(code=404, msg="智能体不存在或无权限访问")
     raw_name = file.filename or ""
     display = kb_service.normalize_display_filename(raw_name)
+    legacy = reject_reason(display)
+    if legacy:
+        return Fail(code=400, msg=legacy)
     if not kb_service.allowed_upload_extension(display):
-        return Fail(code=400, msg="仅支持 PDF、Word、Excel、TXT、Markdown 文档")
+        return Fail(code=400, msg=SUPPORTED_UPLOAD_HINT)
     if not (settings.EMBEDDING_API_KEY or "").strip():
         return Fail(code=400, msg="未配置 EMBEDDING_API_KEY，无法生成向量")
 

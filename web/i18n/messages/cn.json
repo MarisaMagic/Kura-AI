@@ -130,7 +130,7 @@
       "title_knowledge_base": "知识库配置",
       "kb_configure": "配置知识库",
       "kb_upload_title": "上传文档",
-      "kb_upload_hint": "支持 PDF、Word、Excel、TXT、Markdown",
+      "kb_upload_hint": "支持 PDF、Word（.docx）、Excel（.xlsx）、TXT、Markdown、CSV 与常见代码文件",
       "kb_upload_drop": "点击或拖拽文档到此处上传",
       "kb_upload_max_size": "单文件不超过 {mb}MB",
       "kb_go_chat": "去对话",

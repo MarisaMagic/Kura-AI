@@ -26,6 +26,8 @@ class ParentChunkStore:
             "root_chunk_id": item.root_chunk_id,
             "chunk_level": item.chunk_level,
             "chunk_idx": item.chunk_idx,
+            "block_type": item.block_type or "text",
+            "code_language": item.code_language or "",
         }
 
     @staticmethod
@@ -64,6 +66,8 @@ class ParentChunkStore:
                     "root_chunk_id": doc.get("root_chunk_id", ""),
                     "chunk_level": int(doc.get("chunk_level", 0) or 0),
                     "chunk_idx": int(doc.get("chunk_idx", 0) or 0),
+                    "block_type": str(doc.get("block_type") or "text")[:20],
+                    "code_language": str(doc.get("code_language") or "")[:40],
                     "updated_at": datetime.utcnow(),
                 }
                 cache_payload = {**payload, "chunk_id": chunk_id}

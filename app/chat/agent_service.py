@@ -24,7 +24,7 @@ from app.chat.attachment_service import build_storable_human_content, format_att
 from app.chat.attachment_tools import make_session_attachment_tools
 from app.chat.history_tool import make_session_history_tools
 from app.chat.memory_turns import apply_sliding_window_turns
-from app.chat.user_memory_tool import make_read_user_memory_tool
+from app.chat.user_memory_tool import make_user_memory_tools
 from app.chat.message_codec import (
     expand_messages_for_model,
     msg_content_to_str,
@@ -318,7 +318,8 @@ def build_model_and_agent(
     )
     tools.append(make_search_knowledge_by_image_tool(kb_scope, user_id, agent_id, session_id))
     if getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
-        tools.append(make_read_user_memory_tool(user_id, agent_id))
+        if getattr(settings, "CHAT_USER_MEMORY_ENABLED", True):
+            tools.extend(make_user_memory_tools(user_id, agent_id))
         tools.extend(make_session_history_tools(user_id, agent_id, session_id))
     if extra_tools:
         tools.extend(extra_tools)

@@ -71,6 +71,20 @@ def _normalize_content_type(raw: object, chunk_level: object) -> str:
     return "text"
 
 
+def normalize_block_type(raw: object, content_type: object = "text") -> str:
+    """
+    block_type 归一化：旧数据/缺失时文本块回落 text、图片块回落空串。
+    取值仅 text/code/table，其余非法值按 text 处理（图片除外）。
+    """
+    s = (raw or "").strip().lower() if isinstance(raw, str) else ""
+    if s in ("text", "code", "table"):
+        return s
+    ct = (content_type or "").strip().lower() if isinstance(content_type, str) else ""
+    if ct == "image":
+        return ""
+    return "text"
+
+
 def kb_filter_expr(kb_scope: str, extra: str = "") -> str:
     """
     构建知识库过滤表达式
@@ -137,6 +151,8 @@ class MilvusManager:
         - root_chunk_id: 根级分块ID
         - chunk_level: 分块层级
         - content_type: 内容类型（text/image）
+        - block_type: 结构化块类型（text/code/table；图片行为空）
+        - code_language: 代码语言（代码块才有）
         - image_path: 图片路径（图片块才有）
         - position_start: 文本在页内的起始位置（文本块才有）
         - position_end: 文本在页内的结束位置（文本块才有）
@@ -186,6 +202,9 @@ class MilvusManager:
         schema.add_field("root_chunk_id", DataType.VARCHAR, max_length=512)
         schema.add_field("chunk_level", DataType.INT64)
         schema.add_field("content_type", DataType.VARCHAR, max_length=20)
+        # 结构化块类型（text/code/table；图片行为空）与代码语言；nullable + 默认空串兼容图片行
+        schema.add_field("block_type", DataType.VARCHAR, max_length=20, nullable=True, default_value="")
+        schema.add_field("code_language", DataType.VARCHAR, max_length=40, nullable=True, default_value="")
         schema.add_field("image_path", DataType.VARCHAR, max_length=1024)
         # 文本块位置字段
         schema.add_field("position_start", DataType.INT64)
@@ -372,6 +391,9 @@ class MilvusManager:
                 "chunk_level",
                 "chunk_idx",
                 "kb_scope",
+                "content_type",
+                "block_type",
+                "code_language",
             ],
             limit=len(ids),
         )
@@ -409,6 +431,8 @@ class MilvusManager:
             "chunk_idx",
             "kb_scope",
             "content_type",  # 文本或图片
+            "block_type",    # text/code/table（图片为空）
+            "code_language",  # 代码块语言
             "image_path",    # 图片路径
             "position_start", "position_end",  # 文本位置
             "image_position_x", "image_position_y", "image_width", "image_height",  # 图片位置
@@ -464,6 +488,10 @@ class MilvusManager:
                         "chunk_idx": hit.get("chunk_idx", 0),
                         "kb_scope": hit.get("kb_scope", ""),
                         "content_type": _normalize_content_type(hit.get("content_type"), cl),
+                        "block_type": normalize_block_type(
+                            hit.get("block_type"), _normalize_content_type(hit.get("content_type"), cl)
+                        ),
+                        "code_language": hit.get("code_language", "") or "",
                         "image_path": hit.get("image_path", ""),
                         "position_start": hit.get("position_start", 0),
                         "position_end": hit.get("position_end", 0),
@@ -507,6 +535,8 @@ class MilvusManager:
                 "chunk_idx",
                 "kb_scope",
                 "content_type",  # 文本或图片
+                "block_type",    # text/code/table（图片为空）
+                "code_language",  # 代码块语言
                 "image_path",    # 图片路径
                 "position_start", "position_end",  # 文本位置
                 "image_position_x", "image_position_y", "image_width", "image_height",  # 图片位置
@@ -532,6 +562,10 @@ class MilvusManager:
                         "chunk_idx": ent.get("chunk_idx", 0),
                         "kb_scope": ent.get("kb_scope", ""),
                         "content_type": _normalize_content_type(ent.get("content_type"), cl),
+                        "block_type": normalize_block_type(
+                            ent.get("block_type"), _normalize_content_type(ent.get("content_type"), cl)
+                        ),
+                        "code_language": ent.get("code_language", "") or "",
                         "image_path": ent.get("image_path", ""),
                         "position_start": ent.get("position_start", 0),
                         "position_end": ent.get("position_end", 0),
@@ -575,6 +609,8 @@ class MilvusManager:
                 "chunk_idx",
                 "kb_scope",
                 "content_type",
+                "block_type",
+                "code_language",
                 "image_path",
                 "position_start", "position_end",
                 "image_position_x", "image_position_y", "image_width", "image_height",
@@ -600,6 +636,10 @@ class MilvusManager:
                         "chunk_idx": ent.get("chunk_idx", 0),
                         "kb_scope": ent.get("kb_scope", ""),
                         "content_type": _normalize_content_type(ent.get("content_type"), cl),
+                        "block_type": normalize_block_type(
+                            ent.get("block_type"), _normalize_content_type(ent.get("content_type"), cl)
+                        ),
+                        "code_language": ent.get("code_language", "") or "",
                         "image_path": ent.get("image_path", ""),
                         "position_start": ent.get("position_start", 0),
                         "position_end": ent.get("position_end", 0),

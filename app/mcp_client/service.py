@@ -18,6 +18,8 @@ _BUILTIN_TOOL_NAMES = {
     "search_knowledge_base",
     "search_knowledge_by_image",
     "read_user_memory",
+    "save_user_memory",
+    "forget_user_memory",
     "read_session_history",
     "search_session_attachment",
     "read_session_attachment",

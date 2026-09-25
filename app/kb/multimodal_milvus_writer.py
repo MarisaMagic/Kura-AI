@@ -91,7 +91,8 @@ class MultimodalMilvusWriter:
             done = 0
             for i in range(0, total, bs):
                 batch = text_chunks[i : i + bs]
-                texts = [doc["text"] for doc in batch]
+                # embed_text 携带标题路径/文件头上下文，仅用于嵌入；入库 text 保持纯净正文
+                texts = [doc.get("embed_text") or doc.get("text") or "" for doc in batch]
 
                 dense_embeddings = self.embedding_service.get_text_embeddings(texts, request_timeout=timeout)
                 if len(dense_embeddings) != len(batch):
@@ -180,6 +181,8 @@ class MultimodalMilvusWriter:
                         "root_chunk_id": doc.get("root_chunk_id", ""),
                         "chunk_level": doc.get("chunk_level", 0),
                         "content_type": "text",
+                        "block_type": doc.get("block_type", "") or "text",
+                        "code_language": (doc.get("code_language", "") or "")[:40],
                         "image_path": "",
                         # 文本块位置信息
                         "position_start": doc.get("position_start", 0),
@@ -229,6 +232,8 @@ class MultimodalMilvusWriter:
                         "root_chunk_id": doc.get("root_chunk_id", ""),
                         "chunk_level": 4,  # L4 图片块
                         "content_type": "image",
+                        "block_type": "",
+                        "code_language": "",
                         "image_path": doc.get("image_path", ""),
                         # 文本位置信息（图片块为0）
                         "position_start": 0,

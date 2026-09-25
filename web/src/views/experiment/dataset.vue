@@ -613,7 +613,7 @@ onUnmounted(() => {
             :show-file-list="false"
             :default-upload="false"
             multiple
-            accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.md"
+            accept=".pdf,.docx,.xlsx,.txt,.md,.markdown,.csv,.py,.js,.ts,.tsx,.jsx,.java,.go,.rs,.c,.h,.cpp,.cs,.rb,.php,.swift,.kt,.scala,.sh,.ps1,.sql,.yaml,.yml,.toml,.ini,.json,.xml,.html,.css,.vue"
             @change="onUploadChange"
           >
             <n-upload-dragger>
@@ -1401,6 +1401,9 @@ onUnmounted(() => {
 }
 :deep(.exp-kind-md) {
   color: #546e7a;
+}
+:deep(.exp-kind-code) {
+  color: #8e24aa;
 }
 :deep(.exp-kind-text) {
   color: var(--n-text-color-3);

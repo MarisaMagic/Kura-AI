@@ -84,69 +84,30 @@ class SummaryPromptTest(unittest.TestCase):
         p = build_summary_prompt(old_summary="", dropped_text="x", max_chars=6000)
         self.assertIn("6000", p)
 
-    def test_facts_block_only_when_requested(self):
-        off = build_summary_prompt(old_summary="", dropped_text="x", max_chars=4000, with_facts=False)
-        on = build_summary_prompt(old_summary="", dropped_text="x", max_chars=4000, with_facts=True)
-        self.assertNotIn("<facts>", off)
-        self.assertIn("<facts>", on)
-        self.assertIn("preference", on)
-        # 相对时间必须转绝对日期
-        self.assertIn("绝对日期", on)
-        # 排除清单：可推导内容不入库
-        self.assertIn("不要记录", on)
-
 
 class ParseSummaryOutputTest(unittest.TestCase):
     def test_strips_analysis_keeps_summary(self):
         raw = "<analysis>我在想哪些重要</analysis>\n<summary>\n1. Primary Request and Intent\n- 用户要登录\n</summary>"
-        summary, facts = parse_summary_output(raw)
+        summary = parse_summary_output(raw)
         self.assertNotIn("我在想", summary)
         self.assertIn("用户要登录", summary)
-        self.assertEqual(facts, [])
 
     def test_unclosed_summary_takes_rest(self):
-        summary, _ = parse_summary_output("<analysis>草稿</analysis><summary>正文没有闭合标签")
+        summary = parse_summary_output("<analysis>草稿</analysis><summary>正文没有闭合标签")
         self.assertEqual(summary, "正文没有闭合标签")
 
     def test_no_tags_falls_back_to_whole_text(self):
-        summary, _ = parse_summary_output("模型没按格式输出，直接给了摘要正文")
+        summary = parse_summary_output("模型没按格式输出，直接给了摘要正文")
         self.assertIn("摘要正文", summary)
 
     def test_strips_markdown_fence(self):
-        summary, _ = parse_summary_output("<summary>\n```markdown\n正文\n```\n</summary>")
+        summary = parse_summary_output("<summary>\n```markdown\n正文\n```\n</summary>")
         self.assertEqual(summary, "正文")
         self.assertNotIn("```", summary)
 
-    def test_facts_parsed(self):
-        raw = (
-            "<summary>正文</summary>\n<facts>"
-            '[{"type":"preference","subject":"语言","content":"用中文","why":"用户要求","how_to_apply":"默认中文"}]'
-            "</facts>"
-        )
-        summary, facts = parse_summary_output(raw)
-        self.assertEqual(summary, "正文")
-        self.assertEqual(len(facts), 1)
-        self.assertEqual(facts[0]["type"], "preference")
-
-    def test_facts_tolerates_fence_and_noise(self):
-        raw = "<summary>s</summary><facts>前置说明\n```json\n[{\"type\":\"decision\",\"content\":\"用 JWT\"}]\n```\n</facts>"
-        _, facts = parse_summary_output(raw)
-        self.assertEqual(len(facts), 1)
-        self.assertEqual(facts[0]["content"], "用 JWT")
-
-    def test_facts_drops_entries_without_content(self):
-        raw = '<summary>s</summary><facts>[{"type":"entity"},{"type":"x","content":""},{"content":"有效"}]</facts>'
-        _, facts = parse_summary_output(raw)
-        self.assertEqual(len(facts), 1)
-        self.assertEqual(facts[0]["content"], "有效")
-
-    def test_broken_facts_json_yields_empty(self):
-        _, facts = parse_summary_output("<summary>s</summary><facts>[{坏掉的 json</facts>")
-        self.assertEqual(facts, [])
-
     def test_empty_input(self):
-        self.assertEqual(parse_summary_output(""), ("", []))
-        self.assertEqual(parse_summary_output(None), ("", []))
+        self.assertEqual(parse_summary_output(""), "")
+        self.assertEqual(parse_summary_output(None), "")
 
 
 class DroppedTextTruncationTest(unittest.TestCase):

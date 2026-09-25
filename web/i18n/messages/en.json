@@ -130,7 +130,7 @@
       "title_knowledge_base": "Knowledge base",
       "kb_configure": "Configure knowledge base",
       "kb_upload_title": "Upload documents",
-      "kb_upload_hint": "PDF, Word, Excel, TXT, or Markdown",
+      "kb_upload_hint": "PDF, Word (.docx), Excel (.xlsx), TXT, Markdown, CSV, and common code files",
       "kb_upload_drop": "Click or drag files here to upload",
       "kb_upload_max_size": "Max {mb}MB per file",
       "kb_go_chat": "Open chat",

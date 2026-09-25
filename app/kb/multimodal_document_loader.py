@@ -1,21 +1,39 @@
 """
-多模态文档加载与图文解析，扩展原有三级分块功能，支持图片提取和存储。
-采用三组 RecursiveCharacterTextSplitter 进行分块，分别对应 L1/L2/L3 层级。
+多模态文档加载与结构感知分块，支持图片提取和存储。
+
+- Markdown / 纯文本 / 源码 / CSV：结构感知分块（代码块与表格原子化，源码走 tree-sitter AST）
+- PDF / Word：正文沿用递归字符切分，表格单独抽出为 table 块
+- Excel：逐 sheet 转 Markdown 表格块
 图片作为独立的 L4 块处理，与文本块通过位置关联。
 """
 
 from __future__ import annotations
 
 import hashlib
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
-from langchain_community.document_loaders import Docx2txtLoader, PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from loguru import logger
 
 from app.kb.multimodal_embedding import get_multimodal_embedding_service
+from app.kb.structural_chunker import (
+    BLOCK_TEXT,
+    PARENT_L1_MAX_CHARS,
+    PARENT_L2_MAX_CHARS,
+    Leaf,
+    build_embed_text,
+    cap_text,
+    make_table_leaves,
+    parse_csv_rows,
+    segment_document,
+    segment_plain_text,
+)
+from app.settings import settings
+from app.utils.document_types import doc_kind
 
 
 def _filename_fingerprint(filename: str) -> str:
@@ -27,158 +45,72 @@ def _filename_fingerprint(filename: str) -> str:
     return hashlib.sha256(filename.encode("utf-8")).hexdigest()[:16]
 
 
-class _SheetPage:
-    """Excel 逐 sheet 解析后的"页"（结构与 loader.load() 的 Document 兼容）。"""
-
-    def __init__(self, page_content: str, page: int) -> None:
-        self.page_content = page_content
-        self.metadata = {"page": page}
-
-
-def _excel_sheet_to_markdown_table(sheet) -> str:
-    """
-    将单个工作表转为 Markdown 表格文本（含表头行）。
-    表头行列数不足时以「列N」补齐；数据行按表头宽度截断或空单元格补齐。
-    :param sheet: openpyxl worksheet
-    :return: Markdown 表格文本
-    """
-    raw_rows: list[list[str]] = []
-    for row in sheet.iter_rows(values_only=True):
-        cells = ["" if v is None else str(v).strip() for v in row]
-        while cells and cells[-1] == "":
-            cells.pop()
-        raw_rows.append(cells)
-    # 去掉首尾的完全空行
-    while raw_rows and not any(raw_rows[0]):
-        raw_rows.pop(0)
-    while raw_rows and not any(raw_rows[-1]):
-        raw_rows.pop()
-    if not raw_rows:
-        return ""
-
-    ncols = max(len(r) for r in raw_rows)
-    header = raw_rows[0] + [f"列{i + 1}" for i in range(len(raw_rows[0]), ncols)]
-    lines = [
-        "| " + " | ".join(header) + " |",
-        "| " + " | ".join(["---"] * ncols) + " |",
-    ]
-    for r in raw_rows[1:]:
-        row = (r + [""] * ncols)[:ncols]
-        lines.append("| " + " | ".join(row) + " |")
-    return "\n".join(lines)
+def _chunk_limits() -> tuple[int, int, int, bool]:
+    """结构感知分块参数：字符上限 / 字节上限 / 表格行上限 / 是否启用代码专用切分。"""
+    return (
+        max(64, int(getattr(settings, "KB_ATOMIC_BLOCK_MAX_CHARS", 1200) or 1200)),
+        max(64, int(getattr(settings, "KB_ATOMIC_BLOCK_MAX_BYTES", 1800) or 1800)),
+        max(1, int(getattr(settings, "KB_TABLE_MAX_ROWS_PER_CHUNK", 200) or 200)),
+        bool(getattr(settings, "KB_CODE_CHUNKING_ENABLED", True)),
+    )
 
 
-def _load_excel_pages(file_path: str) -> list[_SheetPage]:
-    """
-    逐 sheet 读取 Excel 并转为 Markdown 表格"页"列表（sheet 序号作 page_number）。
-    :param file_path: Excel 文件路径
-    :return: _SheetPage 列表
-    """
-    from openpyxl import load_workbook
-
-    workbook = load_workbook(file_path, read_only=True, data_only=True)
-    pages: list[_SheetPage] = []
+def _read_text_file(file_path: str) -> str:
+    """文本/源码文件解码：BOM 去除，UTF-8 优先，charset-normalizer / GB18030 兜底。"""
+    raw = Path(file_path).read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
     try:
-        for idx, sheet in enumerate(workbook.worksheets, 1):
-            if sheet.sheet_state == "hidden":
-                continue
-            table = _excel_sheet_to_markdown_table(sheet)
-            if not table:
-                continue
-            pages.append(_SheetPage(f"工作表：{sheet.title}\n\n{table}", idx))
-    finally:
-        workbook.close()
-    return pages
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        from charset_normalizer import from_bytes
 
-
-def _load_text_pages(file_path: str) -> list[_SheetPage]:
-    """
-    读取 TXT / Markdown 纯文本为单个"页"（page=0），沿用现有三级分块。
-    :param file_path: 文本文件路径
-    :return: _SheetPage 列表；空文件返回空列表
-    """
-    text = Path(file_path).read_bytes().decode("utf-8", errors="replace").strip()
-    return [_SheetPage(text, 0)] if text else []
+        best = from_bytes(raw).best()
+        if best is not None:
+            return str(best)
+    except Exception:
+        pass
+    for enc in ("gb18030", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except Exception:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 class MultimodalDocumentLoader:
     def __init__(self, chunk_size: int = 900, chunk_overlap: int = 90) -> None:
         """
         初始化多模态分块器
-        :param chunk_size: 分块大小（默认 900，推导 L1=1800 / L2=900 / L3=450）
+        :param chunk_size: 散文叶子目标大小（默认 900，取一半 450 作为叶子块）
         :param chunk_overlap: 分块重叠大小
         """
-        level_1_size = max(1200, chunk_size * 2)
-        level_1_overlap = max(240, chunk_overlap * 2)
-        level_2_size = max(600, chunk_size)
-        level_2_overlap = max(120, chunk_overlap)
-        level_3_size = max(300, chunk_size // 2)
-        level_3_overlap = max(60, chunk_overlap // 2)
+        self._prose_leaf_size = max(300, chunk_size // 2)
+        self._prose_leaf_overlap = max(60, chunk_overlap // 2)
+        self._splitter_prose = RecursiveCharacterTextSplitter(
+            chunk_size=self._prose_leaf_size,
+            chunk_overlap=self._prose_leaf_overlap,
+            add_start_index=True,
+            separators=[
+                "\\n\\n",
+                "\\n",
+                "。",
+                "！",
+                "？",
+                ".",
+                "!",
+                "?",
+                "，",
+                ",",
+                "、",
+                ";",
+                " ",
+                "",
+            ],
+        )
 
-        self._splitter_level_1 = RecursiveCharacterTextSplitter(
-            chunk_size=level_1_size,
-            chunk_overlap=level_1_overlap,
-            add_start_index=True,
-            separators=[
-                "\\n\\n",
-                "\\n",
-                "。",
-                "！",
-                "？",
-                ".",
-                "!",
-                "?",
-                "，",
-                ",",
-                "、",
-                ";",
-                " ",
-                "",
-            ],
-        )
-        self._splitter_level_2 = RecursiveCharacterTextSplitter(
-            chunk_size=level_2_size,
-            chunk_overlap=level_2_overlap,
-            add_start_index=True,
-            separators=[
-                "\\n\\n",
-                "\\n",
-                "。",
-                "！",
-                "？",
-                ".",
-                "!",
-                "?",
-                "，",
-                ",",
-                "、",
-                ";",
-                " ",
-                "",
-            ],
-        )
-        self._splitter_level_3 = RecursiveCharacterTextSplitter(
-            chunk_size=level_3_size,
-            chunk_overlap=level_3_overlap,
-            add_start_index=True,
-            separators=[
-                "\\n\\n",
-                "\\n",
-                "。",
-                "！",
-                "？",
-                ".",
-                "!",
-                "?",
-                "，",
-                ",",
-                "、",
-                ";",
-                " ",
-                "",
-            ],
-        )
-        
         # 初始化嵌入服务
         self.embedding_service = get_multimodal_embedding_service()
 
@@ -647,139 +579,289 @@ class MultimodalDocumentLoader:
         
         return image_chunks
 
-    def _split_page_to_three_levels(
+    def _prose_page_leaves(
         self,
         text: str,
+        filename: str,
+        parent_titles: Tuple[str, ...],
+        *,
+        page_text_start: int = 0,
+    ) -> List[Leaf]:
+        """
+        散文文本 -> L3 叶子（沿用递归字符切分，作为结构树的普通文本块）。
+        :param parent_titles: 父级标题路径（L1/L2），用于层级构建与嵌入上下文
+        """
+        if not text or not text.strip():
+            return []
+        leaves: List[Leaf] = []
+        for doc in self._splitter_prose.create_documents([text], [{}]):
+            piece = (doc.page_content or "").strip()
+            if not piece:
+                continue
+            start = int(doc.metadata.get("start_index", 0) or 0) + page_text_start
+            end = start + len(piece)
+            leaves.append(
+                Leaf(
+                    text=piece,
+                    block_type=BLOCK_TEXT,
+                    parent_titles=parent_titles or (filename,),
+                    heading_path=tuple(t for t in parent_titles if t) or (filename,),
+                    start=start,
+                    end=end,
+                    embed_text=build_embed_text(filename, piece, heading_path=parent_titles),
+                )
+            )
+        return leaves
+
+    def _build_hierarchy(
+        self,
+        leaves: List[Leaf],
         base_doc: Dict[str, Any],
         page_global_chunk_idx: int,
-        page_text_start: int = 0,
     ) -> List[Dict[str, Any]]:
         """
-        将一页文本进行三级分块
-        :param text: 文本
-        :param base_doc: 基础文档信息
-        :param page_global_chunk_idx: 全局 chunk 索引
-        :param page_text_start: 页面文本的起始位置
-        :return: 分块后的文档列表
+        将叶子按 parent_titles 组织为 L1/L2/L3 块（L1/L2 文本为子块正文拼接并截断）。
+        叶子计数器在本页内唯一，避免 text/code/table 混排时 chunk_id 冲突。
         """
-        if not text:
+        if not leaves:
             return []
-        
-        # 获取基础文档信息
         kb_scope = base_doc["kb_scope"]
-        # 初始化根块列表
-        root_chunks: List[Dict[str, Any]] = []
-        # 获取页码和文件名
-        page_number = int(base_doc.get("page_number", 0))
         filename = base_doc["filename"]
+        page_number = int(base_doc.get("page_number", 0) or 0)
 
-        # 进行三级分块
-        level_1_docs = self._splitter_level_1.create_documents([text], [base_doc])
-        level_1_counter = 0
-        level_2_counter = 0
-        level_3_counter = 0
+        l1_order: List[str] = []
+        l1_children: Dict[str, List[Leaf]] = defaultdict(list)
+        l2_order: List[Tuple[str, str]] = []
+        l2_children: Dict[Tuple[str, str], List[Leaf]] = defaultdict(list)
 
-        # 进行 L1 层级分块
-        for level_1_doc in level_1_docs:
-            # 获取 L1 层级文本
-            level_1_text = (level_1_doc.page_content or "").strip()
-            if not level_1_text:
-                continue
-            
-            # 获取 L1 块在原始文本中的位置
-            l1_start_idx = level_1_doc.metadata.get("start_index", 0)
-            l1_end_idx = l1_start_idx + len(level_1_text)
-            
-            # 构建 L1 层级 chunk_id
-            level_1_id = self._build_chunk_id(kb_scope, filename, page_number, 1, level_1_counter)
-            level_1_counter += 1
-            
-            # 构建 L1 层级 chunk
-            level_1_chunk = {
-                **base_doc,
-                "text": level_1_text,
-                "content_type": "text",
-                "chunk_id": level_1_id,
-                "parent_chunk_id": "",  # 根块的 parent_chunk_id 为空
-                "root_chunk_id": level_1_id,  # 根块的 root_chunk_id 指向自己
-                "chunk_level": 1,
-                "chunk_idx": page_global_chunk_idx,
-                # 文本位置信息
-                "position_start": page_text_start + l1_start_idx,
-                "position_end": page_text_start + l1_end_idx,
-            }
-            page_global_chunk_idx += 1  # 更新全局 chunk 索引
-            root_chunks.append(level_1_chunk)
+        def titles_of(leaf: Leaf) -> Tuple[str, ...]:
+            titles = tuple(t for t in (leaf.parent_titles or ()) if t)
+            return titles or (filename or "文档",)
 
-            # 进行 L2 层级分块
-            level_2_docs = self._splitter_level_2.create_documents([level_1_text], [base_doc])
-            for level_2_doc in level_2_docs:
-                # 获取 L2 层级文本
-                level_2_text = (level_2_doc.page_content or "").strip()
-                if not level_2_text:
-                    continue
-                
-                # 获取 L2 块在原始文本中的位置
-                l2_start_idx = level_2_doc.metadata.get("start_index", 0)
-                l2_end_idx = l2_start_idx + len(level_2_text)
-                
-                # 构建 L2 层级 chunk_id
-                level_2_id = self._build_chunk_id(kb_scope, filename, page_number, 2, level_2_counter)
-                level_2_counter += 1  # 更新 L2 层级计数器
+        for leaf in leaves:
+            titles = titles_of(leaf)
+            l1 = titles[0]
+            l2 = titles[1] if len(titles) > 1 else ""
+            if l1 not in l1_children:
+                l1_order.append(l1)
+            l1_children[l1].append(leaf)
+            if l2:
+                key = (l1, l2)
+                if key not in l2_children:
+                    l2_order.append(key)
+                l2_children[key].append(leaf)
 
-                # 构建 L2 层级 chunk
-                level_2_chunk = {
+        chunks: List[Dict[str, Any]] = []
+        l1_ids: Dict[str, str] = {}
+        for l1 in l1_order:
+            cid = self._build_chunk_id(kb_scope, filename, page_number, 1, len(l1_ids))
+            body = cap_text("\n\n".join(leaf.text for leaf in l1_children[l1]), PARENT_L1_MAX_CHARS)
+            l1_ids[l1] = cid
+            chunks.append(
+                {
                     **base_doc,
-                    "text": level_2_text,
+                    "text": body,
                     "content_type": "text",
-                    "chunk_id": level_2_id,
-                    "parent_chunk_id": level_1_id,  # 父块为 L1 层级块
-                    "root_chunk_id": level_1_id,  # 根块为 L1 层级块
-                    "chunk_level": 2,
-                    "chunk_idx": page_global_chunk_idx,  # 更新全局 chunk 索引
-                    # 文本位置信息
-                    "position_start": page_text_start + l1_start_idx + l2_start_idx,
-                    "position_end": page_text_start + l1_start_idx + l2_end_idx,
+                    "block_type": BLOCK_TEXT,
+                    "code_language": "",
+                    "chunk_id": cid,
+                    "parent_chunk_id": "",
+                    "root_chunk_id": cid,
+                    "chunk_level": 1,
+                    "chunk_idx": page_global_chunk_idx,
+                    "position_start": 0,
+                    "position_end": 0,
                 }
-                page_global_chunk_idx += 1  # 更新全局 chunk 索引
-                root_chunks.append(level_2_chunk)
+            )
+            page_global_chunk_idx += 1
 
-                # 进行 L3 层级分块
-                level_3_docs = self._splitter_level_3.create_documents([level_2_text], [base_doc])
-                for level_3_doc in level_3_docs:
-                    # 获取 L3 层级文本
-                    level_3_text = (level_3_doc.page_content or "").strip()
-                    if not level_3_text:
+        l2_ids: Dict[Tuple[str, str], str] = {}
+        for key in l2_order:
+            l1 = key[0]
+            cid = self._build_chunk_id(kb_scope, filename, page_number, 2, len(l2_ids))
+            body = cap_text(
+                "\n\n".join(leaf.text for leaf in l2_children[key]), PARENT_L2_MAX_CHARS
+            )
+            l2_ids[key] = cid
+            chunks.append(
+                {
+                    **base_doc,
+                    "text": body,
+                    "content_type": "text",
+                    "block_type": BLOCK_TEXT,
+                    "code_language": "",
+                    "chunk_id": cid,
+                    "parent_chunk_id": l1_ids[l1],
+                    "root_chunk_id": l1_ids[l1],
+                    "chunk_level": 2,
+                    "chunk_idx": page_global_chunk_idx,
+                    "position_start": 0,
+                    "position_end": 0,
+                }
+            )
+            page_global_chunk_idx += 1
+
+        for leaf_idx, leaf in enumerate(leaves):
+            titles = titles_of(leaf)
+            l1 = titles[0]
+            l2 = titles[1] if len(titles) > 1 else ""
+            parent_id = l2_ids.get((l1, l2)) or l1_ids.get(l1, "")
+            cid = self._build_chunk_id(kb_scope, filename, page_number, 3, leaf_idx)
+            chunks.append(
+                {
+                    **base_doc,
+                    "text": leaf.text,
+                    "embed_text": leaf.embed_text
+                    or build_embed_text(
+                        filename,
+                        leaf.text,
+                        block_type=leaf.block_type,
+                        language=leaf.language,
+                        heading_path=leaf.heading_path,
+                    ),
+                    "content_type": "text",
+                    "block_type": leaf.block_type or BLOCK_TEXT,
+                    "code_language": leaf.language or "",
+                    "chunk_id": cid,
+                    "parent_chunk_id": parent_id,
+                    "root_chunk_id": l1_ids.get(l1, cid),
+                    "chunk_level": 3,
+                    "chunk_idx": page_global_chunk_idx,
+                    "position_start": leaf.start,
+                    "position_end": leaf.end,
+                }
+            )
+            page_global_chunk_idx += 1
+
+        return chunks
+
+    @staticmethod
+    def _excel_sheets(file_path: str) -> List[Tuple[str, List[List[str]]]]:
+        """逐 sheet 读取为二维单元格（隐藏/空 sheet 跳过）。"""
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(file_path, read_only=True, data_only=True)
+        sheets: List[Tuple[str, List[List[str]]]] = []
+        try:
+            for sheet in workbook.worksheets:
+                if sheet.sheet_state == "hidden":
+                    continue
+                rows: List[List[str]] = []
+                for row in sheet.iter_rows(values_only=True):
+                    cells = ["" if v is None else str(v) for v in row]
+                    while cells and cells[-1] == "":
+                        cells.pop()
+                    rows.append(cells)
+                while rows and not any(c.strip() for c in rows[0]):
+                    rows.pop(0)
+                while rows and not any(c.strip() for c in rows[-1]):
+                    rows.pop()
+                if rows:
+                    sheets.append((sheet.title, rows))
+        finally:
+            workbook.close()
+        return sheets
+
+    @staticmethod
+    def _pdf_tables_by_page(file_path: str) -> Dict[int, List[List[List[str]]]]:
+        """PDF 逐页表格提取（PyMuPDF find_tables）；页 -> 表格列表 -> 行列表。"""
+        min_rows = max(1, int(getattr(settings, "KB_PDF_TABLE_MIN_ROWS", 2) or 2))
+        min_cols = max(1, int(getattr(settings, "KB_PDF_TABLE_MIN_COLS", 2) or 2))
+        result: Dict[int, List[List[List[str]]]] = {}
+        try:
+            doc = fitz.open(file_path)
+        except Exception as e:
+            logger.warning("PDF 表格提取失败，跳过: {}", e)
+            return result
+        try:
+            for page_idx in range(doc.page_count):
+                try:
+                    tables = doc[page_idx].find_tables()
+                except Exception:
+                    continue
+                page_tables: List[List[List[str]]] = []
+                for table in getattr(tables, "tables", []) or []:
+                    try:
+                        raw_rows = table.extract() or []
+                    except Exception:
                         continue
-                    
-                    # 获取 L3 块在原始文本中的位置
-                    l3_start_idx = level_3_doc.metadata.get("start_index", 0)
-                    l3_end_idx = l3_start_idx + len(level_3_text)
-                    
-                    # 构建 L3 层级 chunk_id
-                    level_3_id = self._build_chunk_id(kb_scope, filename, page_number, 3, level_3_counter)
-                    level_3_counter += 1  # 更新 L3 层级计数器
-                    
-                    # 构建 L3 层级 chunk
-                    root_chunks.append(
-                        {
-                            **base_doc,
-                            "text": level_3_text,
-                            "content_type": "text",
-                            "chunk_id": level_3_id,
-                            "parent_chunk_id": level_2_id,  # 父块为 L2 层级块
-                            "root_chunk_id": level_1_id,  # 根块为 L1 层级块
-                            "chunk_level": 3,
-                            "chunk_idx": page_global_chunk_idx,  # 更新全局 chunk 索引
-                            # 文本位置信息
-                            "position_start": page_text_start + l1_start_idx + l2_start_idx + l3_start_idx,
-                            "position_end": page_text_start + l1_start_idx + l2_start_idx + l3_end_idx,
-                        }
-                    )
-                    page_global_chunk_idx += 1  # 更新全局 chunk 索引
+                    rows = [["" if c is None else str(c) for c in r] for r in raw_rows if r]
+                    rows = [r for r in rows if any(c.strip() for c in r)]
+                    if len(rows) < min_rows:
+                        continue
+                    if max((len(r) for r in rows), default=0) < min_cols:
+                        continue
+                    page_tables.append(rows)
+                if page_tables:
+                    result[page_idx] = page_tables
+        finally:
+            doc.close()
+        return result
 
-        # 返回根块列表
-        return root_chunks
+    @staticmethod
+    def _word_blocks(file_path: str) -> List[Tuple[str, Any, int]]:
+        """Word 正文按阅读顺序展开为 (类型, 内容, 段落序号)：para / table。"""
+        import docx
+        from docx.table import Table as DocxTable
+        from docx.text.paragraph import Paragraph as DocxParagraph
+
+        document = docx.Document(file_path)
+        blocks: List[Tuple[str, Any, int]] = []
+        para_idx = 0
+        for child in document.element.body.iterchildren():
+            tag = str(child.tag).rsplit("}", 1)[-1]
+            if tag == "p":
+                paragraph = DocxParagraph(child, document)
+                text = (paragraph.text or "").strip()
+                if text:
+                    blocks.append(("para", text, para_idx))
+                para_idx += 1
+            elif tag == "tbl":
+                table = DocxTable(child, document)
+                rows = [[(cell.text or "").strip() for cell in row.cells] for row in table.rows]
+                rows = [r for r in rows if any(c for c in r)]
+                if rows:
+                    blocks.append(("table", rows, para_idx))
+        return blocks
+
+    def _word_leaves(
+        self,
+        blocks: List[Tuple[str, Any, int]],
+        filename: str,
+        *,
+        max_chars: int,
+        max_bytes: int,
+        max_table_rows: int,
+    ) -> List[Leaf]:
+        """Word blocks -> 叶子：连续段落聚合为散文，表格独立成 table 叶子。"""
+        leaves: List[Leaf] = []
+        buf: List[str] = []
+        table_no = 0
+
+        def flush() -> None:
+            nonlocal buf
+            if buf:
+                leaves.extend(self._prose_page_leaves("\n".join(buf), filename, (filename,)))
+                buf = []
+
+        for kind, content, _para_idx in blocks:
+            if kind == "para":
+                buf.append(content)
+                continue
+            flush()
+            table_no += 1
+            leaves.extend(
+                make_table_leaves(
+                    content,
+                    filename=filename,
+                    title=f"表格 {table_no}",
+                    max_chars=max_chars,
+                    max_bytes=max_bytes,
+                    max_table_rows=max_table_rows,
+                )
+            )
+        flush()
+        return leaves
 
     def load_document(
         self,
@@ -791,114 +873,150 @@ class MultimodalDocumentLoader:
         images_root_dir: str,
     ) -> list[dict]:
         """
-        加载文档，进行三级分块和图片提取
+        加载文档：结构感知分块（代码块/表格/源码 AST）+ 图片提取。
         :param file_path: 文件路径（调用方负责的本地文件，通常为临时文件）
         :param filename: 文件名
         :param kb_scope: 知识库范围
         :param user_id: 用户ID
         :param agent_id: 智能体ID
         :param images_root_dir: 图片输出根目录（调用方提供的临时目录；子结构与对象 key 一致）
-        :return: 分块后的文档列表
+        :return: 分块后的文档列表（L1/L2/L3 文本与 L4 图片）
         """
-        # 根据文件名确定文档类型
-        file_lower = filename.lower()
+        kind = doc_kind(filename)
+        max_chars, max_bytes, max_table_rows, code_enabled = _chunk_limits()
+        structural = bool(getattr(settings, "KB_STRUCTURAL_CHUNKING_ENABLED", True))
+        pdf_tables_enabled = bool(getattr(settings, "KB_PDF_TABLE_EXTRACTION", True))
 
-        loader = None
-        raw_docs: Optional[list] = None
+        common: Dict[str, Any] = {
+            "kb_scope": kb_scope,
+            "filename": filename,
+            "file_path": file_path,
+            "user_id": user_id,
+            "agent_id": agent_id,
+        }
+        documents: list[dict] = []
+        images: List[Dict[str, Any]] = []
+        idx = 0
+        doc_type = "Text"
 
-        if file_lower.endswith(".pdf"):
+        if kind == "pdf":
             doc_type = "PDF"
-            loader = PyPDFLoader(file_path)
-            # 从 PDF 中提取图片（带位置信息）
-            images = self._extract_images_from_pdf(file_path, user_id, agent_id, kb_scope, filename, images_root_dir)
-        elif file_lower.endswith((".docx", ".doc")):
+            raw_docs = PyPDFLoader(file_path).load()
+            images = self._extract_images_from_pdf(
+                file_path, user_id, agent_id, kb_scope, filename, images_root_dir
+            )
+            tables_by_page = (
+                self._pdf_tables_by_page(file_path) if (pdf_tables_enabled and structural) else {}
+            )
+            for doc in raw_docs:
+                page = int(doc.metadata.get("page", 0) or 0)
+                base = {**common, "file_type": doc_type, "page_number": page}
+                leaves = self._prose_page_leaves(
+                    (doc.page_content or "").strip(), filename, (filename, f"第{page + 1}页")
+                )
+                chunks = self._build_hierarchy(leaves, base, idx)
+                documents.extend(chunks)
+                idx += len(chunks)
+                for table_rows in tables_by_page.get(page, []):
+                    table_leaves = make_table_leaves(
+                        table_rows,
+                        filename=filename,
+                        title=f"第{page + 1}页 表格",
+                        max_chars=max_chars,
+                        max_bytes=max_bytes,
+                        max_table_rows=max_table_rows,
+                    )
+                    table_chunks = self._build_hierarchy(table_leaves, base, idx)
+                    documents.extend(table_chunks)
+                    idx += len(table_chunks)
+
+        elif kind == "word":
             doc_type = "Word"
-            loader = Docx2txtLoader(file_path)
-            # 从 DOCX 中提取图片
-            images = self._extract_images_from_docx(file_path, user_id, agent_id, kb_scope, filename, images_root_dir)
-        elif file_lower.endswith((".xlsx", ".xls")):
+            images = self._extract_images_from_docx(
+                file_path, user_id, agent_id, kb_scope, filename, images_root_dir
+            )
+            blocks = self._word_blocks(file_path)
+            base = {**common, "file_type": doc_type, "page_number": 0}
+            if structural:
+                leaves = self._word_leaves(
+                    blocks,
+                    filename,
+                    max_chars=max_chars,
+                    max_bytes=max_bytes,
+                    max_table_rows=max_table_rows,
+                )
+            else:
+                prose = "\n".join(content for k, content, _ in blocks if k == "para")
+                leaves = self._prose_page_leaves(prose, filename, (filename,))
+            chunks = self._build_hierarchy(leaves, base, idx)
+            documents.extend(chunks)
+            idx += len(chunks)
+
+        elif kind == "excel":
             doc_type = "Excel"
-            # 逐 sheet 转 Markdown 表格，sheet 序号作 page_number
-            raw_docs = _load_excel_pages(file_path)
-            images = []  # Excel 暂不支持图片提取
-        elif file_lower.endswith((".txt", ".md")):
-            doc_type = "Text"
-            # 纯文本/Markdown 整篇读入为单页，走现有三级分块
-            raw_docs = _load_text_pages(file_path)
-            images = []  # 纯文本无图片可提取
+            for sheet_index, (title, rows) in enumerate(self._excel_sheets(file_path), 1):
+                base = {**common, "file_type": doc_type, "page_number": sheet_index}
+                leaves = make_table_leaves(
+                    rows,
+                    filename=filename,
+                    title=f"工作表：{title}",
+                    max_chars=max_chars,
+                    max_bytes=max_bytes,
+                    max_table_rows=max_table_rows,
+                )
+                chunks = self._build_hierarchy(leaves, base, idx)
+                documents.extend(chunks)
+                idx += len(chunks)
+
+        elif kind in ("markdown", "text", "csv", "code"):
+            doc_type = "Code" if kind == "code" else "Text"
+            text = _read_text_file(file_path)
+            base = {**common, "file_type": doc_type, "page_number": 0}
+            if kind == "csv":
+                leaves = make_table_leaves(
+                    parse_csv_rows(text),
+                    filename=filename,
+                    max_chars=max_chars,
+                    max_bytes=max_bytes,
+                    max_table_rows=max_table_rows,
+                )
+            elif structural:
+                leaves = segment_document(
+                    filename,
+                    text,
+                    force_kind=kind,
+                    max_chars=max_chars,
+                    max_bytes=max_bytes,
+                    max_table_rows=max_table_rows,
+                    code_enabled=code_enabled,
+                )
+            else:
+                leaves = segment_plain_text(text, filename, max_chars=max_chars, max_bytes=max_bytes)
+            chunks = self._build_hierarchy(leaves, base, idx)
+            documents.extend(chunks)
+            idx += len(chunks)
+
         else:
             raise ValueError(f"不支持的文件类型: {filename}")
 
-        # 加载文档文本
-        if raw_docs is None:
-            raw_docs = loader.load()
-        documents: list[dict] = []
-        page_global_chunk_idx = 0
-
-        # 处理每一页的文本
-        for doc in raw_docs:
-            # 构建每一页的基础文档信息
-            base_doc = {
-                "kb_scope": kb_scope,
-                "filename": filename,
-                "file_path": file_path,
-                "file_type": doc_type,
-                "page_number": doc.metadata.get("page", 0),
-                "user_id": user_id,
-                "agent_id": agent_id,
-            }
-            
-            # 获取页面文本的长度（用于计算位置）
-            page_text = (doc.page_content or "").strip()
-            
-            # 进行三级分块
-            page_chunks = self._split_page_to_three_levels(
-                text=page_text,
-                base_doc=base_doc,
-                page_global_chunk_idx=page_global_chunk_idx,
-                page_text_start=0,  # 每页重新计算位置
-            )
-            
-            # 更新全局 chunk 索引
-            page_global_chunk_idx += len(page_chunks)
-            # 将分块后的文档添加到结果列表
-            documents.extend(page_chunks)
-        
         # 建立文本块和图片的关联（PDF 使用与分块相同的 0 起算页码 + 页面坐标系）
         documents, images = self._associate_text_with_images(
             documents, images, file_path=file_path, doc_type=doc_type
         )
-        
+
         # 创建图片块
         if images:
-            # 为每张图片创建块
             for img_info in images:
-                # 构建图片的基础信息
                 image_base_doc = {
-                    "kb_scope": kb_scope,
-                    "filename": filename,
-                    "file_path": file_path,
+                    **common,
                     "file_type": doc_type,
                     "page_number": img_info.get("page_number", 0),
-                    "user_id": user_id,
-                    "agent_id": agent_id,
                 }
-                
-                # 创建图片块
-                image_chunks = self._create_image_chunks(
-                    [img_info],
-                    image_base_doc,
-                    page_global_chunk_idx,
-                )
-                
-                # 添加图片元数据（用于后续存储到数据库）
+                image_chunks = self._create_image_chunks([img_info], image_base_doc, idx)
                 for chunk in image_chunks:
                     chunk["image_metadata"] = img_info
-                
                 documents.extend(image_chunks)
-                page_global_chunk_idx += len(image_chunks)
+                idx += len(image_chunks)
 
         logger.info(f"Loaded {filename}: {len(documents)} chunks (including {len(images)} images)")
-        
-        # 返回分块后的文档列表
         return documents
