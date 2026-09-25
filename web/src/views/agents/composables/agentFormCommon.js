@@ -16,6 +16,7 @@ export function emptyForm() {
     system_prompt: '',
     opening_message: '',
     temperature: 0.1,
+    context_window: null,
     supports_vision: false,
     sub_model_name: '',
     sub_base_url: '',

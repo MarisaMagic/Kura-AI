@@ -1,4 +1,4 @@
-import { request, getToken } from '@/utils'
+import { request, getToken, authFetch } from '@/utils'
 
 export default {
   login: (data) => request.post('/base/access_token', data, { noNeedToken: true }),
@@ -77,6 +77,18 @@ export default {
       { assistant_message_id: assistantMessageId },
       { params: { agent_id: agentId } }
     ),
+  /** 会话上下文占用快照（token 预算 / 估算用量 / 分段摘要 / 压缩历史） */
+  getAgentChatContextUsage: (agentId, sessionId) =>
+    request.get(`/user-agent/chat/sessions/${encodeURIComponent(sessionId)}/context_usage`, {
+      params: { agent_id: agentId },
+    }),
+  /** 手动压缩会话上下文（对齐 Claude Code 的 /compact），instructions 可选 */
+  compactAgentChatSession: (agentId, sessionId, instructions = '') =>
+    request.post(
+      `/user-agent/chat/sessions/${encodeURIComponent(sessionId)}/compact`,
+      { instructions: instructions || null },
+      { params: { agent_id: agentId } }
+    ),
   /** 会话附件上传（先上传再发消息，返回 data.id 作为 attachment_ids） */
   uploadChatAttachment: (agentId, sessionId, file) => {
     const fd = new FormData()
@@ -102,7 +114,7 @@ export default {
     const headers = {}
     const token = getToken()
     if (token) headers.token = token
-    return fetch(`${base}/user-agent/chat/attachments/preview?${q}`, {
+    return authFetch(`${base}/user-agent/chat/attachments/preview?${q}`, {
       credentials: 'include',
       headers,
     }).then(async (res) => {

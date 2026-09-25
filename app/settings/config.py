@@ -144,13 +144,61 @@ class Settings(BaseSettings):
     CHAT_MEMORY_MILVUS_TEXT_MAX_LENGTH: int = 8192
     # 为 True 时启动 init 会先 drop 再建会话记忆 collection。另：init 时若现有集合的 dense 维与 EMBEDDING_DIM 不一致会自动 drop 重建（无需手开此项）
     CHAT_MEMORY_MILVUS_RECREATE_ON_INIT: bool = False
-    # 启用：远期归档检索 + 按字符预算压缩进上下文（替代「只留最近 N 轮」滑动窗口）
+    # 启用：远期归档检索 + 按 token 预算压缩进上下文（替代「只留最近 N 轮」滑动窗口）
     CHAT_USE_SESSION_MEMORY: bool = True
     CHAT_MEMORY_WINDOW_TURNS: int = 10  # 仅当 CHAT_COMPACT_ENABLED=false 时作为滑动窗口轮数
     CHAT_COMPACT_ENABLED: bool = True
-    # 估算 prompt（tools 粗估 + system + 摘要 + 原文 + 回包余量）达到该字符数则触发压缩
+
+    # ---- token 预算口径（对齐 Claude Code 的「距上限固定缓冲」，而非百分比/轮数）----
+    # 智能体未单独配置 context_window 时使用的模型上下文窗口
+    CHAT_MODEL_CONTEXT_WINDOW_DEFAULT: int = 128000
+    # 第一层缓冲：从原始窗口里给「摘要自身输出」预留的 token（CC 用 20k，我们摘要更短）
+    CHAT_COMPACT_SUMMARY_RESERVE_TOKENS: int = 8000
+    # 第二层缓冲：再留一道独立安全垫；trigger = window - reserve - buffer
+    CHAT_COMPACT_BUFFER_TOKENS: int = 6000
+    # 压缩后保留的最近原文 token 数（须明显小于 trigger）
+    CHAT_COMPACT_KEEP_TOKENS: int = 8000
+    # 后台预压缩软阈值比例：估算用量超过 effective * ratio 就在后台提前算好摘要
+    CHAT_COMPACT_PRECOMPACT_RATIO: float = 0.6
+    # 是否允许后台预压缩（关闭后退化为仅请求内同步压缩）
+    CHAT_COMPACT_PRECOMPUTE: bool = True
+    # 启发式估算系数：CJK 字符≈1 token/字；其余字符≈3.6 字/token（会被真实 usage 校准覆盖）
+    CHAT_TOKENS_PER_CJK_CHAR: float = 1.0
+    CHAT_CHARS_PER_LATIN_TOKEN: float = 3.6
+
+    # ---- 摘要形态 ----
+    # 摘要正文上限（字符）；9 段结构化清单需要比旧的 4000 更宽
+    CHAT_COMPACT_SUMMARY_MAX_CHARS: int = 8000
+    # 喂给摘要器的「被移出对话」token 上限；超出时丢最旧、保最新
+    CHAT_COMPACT_SUMMARIZER_INPUT_TOKENS: int = 60000
+    # 单会话同时保留的分段摘要数上限；超出则本次压缩顺带把旧链归并为 level+1 的粗粒度段
+    CHAT_COMPACT_MAX_SEGMENTS: int = 8
+    # 段链摘要总 token 上限，超出同样触发归并
+    CHAT_COMPACT_SEGMENTS_TOKEN_BUDGET: int = 4000
+    # 连续失败该次数后熔断：不再调 LLM，降级为硬截断（成功后清零）
+    CHAT_COMPACT_MAX_CONSECUTIVE_FAILURES: int = 3
+
+    # ---- 轮内 micro-compact：清理旧的、可重新获取的工具结果 ----
+    CHAT_MICROCOMPACT_ENABLED: bool = True
+    # 白名单工具的 tool_result 只保留最近 N 条，更早的替换为占位符
+    CHAT_MICROCOMPACT_KEEP_RECENT: int = 5
+    # 轮内估算用量超过 window * ratio 才开始清理（未达阈值时零改动）
+    CHAT_MICROCOMPACT_TRIGGER_RATIO: float = 0.6
+    # 单个工具结果超过该 token 数时，无论新旧都先截断（保留头尾）
+    CHAT_MICROCOMPACT_MAX_RESULT_TOKENS: int = 6000
+
+    # ---- 会话原文翻牌工具 read_session_history（向量库的精确取证兜底通道）----
+    # 同一用户提问轮次内最多成功调用次数，防止模型反复翻库
+    CHAT_HISTORY_TOOL_MAX_CALLS: int = 2
+
+    # ---- 后台任务受理模式 ----
+    # thread=API 进程内后台线程（本地开发）；queue=Redis 队列交独立 worker（多副本生产必用）
+    CHAT_MEMORY_TASK_MODE: str = "thread"
+    # 跨进程互斥锁 TTL（秒）：同一会话的压缩/归档串行化，防止重复计算与丢更新
+    CHAT_MEMORY_LOCK_TTL_SECONDS: int = 120
+
+    # 以下为已弃用的字符口径，仅在无法解析模型窗口时兜底
     CHAT_COMPACT_TRIGGER_CHARS: int = 80000
-    # 压缩后保留的最近原文（字符）；须明显小于 trigger
     CHAT_COMPACT_KEEP_CHARS: int = 24000
     CHAT_COMPACT_HEADROOM_CHARS: int = 12000
     CHAT_COMPACT_TOOLS_ESTIMATE_CHARS: int = 8000
@@ -162,6 +210,39 @@ class Settings(BaseSettings):
     CHAT_MEMORY_PROACTIVE_TOP_K: int = 3
     # 归档在对话落库后后台执行，不阻塞响应
     CHAT_MEMORY_ARCHIVE_ASYNC: bool = True
+
+    # ---- 长期记忆：只存蒸馏结果，不存原文轮次 ----
+    # episodic：把压缩产生的分段摘要写入向量库（约 12 轮 1 段，而非十几条原文块）
+    CHAT_MEMORY_EPISODIC_CHUNK_CHARS: int = 2000
+    # factual：与摘要共用同一次 LLM 调用抽取稳定事实（偏好/约束/决策/实体），按 fact_key 去重 upsert
+    CHAT_MEMORY_FACTUAL_ENABLED: bool = True
+    CHAT_MEMORY_FACT_MAX_CHARS: int = 600
+    CHAT_MEMORY_FACT_TOP_K: int = 3
+    # raw：原文轮次块归档（v1 行为）降级为兜底，默认关闭
+    CHAT_MEMORY_ARCHIVE_RAW_ENABLED: bool = False
+    # 价值闸门：低于该分的轮次不单独入库（仍会进入压缩摘要输入，信息不丢）
+    CHAT_MEMORY_MIN_VALUE_SCORE: float = 0.25
+    CHAT_MEMORY_MIN_USER_CHARS: int = 8
+    # 近重复检测：与最近 N 轮的 8-gram 指纹比对，Jaccard 超阈值即视为重复
+    CHAT_MEMORY_DEDUP_WINDOW: int = 20
+    CHAT_MEMORY_DEDUP_JACCARD: float = 0.85
+    # 注入预算（token）：预检索注入 System 的摘录上限 / 工具调用返回上限
+    CHAT_MEMORY_INJECT_MAX_TOKENS: int = 1200
+    CHAT_MEMORY_TOOL_MAX_TOKENS: int = 3000
+    # 过滤表达式 IN 列表长度上限；超出降级为范围表达式 + Python 侧精确过滤
+    CHAT_MEMORY_FILTER_MAX_KEYS: int = 256
+
+    # ---- 长期记忆淘汰与回收 ----
+    # 单会话向量硬上限：超出按 created_at 删最旧（段摘要的分层收敛由压缩侧负责，此处只兜底）
+    CHAT_MEMORY_HARD_MAX_VECTORS: int = 400
+    CHAT_MEMORY_EVICT_BATCH: int = 200
+    # 闲置 TTL：以 PG 会话 updated_at 为真相源，删掉长期不活跃会话的会话级向量（0=关闭）
+    CHAT_MEMORY_TTL_DAYS: int = 90
+    # worker 内 TTL 清理线程的扫描间隔（秒），默认 6 小时
+    CHAT_MEMORY_GC_INTERVAL_SECONDS: int = 21600
+    # 用户级跨会话事实的条数上限，超出删最旧
+    CHAT_MEMORY_USER_FACT_MAX: int = 500
+    CHAT_MEMORY_COUNT_LIMIT: int = 16000
 
     # 知识库文档上传任务：后台线程处理，上传接口立即返回 task_id，前端轮询进度
     KB_UPLOAD_JOB_TTL_SECONDS: int = 86400

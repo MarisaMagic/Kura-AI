@@ -1,5 +1,5 @@
 import { ref, unref } from 'vue'
-import { getToken } from '@/utils'
+import { authFetch, getToken } from '@/utils'
 import {
   clearPreviewPendingJob,
   readPreviewChatJobSseStream,
@@ -44,7 +44,7 @@ export function useAgentPreviewChat({
     const sid = unref(sessionId)
     if (jid && token) {
       try {
-        await fetch(`${baseApi}/user-agent/chat/jobs/${jid}/cancel`, {
+        await authFetch(`${baseApi}/user-agent/chat/jobs/${jid}/cancel`, {
           method: 'POST',
           credentials: 'include',
           headers: { token, 'Content-Type': 'application/json' },
@@ -55,7 +55,7 @@ export function useAgentPreviewChat({
     } else if (token && aid && sid) {
       // job_id 未知（创建请求在途被中断）：按会话兜底取消活动任务，避免孤儿任务阻塞后续对话
       try {
-        await fetch(
+        await authFetch(
           `${baseApi}/user-agent/chat/active_job/cancel?agent_id=${aid}&session_id=${encodeURIComponent(
             sid
           )}`,
@@ -108,7 +108,7 @@ export function useAgentPreviewChat({
 
     try {
       const postJob = () =>
-        fetch(`${baseApi}/user-agent/chat/jobs`, {
+        authFetch(`${baseApi}/user-agent/chat/jobs`, {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json', token },
@@ -163,7 +163,7 @@ export function useAgentPreviewChat({
 
       activeJobId.value = jobId
 
-      const streamRes = await fetch(
+      const streamRes = await authFetch(
         `${baseApi}/user-agent/chat/jobs/${jobId}/stream?since_seq=${startSeq}`,
         {
           credentials: 'include',
@@ -280,7 +280,7 @@ export function useAgentPreviewChat({
     if (confirmingMcpIds.value.has(item.pending_id)) return
     confirmingMcpIds.value = new Set([...confirmingMcpIds.value, item.pending_id])
     try {
-      const res = await fetch(`${baseApi}/user-agent/chat/mcp/confirm`, {
+      const res = await authFetch(`${baseApi}/user-agent/chat/mcp/confirm`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json', token },

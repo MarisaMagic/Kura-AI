@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import Callable
 from functools import partial
@@ -21,9 +22,10 @@ from langchain_core.messages import (
 
 from app.chat.attachment_service import build_storable_human_content, format_attachment_hint
 from app.chat.attachment_tools import make_session_attachment_tools
-from app.chat.memory_archive import schedule_archive_session_memory
+from app.chat.history_tool import make_session_history_tools
 from app.chat.memory_tool import make_search_session_memory_tool
 from app.chat.memory_turns import apply_sliding_window_turns
+from app.chat.post_turn_job import schedule_post_turn
 from app.chat.message_codec import (
     expand_messages_for_model,
     msg_content_to_str,
@@ -66,6 +68,9 @@ from app.chat.agent_vision import (
     _try_strip_images_middleware,
     _wrap_model_strip_images_after_tools,
 )
+
+logger = logging.getLogger(__name__)
+
 
 def _mcp_tools_allowed_for(ua: UserAgent, user_id: int) -> bool:
     """仅智能体属主会话允许加载其 MCP 工具。
@@ -206,18 +211,28 @@ def _prepare_to_invoke_messages(
     image_caption: str | None = None,
     memory_inject_prefetched: str | None = None,
     skip_memory_retrieve: bool = False,
+    tools_tokens: int = 0,
+    budget_out: dict[str, Any] | None = None,
 ) -> list:
     """
     压缩或滑动窗口 → 可选会话记忆预检索 → 展开多模态（仅本轮 Human 带图）→ 本轮上下文并入最后一条 Human。
     path_ids 为 messages 对应的存储行 id（等长），供压缩与记忆按分支定位。
     image_caption 非空时（两阶段读图）：不再展开图片，描述随本轮上下文注入，agent 全程纯文本。
+    :param tools_tokens: 本轮绑定工具 schema 的实测 token 数（由 build_model_and_agent 回写）
+    :param budget_out: 可选出参，回写本轮 token 预算/估算/校准，供落库后做 usage 校准与后台预压缩
     """
     from app.chat.compact import build_compacted_model_messages
+    from app.chat.context_budget import resolve_window
     from app.chat.memory_search import proactive_session_memory_inject_text
     from app.chat.memory_turns import turn_keys_of
     from app.chat.tools import emit_rag_step
 
     llm_cfg = _sub_llm_config_from_ua(ua)
+    system_prompt = _compose_system_prompt(
+        ua,
+        use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
+    )
     if getattr(settings, "CHAT_USE_SESSION_MEMORY", True) and getattr(settings, "CHAT_COMPACT_ENABLED", True):
         viewed = build_compacted_model_messages(
             messages,
@@ -225,14 +240,12 @@ def _prepare_to_invoke_messages(
             agent_id=agent_id,
             session_id=session_id,
             llm_config=llm_cfg,
-            system_chars=len(
-                _compose_system_prompt(
-                    ua,
-                    use_knowledge_retrieval=use_knowledge_retrieval,
-                    use_web_search=use_web_search,
-                )
-            ),
+            system_chars=len(system_prompt),
+            system_prompt=system_prompt,
+            tools_tokens=tools_tokens,
+            context_window=resolve_window(getattr(ua, "context_window", None)),
             path_ids=path_ids,
+            budget_out=budget_out,
         )
     else:
         viewed = apply_sliding_window_turns(messages)
@@ -284,10 +297,12 @@ def build_model_and_agent(
     extra_tools: list[Any] | None = None,
     use_knowledge_retrieval: bool = True,
     use_web_search: bool = False,
+    metrics_out: dict[str, Any] | None = None,
 ) -> tuple[Any, Any]:
     """
     构建模型和智能体。检索工具始终挂载（本轮禁用由工具函数返回 TOOL_DISABLED_THIS_TURN）。
     知识库检索按属主隔离：使用他人已发布智能体时检索发布者的知识库。
+    :param metrics_out: 可选出参，回写 tools_tokens / tools_count / system_tokens 供上下文预算使用
     """
     plain = decrypt_api_key_safe(ua.api_key_ciphertext)
     if not plain or not plain.strip():
@@ -325,6 +340,7 @@ def build_model_and_agent(
     tools.append(make_search_knowledge_by_image_tool(kb_scope, user_id, agent_id, session_id))
     if getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
         tools.append(make_search_session_memory_tool(user_id, agent_id, session_id, llm_config))
+        tools.extend(make_session_history_tools(user_id, agent_id, session_id))
     if extra_tools:
         tools.extend(extra_tools)
     tools = _sort_tools(tools)
@@ -335,20 +351,74 @@ def build_model_and_agent(
         use_knowledge_retrieval=use_knowledge_retrieval,
         use_web_search=use_web_search,
     )
+    if isinstance(metrics_out, dict):
+        from app.chat.context_budget import estimate_tokens, tools_schema_tokens
+
+        metrics_out["tools_tokens"] = tools_schema_tokens(tools)
+        metrics_out["tools_count"] = len(tools)
+        metrics_out["system_tokens"] = estimate_tokens(system_prompt)
+        metrics_out["system_chars"] = len(system_prompt)
+        # 缓存实测值，供上下文占用接口在未构建 agent 时估算工具 schema 开销
+        try:
+            from app.chat.cache import cache
+
+            cache.set_json(
+                f"chat_ctx_fixed:{agent_id}",
+                {
+                    "tools_tokens": metrics_out["tools_tokens"],
+                    "system_tokens": metrics_out["system_tokens"],
+                    "system_chars": metrics_out["system_chars"],
+                    "use_knowledge_retrieval": use_knowledge_retrieval,
+                    "use_web_search": use_web_search,
+                },
+                ttl=86400,
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("缓存上下文固定开销失败", exc_info=True)
     agent_kwargs: dict[str, Any] = {
         "model": model,
         "tools": tools,
         "system_prompt": system_prompt,
     }
-    middleware = _try_strip_images_middleware()
-    if middleware is not None:
+    middlewares = _build_agent_middlewares(getattr(ua, "context_window", None))
+    if middlewares:
         try:
-            agent = create_agent(**agent_kwargs, middleware=[middleware])
+            agent = create_agent(**agent_kwargs, middleware=middlewares)
         except (TypeError, Exception):
+            logger.debug("create_agent 不接受 middleware，回退为模型级包装", exc_info=True)
             agent = create_agent(**agent_kwargs)
+            model = _wrap_model_micro_compact_fallback(model, ua)
     else:
         agent = create_agent(**agent_kwargs)
     return agent, model
+
+
+def _wrap_model_micro_compact_fallback(model: Any, ua: UserAgent) -> Any:
+    """create_agent 不支持 middleware 时的兜底：在模型层做轮内工具结果清理。"""
+    if not getattr(settings, "CHAT_MICROCOMPACT_ENABLED", True):
+        return model
+    try:
+        from app.chat.tool_result_compact import wrap_model_micro_compact
+
+        return wrap_model_micro_compact(model, getattr(ua, "context_window", None))
+    except Exception:  # noqa: BLE001
+        logger.debug("micro-compact 模型级包装失败", exc_info=True)
+        return model
+
+
+def _build_agent_middlewares(context_window: Any = None) -> list[Any]:
+    """收集模型调用中间件：工具轮去图 + 轮内旧工具结果清理（micro-compact）。"""
+    out: list[Any] = []
+    strip = _try_strip_images_middleware()
+    if strip is not None:
+        out.append(strip)
+    if getattr(settings, "CHAT_MICROCOMPACT_ENABLED", True):
+        from app.chat.tool_result_compact import try_micro_compact_middleware
+
+        mc = try_micro_compact_middleware(context_window)
+        if mc is not None:
+            out.append(mc)
+    return out
 
 
 def _extract_response_content(result: Any) -> str:
@@ -370,6 +440,21 @@ def _extract_response_content(result: Any) -> str:
     if hasattr(result, "content"):
         return str(result.content)
     return str(result)
+
+
+def _extract_usage_metadata(result: Any) -> Any:
+    """
+    从 invoke 结果中取最后一条带 usage_metadata 的 AI 消息用量。
+    stream_usage=True 时服务端会回报真实 input_tokens，用于反推 token 估算校准系数。
+    :param result: agent.invoke 的返回
+    :return: usage_metadata（dict 或对象）；取不到返回 None
+    """
+    msgs = result.get("messages") if isinstance(result, dict) else None
+    for msg in reversed(list(msgs or [])):
+        usage = getattr(msg, "usage_metadata", None)
+        if usage:
+            return usage
+    return None
 
 
 def chat_with_agent_sync(
@@ -432,6 +517,7 @@ def chat_with_agent_sync(
             mcp_tools, mcp_errors = [], [{"name": "(loader)", "error": "sync 路径处于活动事件循环，已跳过 MCP 加载"}]
 
     # 构建智能体和大模型（含会话附件工具）
+    agent_metrics: dict[str, Any] = {}
     agent, model = build_model_and_agent(
         ua,
         user_id,
@@ -441,6 +527,7 @@ def chat_with_agent_sync(
         extra_tools=mcp_tools,
         use_knowledge_retrieval=use_knowledge_retrieval,
         use_web_search=use_web_search,
+        metrics_out=agent_metrics,
     )
 
     human_content = build_storable_human_content(
@@ -507,6 +594,7 @@ def chat_with_agent_sync(
         else:
             emit_rag_step("⚠️", "图片理解失败", "改为直接带图问答")
 
+    budget_info: dict[str, Any] = {}
     to_invoke = _prepare_to_invoke_messages(
         messages,
         ua,
@@ -523,9 +611,12 @@ def chat_with_agent_sync(
         ),
         path_ids=path_ids,
         image_caption=image_caption,
+        tools_tokens=int(agent_metrics.get("tools_tokens") or 0),
+        budget_out=budget_info,
     )
     caught_exc: Exception | None = None
     response_content = ""
+    result: Any = None
     try:
         # invoke 调用智能体（展开 image_ref 为 data URL）
         result = agent.invoke({"messages": to_invoke}, config=_agent_invoke_config())
@@ -578,8 +669,22 @@ def chat_with_agent_sync(
         ],
     )
 
-    # 归档会话记忆，按配置同步或后台线程归档。
-    schedule_archive_session_memory(user_id, agent_id, session_id) 
+    # 落库后收尾：token 校准 → 后台预压缩 → 记忆归档（按配置走线程或 Redis 队列）
+    schedule_post_turn(
+        user_id,
+        agent_id,
+        session_id,
+        llm_config=_sub_llm_config_from_ua(ua),
+        context_window=getattr(ua, "context_window", None),
+        system_prompt=str(budget_info.get("system_prompt") or ""),
+        system_chars=int(agent_metrics.get("system_chars") or 0),
+        tools_tokens=int(agent_metrics.get("tools_tokens") or 0),
+        use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
+        usage=_extract_usage_metadata(result),
+        estimated=int(budget_info.get("estimated") or 0),
+        model_name=str(budget_info.get("model_name") or ua.model_name or ""),
+    )
 
     if caught_exc:
         raise caught_exc
@@ -749,6 +854,7 @@ async def iter_chat_stream_events(
     else:
         mcp_tools, mcp_errors = [], []
 
+    agent_metrics: dict[str, Any] = {}
     agent, model = build_model_and_agent(
         ua,
         user_id,
@@ -758,6 +864,7 @@ async def iter_chat_stream_events(
         extra_tools=mcp_tools,
         use_knowledge_retrieval=use_knowledge_retrieval,
         use_web_search=use_web_search,
+        metrics_out=agent_metrics,
     )
 
     # 创建输出队列, 收集 RAG 步骤
@@ -874,6 +981,7 @@ async def iter_chat_stream_events(
             else:
                 yield _image_step_event("⚠️", "图片理解失败", "改为直接带图问答")
 
+    budget_info: dict[str, Any] = {}
     to_invoke = await asyncio.to_thread(
         _prepare_to_invoke_messages,
         messages,
@@ -893,6 +1001,8 @@ async def iter_chat_stream_events(
         image_caption=image_caption,
         memory_inject_prefetched=memory_inject_prefetched,
         skip_memory_retrieve=True,
+        tools_tokens=int(agent_metrics.get("tools_tokens") or 0),
+        budget_out=budget_info,
     )
 
     # 初始化响应内容
@@ -900,6 +1010,7 @@ async def iter_chat_stream_events(
     thinking_text_parts: list[str] = []
     stream_error: str | None = None
     cancelled_externally = False
+    usage_meta: Any = None
 
     # 预流式阶段（KB 预选 / MCP 加载 / 记忆准备）完成后、启动生成前检查一次取消标记，
     # 使用户在阻塞阶段点击停止也能即时生效（此时用户消息已落库，与流式中取消行为一致）
@@ -913,7 +1024,7 @@ async def iter_chat_stream_events(
 
     # 创建异步任务, 调用智能体
     async def _agent_worker() -> None:
-        nonlocal full_response, stream_error, cancelled_externally
+        nonlocal full_response, stream_error, cancelled_externally, usage_meta
         # 当前 AI 消息的流式分类状态：工具调用前的过渡文本需迁移到思考区
         current_msg_id: str | None = None
         msg_text_emitted = ""  # 当前消息已按 content 发出的文本
@@ -930,6 +1041,14 @@ async def iter_chat_stream_events(
                     break
                 if not isinstance(msg, AIMessageChunk):
                     continue
+
+                # stream_usage=True 时用量随最后一个 chunk 到达；取最大 input_tokens 的那次
+                chunk_usage = getattr(msg, "usage_metadata", None)
+                if chunk_usage:
+                    from app.chat.context_budget import extract_input_tokens
+
+                    if extract_input_tokens(chunk_usage) >= extract_input_tokens(usage_meta):
+                        usage_meta = chunk_usage
 
                 content = ""
                 if isinstance(msg.content, str):
@@ -1091,8 +1210,22 @@ async def iter_chat_stream_events(
             user_id, agent_id, session_id, [ai_msg], extra_message_data=[ai_extra]
         )
 
-    # 归档会话记忆，按配置同步或后台线程归档。
-    schedule_archive_session_memory(user_id, agent_id, session_id) 
+    # 落库后收尾：token 校准 → 后台预压缩 → 记忆归档（按配置走线程或 Redis 队列）
+    schedule_post_turn(
+        user_id,
+        agent_id,
+        session_id,
+        llm_config=_sub_llm_config_from_ua(ua),
+        context_window=getattr(ua, "context_window", None),
+        system_prompt=str(budget_info.get("system_prompt") or ""),
+        system_chars=int(agent_metrics.get("system_chars") or 0),
+        tools_tokens=int(agent_metrics.get("tools_tokens") or 0),
+        use_knowledge_retrieval=use_knowledge_retrieval,
+        use_web_search=use_web_search,
+        usage=usage_meta,
+        estimated=int(budget_info.get("estimated") or 0),
+        model_name=str(budget_info.get("model_name") or ua.model_name or ""),
+    )
 
     yield {"type": "done", "cancelled": False}
 

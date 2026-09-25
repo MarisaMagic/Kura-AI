@@ -116,6 +116,37 @@ class BranchSelectRequest(BaseModel):
     assistant_message_id: int = Field(..., description="要切换到的助手消息 ID")
 
 
+class SessionCompactRequest(BaseModel):
+    """手动压缩会话上下文（对齐 Claude Code 的 /compact）。"""
+
+    instructions: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description="本次压缩的额外要求，如「重点保留数据库 schema 相关结论」；留空则按默认清单摘要",
+    )
+
+
+class ContextUsageResponse(BaseModel):
+    """会话上下文占用快照（供前端上下文占用条与运维排查）。"""
+
+    window: int = Field(..., description="模型上下文窗口（token）")
+    effective: int = Field(..., description="扣除摘要输出预留后的可用窗口")
+    trigger: int = Field(..., description="硬触发点：超过即压缩")
+    soft_trigger: int = Field(..., description="软触发点：超过即后台预压缩")
+    used: int = Field(..., description="当前估算占用（已按真实 usage 校准）")
+    ratio: float = Field(..., description="used / window")
+    turn_count: int = Field(..., description="当前路径总轮数")
+    keep_from: int = Field(..., description="原文窗口起始轮次下标")
+    verbatim_turns: int = Field(..., description="原文窗口内的轮数")
+    segments: list[dict[str, Any]] = Field(default_factory=list, description="生效的分段摘要")
+    summary_tokens: int = Field(..., description="摘要自身占用 token")
+    calibrated: bool = Field(..., description="是否已用真实 usage 校准过估算系数")
+    factor: float = Field(..., description="当前校准系数")
+    degraded: bool = Field(..., description="压缩是否已熔断（降级为硬截断）")
+    failures: int = Field(..., description="连续失败次数")
+    last_compactions: list[dict[str, Any]] = Field(default_factory=list, description="最近 5 次压缩记录")
+
+
 class ChatResponse(BaseModel):
     """
     智能体对话响应

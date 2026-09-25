@@ -15,6 +15,9 @@ class UserAgent(BaseModel, TimestampMixin):
     enable_web = fields.BooleanField(default=False, description="联网能力（已弃用）")
     opening_message = fields.TextField(null=True, description="开场白")
     temperature = fields.FloatField(default=0.1, description="温度")
+    # 模型上下文窗口（token）。留空则用全局 CHAT_MODEL_CONTEXT_WINDOW_DEFAULT。
+    # 会话压缩的触发点按「窗口 - 摘要预留 - 安全缓冲」计算，填错会导致压缩过早/过晚。
+    context_window = fields.IntField(null=True, description="模型上下文窗口（token），留空用全局默认")
     avatar_filename = fields.CharField(max_length=255, null=True, description="自定义头像文件名")
     supports_vision = fields.BooleanField(
         default=False,

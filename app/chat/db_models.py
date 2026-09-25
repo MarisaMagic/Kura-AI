@@ -315,6 +315,12 @@ class ChatSession(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    compact_segments = relationship(
+        "ChatCompactSegment",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
 
 class ChatMemoryCursor(Base):
@@ -375,6 +381,48 @@ class ChatMessage(Base):
     thinking_items: Mapped[list | None] = mapped_column(JSON, nullable=True)  # 思考区有序时间线：step/text 交错
 
     session = relationship("ChatSession", back_populates="messages")
+
+
+class ChatCompactSegment(Base):
+    """
+    会话压缩分段摘要：一条记录 = 某段连续轮次区间 [from_index, to_index) 的结构化摘要。
+
+    分段存储（而非单条滚动合并）的意义：
+    - 避免 summary-of-summary 的信息衰减，各段保真度独立；
+    - 段以 turn_key 区间标识，不同分支的段天然共存，无「最多 N 个分支状态」限制；
+    - 段数/总 token 超限时把最旧若干段归并为 level+1 的粗粒度段，向量数收敛 O(log n)。
+
+    :param session_ref_id: 会话行 id（级联删除）
+    :param seg_id: 段稳定标识 s_{from_turn_key}_{to_turn_key}（幂等 upsert 键）
+    :param from_turn_key/to_turn_key: 覆盖的首/末轮 turn_key（= 轮首用户消息行 id）
+    :param from_index/to_index: 覆盖的轮次下标区间 [from, to)，用于 O(1) 路径前缀校验
+    :param level: 归并层级，0 = 直接摘要原文，>0 = 由多段归并而来
+    :param summary: 结构化摘要正文（已剥离 <analysis>）
+    :param tokens: 摘要自身估算 token 数
+    """
+
+    __tablename__ = "mg_chat_compact_segments"
+    __table_args__ = (
+        UniqueConstraint("session_ref_id", "from_turn_key", "to_turn_key", name="uq_mg_compact_seg_range"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    session_ref_id: Mapped[int] = mapped_column(
+        ForeignKey("mg_chat_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    seg_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    from_turn_key: Mapped[int] = mapped_column(Integer, nullable=False)
+    to_turn_key: Mapped[int] = mapped_column(Integer, nullable=False)
+    from_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    to_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    level: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    merged_from: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    session = relationship("ChatSession", back_populates="compact_segments")
 
 
 class ChatAttachment(Base):

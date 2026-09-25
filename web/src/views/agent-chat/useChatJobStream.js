@@ -1,5 +1,5 @@
 import { onMounted, onUnmounted, ref } from 'vue'
-import { getToken } from '@/utils'
+import { authFetch, getToken } from '@/utils'
 import { applyThinkingItem } from '@/utils/agentChatThinking'
 import { useAgentSidebarStore, useRecentAgentsStore } from '@/store'
 
@@ -335,7 +335,7 @@ export function useChatJobStream({
     const aid = agent.value?.id
     if (jid && token) {
       try {
-        await fetch(`${baseApi}/user-agent/chat/jobs/${jid}/cancel`, {
+        await authFetch(`${baseApi}/user-agent/chat/jobs/${jid}/cancel`, {
           method: 'POST',
           credentials: 'include',
           headers: { token, 'Content-Type': 'application/json' },
@@ -345,7 +345,7 @@ export function useChatJobStream({
       }
     } else if (token && aid && sessionId.value) {
       try {
-        await fetch(
+        await authFetch(
           `${baseApi}/user-agent/chat/active_job/cancel?agent_id=${aid}&session_id=${encodeURIComponent(
             sessionId.value
           )}`,
@@ -399,7 +399,7 @@ export function useChatJobStream({
     const idx = assistantIdx
     try {
       const postJob = () =>
-        fetch(`${baseApi}/user-agent/chat/jobs`, {
+        authFetch(`${baseApi}/user-agent/chat/jobs`, {
           method: 'POST',
           credentials: 'include',
           headers: {
@@ -461,7 +461,7 @@ export function useChatJobStream({
 
       activeJobId.value = jobId
 
-      const streamRes = await fetch(
+      const streamRes = await authFetch(
         `${baseApi}/user-agent/chat/jobs/${jobId}/stream?since_seq=${startSeq}`,
         {
           credentials: 'include',
@@ -505,7 +505,7 @@ export function useChatJobStream({
     if (!pj?.job_id) return
 
     try {
-      const metaRes = await fetch(`${baseApi}/user-agent/chat/jobs/${pj.job_id}`, {
+      const metaRes = await authFetch(`${baseApi}/user-agent/chat/jobs/${pj.job_id}`, {
         credentials: 'include',
         headers: { token },
       })
@@ -576,7 +576,7 @@ export function useChatJobStream({
     activeJobId.value = pj.job_id
     activeAssistantIdx.value = idx
     try {
-      const streamRes = await fetch(
+      const streamRes = await authFetch(
         `${baseApi}/user-agent/chat/jobs/${pj.job_id}/stream?since_seq=${sinceSeq}`,
         {
           credentials: 'include',

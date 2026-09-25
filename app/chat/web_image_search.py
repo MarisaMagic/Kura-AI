@@ -26,6 +26,7 @@ from app.chat.tools import (
     emit_rag_step,
     fetch_url_disabled_this_turn_msg,
     get_last_rag_context,
+    get_state_lock,
     is_web_search_allowed_this_turn,
     log_kb_tool_return_to_terminal,
     try_acquire_fetch_url_tool_slot,
@@ -859,36 +860,40 @@ def _format_image_search_output(results: list[dict]) -> str:
 
 
 def _merge_image_web_sources(new_sources: list[dict]) -> None:
-    """与已有 web_sources 合并，避免先 web_search 再搜图冲掉网页来源；同图不重复进 chips。"""
-    existing = get_last_rag_context(clear=False)
-    ctx = dict(existing) if existing else {}
-    prev = list(ctx.get("web_sources") or [])
-    offset = 0
-    seen_img: set[str] = set()
-    for src in prev:
-        try:
-            offset = max(offset, int(src.get("index") or 0))
-        except (TypeError, ValueError):
-            pass
-        key = _normalize_image_url((src.get("image_url") or "").strip()) if isinstance(src, dict) else ""
-        if key:
-            seen_img.add(key)
-    merged = list(prev)
-    for src in new_sources:
-        item = dict(src)
-        img_key = _normalize_image_url((item.get("image_url") or "").strip())
-        if img_key and img_key in seen_img:
-            continue
-        try:
-            local = int(item.get("index") or 0)
-        except (TypeError, ValueError):
-            local = 0
-        item["index"] = offset + local if local else offset + len(merged) - len(prev) + 1
-        merged.append(item)
-        if img_key:
-            seen_img.add(img_key)
-    ctx["web_sources"] = merged
-    _set_last_rag_context(ctx)
+    """与已有 web_sources 合并，避免先 web_search 再搜图冲掉网页来源；同图不重复进 chips。
+
+    读-改-写整体置于请求状态锁内，避免与并行的 web_search/fetch_url 互相覆盖。
+    """
+    with get_state_lock():
+        existing = get_last_rag_context(clear=False)
+        ctx = dict(existing) if existing else {}
+        prev = list(ctx.get("web_sources") or [])
+        offset = 0
+        seen_img: set[str] = set()
+        for src in prev:
+            try:
+                offset = max(offset, int(src.get("index") or 0))
+            except (TypeError, ValueError):
+                pass
+            key = _normalize_image_url((src.get("image_url") or "").strip()) if isinstance(src, dict) else ""
+            if key:
+                seen_img.add(key)
+        merged = list(prev)
+        for src in new_sources:
+            item = dict(src)
+            img_key = _normalize_image_url((item.get("image_url") or "").strip())
+            if img_key and img_key in seen_img:
+                continue
+            try:
+                local = int(item.get("index") or 0)
+            except (TypeError, ValueError):
+                local = 0
+            item["index"] = offset + local if local else offset + len(merged) - len(prev) + 1
+            merged.append(item)
+            if img_key:
+                seen_img.add(img_key)
+        ctx["web_sources"] = merged
+        _set_last_rag_context(ctx)
 
 
 def make_web_image_search_tool() -> StructuredTool:

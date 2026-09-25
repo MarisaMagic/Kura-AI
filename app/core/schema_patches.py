@@ -115,6 +115,12 @@ PATCHES: tuple[SchemaPatch, ...] = (
         before_schemas=True,
     ),
     SchemaPatch(
+        name="009_user_agent_context_window",
+        description="user_agent 表补 context_window 列（会话压缩按模型窗口计算触发点）",
+        statements=('ALTER TABLE "user_agent" ADD COLUMN IF NOT EXISTS "context_window" INT',),
+        before_schemas=True,
+    ),
+    SchemaPatch(
         name="100_mcp_preset_confirm_policy",
         description="只读 MCP 预置的存量 auto 配置收紧为 never（数据修正）",
         statements_fn=_mcp_preset_confirm_policy_statements,

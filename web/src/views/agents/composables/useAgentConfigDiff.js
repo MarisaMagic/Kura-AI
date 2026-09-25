@@ -9,9 +9,13 @@ export const PREVIEW_CONFIG_FIELDS = [
   'supports_vision',
   'opening_message',
   'temperature',
+  'context_window',
   'sub_model_name',
   'sub_base_url',
 ]
+
+/** 数值型字段：空值与 0 视为等价，避免 null/'' 造成无意义 diff */
+const NUMERIC_FIELDS = new Set(['temperature', 'context_window'])
 
 export function pickPreviewConfig(form) {
   if (!form) return {}
@@ -35,7 +39,14 @@ function normNum(v, fallback = 0.1) {
 export function previewConfigEqual(a, b) {
   if (!a || !b) return false
   for (const k of PREVIEW_CONFIG_FIELDS) {
-    if (k === 'temperature') {
+    if (k === 'context_window') {
+      // 留空表示跟随服务端默认，与 null/'' 等价
+      const na = Number(a[k]) || 0
+      const nb = Number(b[k]) || 0
+      if (na !== nb) return false
+      continue
+    }
+    if (NUMERIC_FIELDS.has(k)) {
       if (normNum(a[k]) !== normNum(b[k])) return false
       continue
     }

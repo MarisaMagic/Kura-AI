@@ -155,6 +155,7 @@ async function loadAgent(id) {
       supports_vision: !!d.supports_vision,
       opening_message: d.opening_message || '',
       temperature: d.temperature ?? 0.1,
+      context_window: d.context_window ?? null,
       sub_model_name: d.sub_model_name || '',
       sub_base_url: d.sub_base_url || '',
       sub_api_key: '',

@@ -176,6 +176,22 @@
             }}</span>
           </div>
         </n-form-item>
+        <n-form-item
+          path="context_window"
+          :label="$t('views.agents.label_context_window')"
+          :show-require-mark="false"
+        >
+          <n-input-number
+            v-model:value="form.context_window"
+            :min="1024"
+            :max="10000000"
+            :step="1024"
+            clearable
+            class="agent-context-window-input"
+            :placeholder="$t('views.agents.placeholder_context_window')"
+          />
+        </n-form-item>
+        <div class="agent-sub-hint">{{ $t('views.agents.hint_context_window') }}</div>
       </div>
     </section>
 
@@ -283,6 +299,7 @@ import {
   NFormItem,
   NImage,
   NInput,
+  NInputNumber,
   NSlider,
   NSwitch,
   NUpload,
@@ -550,6 +567,10 @@ html.dark .section-header {
   font-size: 15px;
   font-variant-numeric: tabular-nums;
   color: var(--n-text-color);
+}
+.agent-context-window-input {
+  width: 100%;
+  max-width: 560px;
 }
 
 .agent-enable-row {

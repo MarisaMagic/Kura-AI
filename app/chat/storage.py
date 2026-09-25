@@ -853,6 +853,65 @@ class ConversationStorage:
         finally:
             db.close()
 
+    def get_session_ref_id(self, user_id: int, agent_id: int, session_id: str) -> int | None:
+        """会话行主键（分段摘要表的外键）；会话不存在时返回 None，不创建。"""
+        db = SessionLocal()
+        try:
+            row = (
+                self._session_query(db, user_id, agent_id, session_id)
+                .with_entities(ChatSessionRow.id)
+                .first()
+            )
+            return int(row[0]) if row else None
+        finally:
+            db.close()
+
+    def get_session_meta_and_ref(
+        self, user_id: int, agent_id: int, session_id: str
+    ) -> tuple[dict, int | None]:
+        """一次查询同时取 metadata_json 与会话行主键（压缩/归档链路每轮都要两者）。"""
+        db = SessionLocal()
+        try:
+            row = (
+                self._session_query(db, user_id, agent_id, session_id)
+                .with_entities(ChatSessionRow.id, ChatSessionRow.metadata_json)
+                .first()
+            )
+            if not row:
+                return {}, None
+            meta = row[1]
+            return (dict(meta) if isinstance(meta, dict) else {}), int(row[0])
+        finally:
+            db.close()
+
+    def mutate_session_metadata(self, user_id: int, agent_id: int, session_id: str, mutate) -> dict:
+        """在会话行锁内做 read-modify-write，杜绝「先读后写」的并发丢更新。
+
+        后台归档线程与请求线程可能同时改同一个键（如 memory_archived_turn_keys）；
+        patch_session_metadata 只在键级别原子，值仍需调用方自己合并，故提供本方法。
+
+        :param mutate: callable(meta: dict) -> dict | None，返回要合并的 patch；返回 None/空则不写
+        :return: 写入后的完整 metadata（未写时返回锁内读到的快照）
+        """
+        from sqlalchemy.orm.attributes import flag_modified
+
+        db = SessionLocal()
+        try:
+            session = self._get_or_create_session(db, user_id, agent_id, session_id)
+            meta = dict(session.metadata_json) if isinstance(session.metadata_json, dict) else {}
+            patch = mutate(meta) if callable(mutate) else None
+            if patch:
+                meta.update(patch)
+                session.metadata_json = meta
+                flag_modified(session, "metadata_json")
+                db.commit()
+            return meta
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
     def patch_session_metadata(
         self,
         user_id: int,
@@ -860,7 +919,14 @@ class ConversationStorage:
         session_id: str,
         patch: dict,
     ) -> None:
-        """合并写入会话 metadata_json（不覆盖未出现在 patch 中的键）。"""
+        """合并写入会话 metadata_json（不覆盖未出现在 patch 中的键）。
+
+        注意：本方法只在**键级别**原子（行锁内 update），patch 的值是调用方算好的。
+        若值来自「先 get_session_metadata 读一遍再改」，两个并发写入者仍会互相覆盖
+        （历史 bug：后台归档线程与请求线程同时改 memory_archived_turn_keys，
+        丢更新导致同一轮被重复嵌入，Milvus 里出现重复行）。
+        凡是 read-modify-write 一律用 mutate_session_metadata。
+        """
         from sqlalchemy.orm.attributes import flag_modified
 
         if not patch:

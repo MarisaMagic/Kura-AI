@@ -1,6 +1,8 @@
 /**
  * 高危 MCP 工具确认：允许一次 / 拒绝。
  */
+import { authFetch } from '@/utils'
+
 export function useChatMcpConfirm({
   messages,
   sending,
@@ -63,7 +65,7 @@ export function useChatMcpConfirm({
     if (confirmingMcpIds.value.has(item.pending_id)) return
     confirmingMcpIds.value = new Set([...confirmingMcpIds.value, item.pending_id])
     try {
-      const res = await fetch(`${baseApi}/user-agent/chat/mcp/confirm`, {
+      const res = await authFetch(`${baseApi}/user-agent/chat/mcp/confirm`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json', token },

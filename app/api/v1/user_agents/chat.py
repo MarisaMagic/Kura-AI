@@ -36,8 +36,10 @@ from app.schemas.agent_chat import (
     ChatJobCreateResponse,
     ChatRequest,
     ChatResponse,
+    ContextUsageResponse,
     MessageInfo,
     McpConfirmRequest,
+    SessionCompactRequest,
     SessionDeleteResponse,
     SessionInfo,
     SessionListResponse,
@@ -60,6 +62,19 @@ def _check_chat_rate_limit(user_id: int) -> None:
         limit=int(getattr(settings, "CHAT_RATE_LIMIT_PER_MINUTE", 20)),
         window_seconds=60,
     )
+
+
+def _cached_tools_tokens(agent_id: int) -> int:
+    """上次构建 agent 时缓存的工具 schema token 实测值（未缓存返回 0）。"""
+    from app.chat.cache import cache
+
+    val = cache.get_json(f"chat_ctx_fixed:{int(agent_id)}")
+    if not isinstance(val, dict):
+        return 0
+    try:
+        return int(val.get("tools_tokens") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 @router.post("/chat/attachments/upload", summary="上传会话附件（先上传再发消息）", tags=["智能体模块"])
@@ -631,6 +646,120 @@ async def select_chat_branch(
     if records is None:
         raise HTTPException(status_code=400, detail="目标回复不存在或不属于当前会话")
     return Success(data=SessionMessagesResponse(messages=_to_message_infos(records)).model_dump())
+
+
+@router.get(
+    "/chat/sessions/{session_id}/context_usage",
+    summary="查询会话上下文占用（压缩状态）",
+    tags=["智能体模块"],
+)
+async def get_session_context_usage(
+    session_id: str,
+    agent_id: int = Query(..., description="智能体 ID"),
+    current_user: User = Depends(AuthControl.is_authed),
+):
+    """
+    返回当前会话的 token 预算、估算占用、分段摘要与压缩历史，供前端上下文占用条展示。
+    :param session_id: 会话ID
+    :param agent_id: 智能体 ID
+    :param current_user: 当前用户
+    :return: ContextUsageResponse
+    """
+    user_id = current_user.id
+    ua = await user_agent_controller.get_accessible(agent_id, user_id)
+    if not ua:
+        raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
+    from app.chat.compact import context_usage_snapshot
+
+    snap = await asyncio.to_thread(
+        context_usage_snapshot,
+        user_id,
+        agent_id,
+        (session_id or "").strip(),
+        context_window=getattr(ua, "context_window", None),
+    )
+    return Success(data=ContextUsageResponse(**snap).model_dump())
+
+
+@router.post(
+    "/chat/sessions/{session_id}/compact",
+    summary="手动压缩会话上下文",
+    tags=["智能体模块"],
+)
+async def compact_chat_session(
+    session_id: str,
+    request: SessionCompactRequest | None = None,
+    agent_id: int = Query(..., description="智能体 ID"),
+    current_user: User = Depends(AuthControl.is_authed),
+):
+    """
+    手动触发一次压缩（对齐 Claude Code 的 /compact）：无视阈值与熔断，立即摘要并落段。
+    :param session_id: 会话ID
+    :param request: 可带本次压缩的额外要求
+    :param agent_id: 智能体 ID
+    :param current_user: 当前用户
+    :return: 压缩结果与压缩后的上下文占用
+    """
+    user_id = current_user.id
+    ua = await user_agent_controller.get_accessible(agent_id, user_id)
+    if not ua:
+        raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
+    sid = (session_id or "").strip()
+    if get_running_session_job(user_id, agent_id, sid):
+        raise HTTPException(status_code=409, detail="该会话有进行中的生成任务，请等待完成或停止后再压缩")
+    _check_chat_rate_limit(user_id)
+
+    from app.chat.agent_prompt import _compose_system_prompt
+    from app.chat.agent_service import _sub_llm_config_from_ua
+    from app.chat.compact import context_usage_snapshot, manual_compact
+    from app.chat.context_budget import estimate_tokens
+    from app.chat.post_turn_job import session_lock
+
+    system_prompt = _compose_system_prompt(ua)
+
+    def _do_manual_compact() -> dict:
+        # 与后台预压缩/归档共用同一把会话锁：两者都改段链与 metadata，
+        # 并发跑会重复调用 LLM 并互相覆盖状态。
+        with session_lock(user_id, agent_id, sid) as acquired:
+            if not acquired:
+                return {"ok": False, "reason": "locked"}
+            return manual_compact(
+                user_id,
+                agent_id,
+                sid,
+                llm_config=_sub_llm_config_from_ua(ua),
+                context_window=getattr(ua, "context_window", None),
+                system_prompt=system_prompt,
+                system_chars=len(system_prompt),
+                tools_tokens=int(_cached_tools_tokens(agent_id) or 0),
+                instructions=(request.instructions if request else None),
+            )
+
+    result = await asyncio.to_thread(_do_manual_compact)
+    if result.get("reason") == "locked":
+        raise HTTPException(status_code=409, detail="该会话正在后台整理记忆中，请稍后重试")
+    if result.get("reason") == "empty":
+        raise HTTPException(status_code=404, detail="会话不存在")
+    snap = await asyncio.to_thread(
+        context_usage_snapshot,
+        user_id,
+        agent_id,
+        sid,
+        context_window=getattr(ua, "context_window", None),
+        system_prompt=system_prompt,
+        system_chars=len(system_prompt),
+        tools_tokens=int(_cached_tools_tokens(agent_id) or 0),
+    )
+    return Success(
+        data={
+            "compacted": bool(result.get("ok")),
+            "reason": str(result.get("reason") or ""),
+            "summary_tokens": estimate_tokens(str(result.get("summary") or "")),
+            "keep_from": int(result.get("keep_from") or snap.get("keep_from") or 0),
+            "usage": ContextUsageResponse(**snap).model_dump(),
+        },
+        msg="已压缩" if result.get("ok") else "无需压缩或压缩未生效",
+    )
 
 
 @router.delete(
