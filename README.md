@@ -64,6 +64,16 @@
 
 ![](/deploy/sample-picture/agent-share-2.png)
 
+### RAG 实验平台
+
+![](/deploy/sample-picture/rag-test-1.png)
+
+![](/deploy/sample-picture/rag-test-2.png)
+
+![](/deploy/sample-picture/rag-test-3.png)
+
+![](/deploy/sample-picture/rag-test-4.png)
+
 ### 暗色主题切换
 
 ![](/deploy/sample-picture/agent-darkmode.png)
