@@ -133,6 +133,28 @@ def init_chat_db() -> None:
                 "ALTER TABLE mg_chat_sessions ADD COLUMN IF NOT EXISTS path_message_count INTEGER"
             )
         )
+        # 实验平台端到端问答评测：运行级选中的评测配置下标 + 逐题答案与指标
+        conn.execute(
+            text(
+                "ALTER TABLE mg_exp_runs ADD COLUMN IF NOT EXISTS kind VARCHAR(16) NOT NULL DEFAULT 'retrieval'"
+            )
+        )
+        conn.execute(
+            text("ALTER TABLE mg_exp_runs ADD COLUMN IF NOT EXISTS eval_config_idx INTEGER")
+        )
+        conn.execute(
+            text("ALTER TABLE mg_exp_run_results ADD COLUMN IF NOT EXISTS answer TEXT DEFAULT ''")
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE mg_exp_run_results ADD COLUMN IF NOT EXISTS answer_latency_ms INTEGER NOT NULL DEFAULT 0"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE mg_exp_run_results ADD COLUMN IF NOT EXISTS answer_metrics JSONB NOT NULL DEFAULT '{}'::jsonb"
+            )
+        )
 
 
 def get_db_session() -> Session:

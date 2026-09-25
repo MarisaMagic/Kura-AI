@@ -254,6 +254,24 @@ class Settings(BaseSettings):
     KB_GRADE_REFUSAL_ENABLED: bool = True
     # Rerank 分数阈值：最高 relevance_score 低于该值时按「知识库无相关资料」处理；None=禁用（默认）
     RERANK_MIN_SCORE: typing.Optional[float] = None
+
+    # ===== 实验平台端到端问答评测（生成 + LLM 判分）；未配置时回落 EMBEDDING_* =====
+    # 生成/判分登 OpenAI 兼容端点；base_url/api_key 为空分别回落 EMBEDDING_BASE_URL / EMBEDDING_API_KEY
+    EXP_EVAL_LLM_BASE_URL: typing.Optional[str] = None
+    EXP_EVAL_LLM_API_KEY: typing.Optional[str] = None
+    EXP_EVAL_ANSWER_MODEL: str = "qwen-plus"
+    # 判分模型；空则与 EXP_EVAL_ANSWER_MODEL 相同
+    EXP_EVAL_JUDGE_MODEL: typing.Optional[str] = None
+    EXP_EVAL_TEMPERATURE: float = 0.0
+    # 送入生成的资料总字符上限（超出截断）
+    EXP_EVAL_MAX_CONTEXT_CHARS: int = 12000
+    # 生成答案入库/送判的字符上限
+    EXP_EVAL_MAX_ANSWER_CHARS: int = 4000
+    # 可选 LangSmith 导出（仅手动触发；未配置 key 时导出接口返回 400）
+    LANGSMITH_API_KEY: typing.Optional[str] = None
+    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
+    LANGSMITH_PROJECT: str = "kura-ai-experiment"
+
     # ===== 知识库重排（DashScope qwen3-vl-rerank，多模态；三者皆配置才启用，否则跳过 rerank）=====
     RERANK_MODEL: str = ""
     RERANK_API_KEY: str = ""

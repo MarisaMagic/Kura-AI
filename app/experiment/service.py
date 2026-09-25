@@ -8,16 +8,73 @@ from __future__ import annotations
 
 import json
 import os
+import re
+from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.chat.database import SessionLocal
 from app.chat.db_models import ExpDataset, ExpQuestion, ExpRun, ExpRunResult, KbDocument
+from app.experiment import answer_eval
 from app.experiment.metrics import aggregate_results
 from app.experiment.runner import validate_config
 from app.kb import kb_service
 
 # 实验文档在对象存储/流水线中的虚拟归属（user 0 不存在，前缀天然隔离）
 EXP_KB_USER_ID = 0
+
+# 实验平台时间统一展示北京时间：DB 写入为 naive UTC，序列化时转 +08:00
+LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+
+# 任务类型
+RUN_KIND_RETRIEVAL = "retrieval"
+RUN_KIND_QA = "qa"
+VALID_RUN_KINDS = (RUN_KIND_RETRIEVAL, RUN_KIND_QA)
+
+# 单次批量删除文档上限
+BATCH_DELETE_MAX = 5000
+
+_RUN_SEQ_RE = re.compile(r"#(\d+)\s*$")
+
+
+def _local_iso(dt: datetime | None) -> str | None:
+    """naive UTC datetime → 北京时间 ISO（含 +08:00）。"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(LOCAL_TZ).isoformat()
+
+
+def _local_iso_str(iso: str | None) -> str | None:
+    """ISO 字符串（可能为 naive UTC）→ 北京时间 ISO；解析失败原样返回。"""
+    if not iso:
+        return iso
+    try:
+        return _local_iso(datetime.fromisoformat(str(iso).replace("Z", "+00:00")))
+    except ValueError:
+        return iso
+
+
+def _auto_run_name(dataset_name: str, kind: str, existing_names: list[str]) -> str:
+    """自动生成实验名称：{数据集名} · 检索消融/问答测评 #N（同数据集同类型内序号，查重自增）。"""
+    label = "问答测评" if kind == RUN_KIND_QA else "检索消融"
+    suffix = f" · {label} #"
+    # 预留 4 位序号与余量，避免截断后丢失可解析的序号
+    base = (str(dataset_name or "").strip() or "数据集")[: max(8, 128 - len(suffix) - 4)]
+    prefix = f"{base}{suffix}"
+    used = {str(n) for n in existing_names}
+    max_seq = 0
+    for name in used:
+        if not name.startswith(prefix):
+            continue
+        m = _RUN_SEQ_RE.search(name[len(prefix) - 1 :])
+        if m:
+            max_seq = max(max_seq, int(m.group(1)))
+    seq = max_seq + 1
+    while f"{prefix}{seq}" in used:
+        seq += 1
+    return f"{prefix}{seq}"
 
 
 def exp_kb_scope(dataset_id: int) -> str:
@@ -73,8 +130,8 @@ def _dataset_dict(ds: ExpDataset) -> dict:
         "doc_count": ds.doc_count or 0,
         "question_count": ds.question_count or 0,
         "created_by": ds.created_by,
-        "created_at": ds.created_at.isoformat() if ds.created_at else None,
-        "updated_at": ds.updated_at.isoformat() if ds.updated_at else None,
+        "created_at": _local_iso(ds.created_at),
+        "updated_at": _local_iso(ds.updated_at),
     }
 
 
@@ -140,7 +197,10 @@ def delete_dataset(dataset_id: int) -> bool:
 
 
 def list_documents(dataset_id: int) -> list[dict]:
-    return kb_service.fetch_kb_document_list(exp_kb_scope(dataset_id))
+    docs = kb_service.fetch_kb_document_list(exp_kb_scope(dataset_id))
+    for d in docs:
+        d["updated_at"] = _local_iso_str(d.get("updated_at"))
+    return docs
 
 
 def delete_document(dataset_id: int, display_filename: str) -> bool:
@@ -149,6 +209,34 @@ def delete_document(dataset_id: int, display_filename: str) -> bool:
     )
     refresh_dataset_counts(dataset_id)
     return ok
+
+
+def delete_documents(dataset_id: int, filenames: list[str]) -> dict:
+    """批量删除文档（按前端当前筛选结果传文件名）；计数只刷新一次。"""
+    dataset_id = int(dataset_id)
+    scope = exp_kb_scope(dataset_id)
+    names = []
+    seen: set[str] = set()
+    for raw in filenames or []:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    if len(names) > BATCH_DELETE_MAX:
+        raise ValueError(f"单次最多删除 {BATCH_DELETE_MAX} 个文档，请缩小筛选范围")
+    deleted = 0
+    failed: list[str] = []
+    for name in names:
+        try:
+            if kb_service.delete_kb_document(scope, EXP_KB_USER_ID, exp_agent_id(dataset_id), name):
+                deleted += 1
+            else:
+                failed.append(name)
+        except Exception:  # noqa: BLE001
+            failed.append(name)
+    refresh_dataset_counts(dataset_id)
+    return {"deleted": deleted, "failed": failed, "requested": len(names)}
 
 
 # ---------------------------------------------------------------- questions
@@ -311,6 +399,19 @@ def list_questions(dataset_id: int, page: int = 1, page_size: int = 20, is_ood: 
         db.close()
 
 
+def count_answered_questions(dataset_id: int) -> int:
+    """数据集内带参考答案的题数（问答测评展示「参考答案覆盖」用）。"""
+    db = SessionLocal()
+    try:
+        return (
+            db.query(ExpQuestion)
+            .filter(ExpQuestion.dataset_id == int(dataset_id), ExpQuestion.answer != "")
+            .count()
+        )
+    finally:
+        db.close()
+
+
 def unmatched_gold_keys(dataset_id: int) -> list[str]:
     """问题集 gold 文件名中未在已上传文档里出现的部分（导入后校验提示用）。"""
     scope = exp_kb_scope(dataset_id)
@@ -344,12 +445,15 @@ def delete_question(question_id: int) -> bool:
     return True
 
 
-def clear_questions(dataset_id: int, ood_only: bool = False) -> int:
+def clear_questions(dataset_id: int, is_ood: bool | None = None) -> int:
+    """清空问题：is_ood=None 清空全部；True 仅库外题；False 仅库内题。"""
     db = SessionLocal()
     try:
         q = db.query(ExpQuestion).filter(ExpQuestion.dataset_id == int(dataset_id))
-        if ood_only:
+        if is_ood is True:
             q = q.filter(ExpQuestion.is_ood == True)  # noqa: E712
+        elif is_ood is False:
+            q = q.filter(ExpQuestion.is_ood == False)  # noqa: E712
         n = q.delete(synchronize_session=False)
         db.commit()
     finally:
@@ -368,14 +472,30 @@ def create_run(
     question_limit: int,
     include_ood: bool,
     created_by: int,
+    kind: str = RUN_KIND_RETRIEVAL,
 ) -> dict:
-    """创建运行记录（status=queued），配置逐个校验规范化。"""
+    """创建运行记录（status=queued），配置逐个校验规范化。
+
+    - kind=retrieval：检索策略消融（1~12 组配置），不做生成评测；
+    - kind=qa：端到端问答测评（固定单组配置，强制 eval_config_idx=0）。
+    """
     dataset_id = int(dataset_id)
+    kind = str(kind or RUN_KIND_RETRIEVAL).lower()
+    if kind not in VALID_RUN_KINDS:
+        raise ValueError(f"kind 必须是 {VALID_RUN_KINDS} 之一")
     if not configs:
         raise ValueError("至少需要一个实验配置")
     if len(configs) > 12:
         raise ValueError("单次运行最多 12 个配置")
     norm = [validate_config(c) for c in configs]
+    eval_config_idx: int | None = None
+    if kind == RUN_KIND_QA:
+        if len(norm) != 1:
+            raise ValueError("问答测评任务只允许选择 1 个检索策略")
+        if not answer_eval.eval_enabled():
+            raise ValueError("未配置 EXP_EVAL_LLM_API_KEY / EMBEDDING_API_KEY，无法创建问答测评任务")
+        eval_config_idx = 0
+
     db = SessionLocal()
     try:
         ds = db.query(ExpDataset).filter(ExpDataset.id == dataset_id).first()
@@ -386,13 +506,35 @@ def create_run(
         q = db.query(ExpQuestion).filter(ExpQuestion.dataset_id == dataset_id, ExpQuestion.is_ood == False)  # noqa: E712
         if q.count() == 0:
             raise ValueError("数据集尚未导入问题（库内题），无法运行实验")
+        answer_count = q.filter(ExpQuestion.answer != "").count() if kind == RUN_KIND_QA else 0
+        run_name = (name or "").strip()[:128]
+        if not run_name:
+            existing = [
+                r[0]
+                for r in db.query(ExpRun.name)
+                .filter(ExpRun.dataset_id == dataset_id, ExpRun.kind == kind)
+                .all()
+            ]
+            run_name = _auto_run_name(ds.name, kind, existing)
+        snapshot = {
+            "doc_count": ds.doc_count or 0,
+            "question_count": ds.question_count or 0,
+            "answer_count": answer_count,
+        }
+        if kind == RUN_KIND_QA:
+            # 生成/判分口径版本：避免新旧 run 的正确率直接混比（旧数据不迁移）
+            snapshot["eval_prompt_version"] = (
+                f"{answer_eval.ANSWER_PROMPT_VERSION}/{answer_eval.JUDGE_PROMPT_VERSION}"
+            )
         run = ExpRun(
             dataset_id=dataset_id,
-            name=(name or "").strip()[:128] or f"运行 #{ds.id}",
+            name=run_name,
+            kind=kind,
             configs=norm,
             question_limit=max(0, int(question_limit or 0)),
             include_ood=bool(include_ood),
-            snapshot={"doc_count": ds.doc_count or 0, "question_count": ds.question_count or 0},
+            eval_config_idx=eval_config_idx,
+            snapshot=snapshot,
             status="queued",
             created_by=int(created_by or 0),
         )
@@ -403,12 +545,14 @@ def create_run(
         db.close()
 
 
-def list_runs(dataset_id: int | None = None) -> list[dict]:
+def list_runs(dataset_id: int | None = None, kind: str | None = None) -> list[dict]:
     db = SessionLocal()
     try:
         q = db.query(ExpRun)
         if dataset_id is not None:
             q = q.filter(ExpRun.dataset_id == int(dataset_id))
+        if kind:
+            q = q.filter(ExpRun.kind == str(kind).lower())
         rows = q.order_by(ExpRun.created_at.desc()).all()
         return [_run_dict(r) for r in rows]
     finally:
@@ -429,15 +573,17 @@ def _run_dict(r: ExpRun) -> dict:
         "id": r.id,
         "dataset_id": r.dataset_id,
         "name": r.name,
+        "kind": r.kind or RUN_KIND_RETRIEVAL,
         "configs": r.configs or [],
         "question_limit": r.question_limit or 0,
         "include_ood": bool(r.include_ood),
+        "eval_config_idx": r.eval_config_idx,
         "snapshot": r.snapshot or {},
         "status": r.status,
         "created_by": r.created_by,
         "error": r.error,
-        "created_at": r.created_at.isoformat() if r.created_at else None,
-        "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+        "created_at": _local_iso(r.created_at),
+        "finished_at": _local_iso(r.finished_at),
     }
 
 
@@ -497,11 +643,15 @@ def get_run_results(run_id: int) -> dict | None:
             "reciprocal_rank": float(r.reciprocal_rank or 0.0),
             "recall": float(r.recall or 0.0),
             "is_ood": bool(r.is_ood),
+            "stratum": (qmap.get(r.question_id, {}) or {}).get("stratum", ""),
             "top1_score": float(r.top1_score or 0.0),
             "max_rerank_score": r.max_rerank_score,
             "rerank_below_min": bool(r.rerank_below_min),
             "latency_ms": r.latency_ms,
             "error": r.error,
+            "answer": r.answer or "",
+            "answer_latency_ms": int(r.answer_latency_ms or 0),
+            "answer_metrics": r.answer_metrics or {},
         }
         by_cfg.setdefault(r.config_idx, []).append(row)
         d = details.setdefault(

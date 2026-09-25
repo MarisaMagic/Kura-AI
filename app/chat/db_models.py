@@ -205,7 +205,9 @@ class ExpRun(Base):
     configs: 配置矩阵（JSONB 列表，每项含 retrieval_mode/fusion/rerank/top_k/rrf_k/candidate_multiplier）
     question_limit: 评测题数上限（0 表示全部）
     include_ood: 是否包含 OOD 题
-    snapshot: 运行时数据集快照（doc_count/question_count）
+    kind: 任务类型（retrieval=检索消融；qa=端到端问答测评）
+    eval_config_idx: 端到端问答评测选中的配置下标（QA 任务固定 0；检索任务为 NULL）
+    snapshot: 运行时数据集快照（doc_count/question_count/answer_count）
     status: queued/running/completed/cancelled/failed
     created_by: 创建者用户ID
     error: 失败原因
@@ -217,9 +219,11 @@ class ExpRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     dataset_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="retrieval")
     configs: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     question_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     include_ood: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    eval_config_idx: Mapped[int | None] = mapped_column(Integer, nullable=True)
     snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued", index=True)
     created_by: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -246,6 +250,9 @@ class ExpRunResult(Base):
     rerank_below_min: rerank 分数门控是否判定「无相关资料」
     latency_ms: 检索耗时
     error: 单题失败原因
+    answer: 端到端生成答案（仅评测配置；未启用为空）
+    answer_latency_ms: 生成调用耗时（不含检索与判分）
+    answer_metrics: 答案评测指标（JSONB：em/f1/numeric_hit/correctness/faithfulness/refused/gen_error/judge_error）
     created_at: 创建时间
     """
 
@@ -268,6 +275,9 @@ class ExpRunResult(Base):
     rerank_below_min: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error: Mapped[str] = mapped_column(Text, nullable=True)
+    answer: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    answer_latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    answer_metrics: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 

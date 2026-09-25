@@ -13,7 +13,7 @@ from app.experiment.service import EXP_KB_USER_ID, exp_agent_id, exp_kb_scope
 from app.kb import kb_job, kb_service
 from app.models import User
 from app.schemas.base import Fail, Success
-from app.schemas.experiment import ExpDatasetCreate, ExpRunCreate
+from app.schemas.experiment import ExpDatasetCreate, ExpDocsDelete, ExpRunCreate
 from app.settings import settings
 from app.utils.upload_accept import prepare_document_upload
 
@@ -59,6 +59,7 @@ async def exp_dataset_detail(
         service.refresh_dataset_counts(dataset_id)
         current = service.get_dataset(dataset_id) or current
         current["unmatched_gold_keys"] = service.unmatched_gold_keys(dataset_id)
+        current["answer_count"] = service.count_answered_questions(dataset_id)
         return current
 
     ds = await asyncio.to_thread(_load)
@@ -119,6 +120,27 @@ async def exp_upload_document(
         code, msg = error
         return Fail(code=code, msg=msg)
     return Success(data={"task_id": task_id}, msg="上传已受理，正在后台处理")
+
+
+@router.post("/documents/batch-delete", summary="批量删除实验文档（按当前筛选结果）", tags=[TAG])
+async def exp_batch_delete_documents(
+    body: ExpDocsDelete,
+    current_user: User = Depends(SuperuserControl.is_superuser),
+):
+    if not service.get_dataset(body.dataset_id):
+        return Fail(code=404, msg="数据集不存在")
+    try:
+        result = await asyncio.to_thread(service.delete_documents, body.dataset_id, body.filenames)
+    except ValueError as e:
+        return Fail(code=400, msg=str(e))
+    except Exception as e:  # noqa: BLE001
+        return Fail(code=500, msg=str(e))
+    if result["failed"]:
+        return Success(
+            data=result,
+            msg=f"已删除 {result['deleted']} 个文档，{len(result['failed'])} 个删除失败",
+        )
+    return Success(data=result, msg=f"已删除 {result['deleted']} 个文档")
 
 
 def _exp_task_meta(task_id: str) -> dict | None:
@@ -235,27 +257,34 @@ async def exp_delete_question(
     return Success(data={"question_id": question_id}, msg="删除成功")
 
 
-@router.post("/questions/clear", summary="清空实验问题集", tags=[TAG])
+@router.post("/questions/clear", summary="清空实验问题（跟随当前筛选：全部/库内/OOD）", tags=[TAG])
 async def exp_clear_questions(
     dataset_id: int = Query(..., description="数据集 ID"),
-    ood_only: bool = Query(False, description="仅清空 OOD 题"),
+    is_ood: bool | None = Query(None, description="None=全部；false=仅库内题；true=仅 OOD 题"),
     current_user: User = Depends(SuperuserControl.is_superuser),
 ):
-    n = service.clear_questions(dataset_id, ood_only=ood_only)
-    return Success(data={"deleted": n}, msg=f"已清空 {n} 个问题")
+    n = service.clear_questions(dataset_id, is_ood=is_ood)
+    scope = "全部" if is_ood is None else ("OOD" if is_ood else "库内")
+    return Success(data={"deleted": n}, msg=f"已清空 {scope} {n} 个问题")
 
 
 # ---------------------------------------------------------------- runs
 
 
-@router.post("/runs", summary="创建并启动实验运行（多配置消融对比）", tags=[TAG])
+@router.post("/runs", summary="创建并启动实验运行（retrieval=消融对比；qa=端到端问答测评）", tags=[TAG])
 async def exp_create_run(
     body: ExpRunCreate,
     current_user: User = Depends(SuperuserControl.is_superuser),
 ):
     try:
         run = service.create_run(
-            body.dataset_id, body.name, body.configs, body.question_limit, body.include_ood, current_user.id
+            body.dataset_id,
+            body.name,
+            body.configs,
+            body.question_limit,
+            body.include_ood,
+            created_by=current_user.id,
+            kind=body.kind,
         )
     except ValueError as e:
         return Fail(code=400, msg=str(e))
@@ -269,14 +298,21 @@ async def exp_create_run(
 @router.get("/runs", summary="实验运行列表", tags=[TAG])
 async def exp_list_runs(
     dataset_id: int | None = Query(None, description="按数据集过滤"),
+    kind: str | None = Query(None, description="按任务类型过滤（retrieval/qa）"),
     current_user: User = Depends(SuperuserControl.is_superuser),
 ):
-    runs = service.list_runs(dataset_id)
+    runs = service.list_runs(dataset_id, kind=kind)
     active = {r["id"]: exp_job.get_exp_run_job_meta(r["id"]) for r in runs if r["status"] in ("queued", "running")}
     for r in runs:
-        meta = active.get(r["id"])
+        meta = exp_job.enrich_job_meta(active.get(r["id"]))
         if meta:
-            r["progress"] = {"percent": meta.get("percent", 0), "done": meta.get("done"), "total": meta.get("total")}
+            r["progress"] = {
+                "percent": meta.get("percent", 0),
+                "done": meta.get("done"),
+                "total": meta.get("total"),
+                "stage": meta.get("stage"),
+                "elapsed_seconds": meta.get("elapsed_seconds"),
+            }
     return Success(data=runs)
 
 
@@ -288,7 +324,7 @@ async def exp_run_status(
     run = service.get_run(run_id)
     if not run:
         return Fail(code=404, msg="运行不存在")
-    meta = exp_job.get_exp_run_job_meta(run_id) or {}
+    meta = exp_job.enrich_job_meta(exp_job.get_exp_run_job_meta(run_id))
     return Success(data={"run": run, "job": meta})
 
 

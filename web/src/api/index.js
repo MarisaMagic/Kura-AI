@@ -200,6 +200,8 @@ export default {
       ...config,
     }),
   deleteExpDocument: (params = {}) => request.delete('/experiment/documents', { params }),
+  batchDeleteExpDocuments: (data = {}) =>
+    request.post('/experiment/documents/batch-delete', data, { timeout: 120000 }),
   importExpQuestions: (datasetId, data, replace = false) =>
     request.post(`/experiment/questions/import?dataset_id=${datasetId}&replace=${replace}`, data, {
       headers: { 'Content-Type': 'multipart/form-data' },

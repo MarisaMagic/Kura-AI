@@ -75,7 +75,7 @@ function fmtTime(iso) {
             实验平台
           </h1>
           <p class="exp-subtitle">
-            RAG 检索消融评测：稠密 / 稀疏 / RRF 融合 / Rerank 命中率对比（仅超级管理员）
+            实验平台：RAG 检索策略消融对比 + 端到端问答测评（仅超级管理员）
           </p>
         </div>
         <div class="exp-header-actions">

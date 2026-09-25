@@ -186,6 +186,23 @@ export const basicRoutes = [
       },
     ],
   },
+  {
+    path: '/system/experiment/qa-run/:id',
+    component: Layout,
+    isHidden: true,
+    children: [
+      {
+        path: '',
+        name: 'ExpQaRunResult',
+        component: () => import('@/views/experiment/qa-run.vue'),
+        meta: {
+          title: '问答测评结果',
+          hidden: true,
+          activeMenu: '实验平台',
+        },
+      },
+    ],
+  },
   /** 智能体对话（从智能体中心进入；勿与 /agents 下编辑器路由冲突） */
   {
     path: '/agent-hub/chat/:agentId',

@@ -31,6 +31,15 @@ let oodChart = null
 let pollTimer = null
 
 const isActive = computed(() => ['queued', 'running'].includes(run.value?.status))
+// 历史混合运行（检索消融附带问答评测）兼容入口：可跳转独立问答结果页
+const hasLegacyQa = computed(() => run.value?.kind !== 'qa' && run.value?.eval_config_idx != null)
+
+function fmtElapsed(seconds) {
+  const s = Number(seconds)
+  if (!Number.isFinite(s) || s < 0) return ''
+  if (s < 60) return `${Math.floor(s)} 秒`
+  return `${Math.floor(s / 60)} 分 ${Math.floor(s % 60)} 秒`
+}
 
 async function loadAll() {
   const [statusRes, resultsRes] = await Promise.all([
@@ -333,6 +342,10 @@ function goBack() {
   else router.push('/system/experiment')
 }
 
+function goQaResults() {
+  router.push(`/system/experiment/qa-run/${runId}`)
+}
+
 const statusText = computed(() => {
   const s = run.value?.status
   if (s === 'running')
@@ -387,6 +400,10 @@ onUnmounted(() => {
           </p>
         </div>
         <div class="exp-result-actions">
+          <n-button v-if="hasLegacyQa" size="small" quaternary type="primary" @click="goQaResults">
+            <template #icon><TheIcon icon="mdi:comment-question-outline" :size="16" /></template>
+            问答评测结果
+          </n-button>
           <n-button v-if="isActive" size="small" type="warning" @click="cancelRun">
             <template #icon><TheIcon icon="mdi:stop-circle-outline" :size="16" /></template>
             取消运行
@@ -402,7 +419,14 @@ onUnmounted(() => {
         <template v-if="isActive">
           <div class="exp-running">
             <n-progress type="line" :percentage="job?.percent || 0" :height="12" processing />
-            <p>正在逐题评测，页面会自动刷新…（{{ job?.done || 0 }}/{{ job?.total || '?' }} 题）</p>
+            <p class="exp-running-stage">{{ job?.stage || '正在准备…' }}</p>
+            <p>
+              已完成 {{ job?.done || 0 }}/{{ job?.total || '?' }} 题<template
+                v-if="job?.elapsed_seconds != null"
+              >
+                · 已用 {{ fmtElapsed(job.elapsed_seconds) }}</template
+              >，页面每 3 秒自动刷新
+            </p>
           </div>
         </template>
 
@@ -504,6 +528,12 @@ onUnmounted(() => {
 .exp-running {
   padding: 40px 60px;
   text-align: center;
+}
+.exp-running-stage {
+  margin-top: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--n-text-color-2);
 }
 .exp-running p {
   margin-top: 10px;

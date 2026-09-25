@@ -1,4 +1,4 @@
-"""实验执行核心：单题 × 单配置的检索 + 可选 rerank + 文档级命中评测。
+"""实验执行核心：单题 × 单配置的检索 + 可选 rerank + 文档级命中评测 + 可选生成评测。
 
 绕开 retrieve_documents 的高层封装（选档/Auto-merge/HyDE 均不参与），
 直接组合 MilvusManager 三种检索腿与 _rerank_documents，保证消融变量唯一可控。
@@ -9,9 +9,11 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from app.experiment import answer_eval
 from app.experiment.metrics import doc_level_results, evaluate_docs
 from app.kb.milvus_client import MilvusManager, milvus_escape
 from app.kb.rag_utils import LEAF_RETRIEVE_LEVEL, _rerank_documents
+from app.settings import settings
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "retrieval_mode": "hybrid",
@@ -81,6 +83,41 @@ def needs_dense_embedding(configs: list[dict]) -> bool:
     return any((c.get("retrieval_mode") or "hybrid") in ("dense", "hybrid") for c in configs)
 
 
+def doc_context_map(chunks: list[dict], top_k: int, max_chars: int) -> str:
+    """
+    将检索块按文档级排名拼成生成用上下文（保留全文，非 120 字摘要）。
+    按 filename 首现顺序取前 top_k 个「含文本」文档（图片等无文本块不占编号），合并文本块并标注页码，总长截断到 max_chars。
+    """
+    order: list[str] = []
+    by_file: dict[str, list[dict]] = {}
+    for c in chunks:
+        fn = str(c.get("filename") or "").strip()
+        text = str(c.get("text") or "").strip()
+        if not fn or not text or str(c.get("content_type") or "text") != "text":
+            continue
+        if fn not in by_file:
+            if len(order) >= max(1, int(top_k)):
+                continue
+            order.append(fn)
+            by_file[fn] = []
+        by_file[fn].append(c)
+
+    parts: list[str] = []
+    used = 0
+    for i, fn in enumerate(order, 1):
+        blocks = [str(c.get("text") or "").strip() for c in by_file[fn]]
+        page = by_file[fn][0].get("page_number") or 0
+        segment = f"[{i}] {fn} (Page {page}):\n" + "\n".join(blocks)
+        remain = max_chars - used
+        if remain <= 0:
+            break
+        if len(segment) > remain:
+            segment = segment[:remain]
+        parts.append(segment)
+        used += len(segment)
+    return "\n\n---\n\n".join(parts)
+
+
 def run_config_for_question(
     *,
     query: str,
@@ -89,6 +126,12 @@ def run_config_for_question(
     dense_embedding: list[float] | None,
     milvus: MilvusManager,
     kb_scope: str,
+    generate: bool = False,
+    reference_answer: str = "",
+    is_ood: bool = False,
+    answer_cfg: dict[str, Any] | None = None,
+    judge_cfg: dict[str, Any] | None = None,
+    on_stage: answer_eval.StageCallback | None = None,
 ) -> dict[str, Any]:
     """
     对单题执行单配置检索评测（同步，供后台线程调用）。
@@ -98,8 +141,16 @@ def run_config_for_question(
     :param dense_embedding: 预计算的密集向量（sparse-only 时可为 None）
     :param milvus: 线程专用 MilvusManager 实例
     :param kb_scope: 实验知识库范围
-    :return: 逐题结果字典（retrieved/hit/hit_rank/reciprocal_rank/recall/top1_score/...）
+    :param generate: 是否追加端到端生成评测（仅终选配置）
+    :param reference_answer: 参考答案（生成评测用）
+    :param is_ood: 是否 OOD 题（仅做拒答判分）
+    :param answer_cfg: 生成 LLM 配置
+    :param judge_cfg: 判分 LLM 配置
+    :param on_stage: 进度阶段回调（阶段文案, 进度单元数）
+    :return: 逐题结果字典（retrieved/hit/... + 可选的 answer/answer_latency_ms/answer_metrics）
     """
+    if on_stage:
+        on_stage("检索", 1)
     top_k = int(config["top_k"])
     candidate_k = top_k * int(config["candidate_multiplier"])
     esc = milvus_escape(kb_scope)
@@ -146,7 +197,7 @@ def run_config_for_question(
     doc_results = doc_level_results(chunks, top_k)
     metrics = evaluate_docs(doc_results, gold_file_keys)
     top1_score = float(doc_results[0]["score"]) if doc_results else 0.0
-    return {
+    result: dict[str, Any] = {
         "retrieved": doc_results,
         "hit": metrics["hit"],
         "hit_rank": metrics["hit_rank"],
@@ -158,3 +209,19 @@ def run_config_for_question(
         "latency_ms": latency_ms,
         "error": None,
     }
+    if generate and answer_cfg and judge_cfg:
+        context = doc_context_map(
+            chunks, top_k, int(getattr(settings, "EXP_EVAL_MAX_CONTEXT_CHARS", 12000) or 12000)
+        )
+        result.update(
+            answer_eval.evaluate_answer(
+                question=query,
+                reference=reference_answer,
+                context=context,
+                is_ood=is_ood,
+                answer_cfg=answer_cfg,
+                judge_cfg=judge_cfg,
+                on_stage=on_stage,
+            )
+        )
+    return result

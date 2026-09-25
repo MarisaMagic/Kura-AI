@@ -6,6 +6,7 @@ import AppPage from '@/components/page/AppPage.vue'
 import TheIcon from '@/components/icon/TheIcon.vue'
 import api from '@/api'
 import RunConfigModal from './components/RunConfigModal.vue'
+import QaRunModal from './components/QaRunModal.vue'
 import {
   fileKindClass,
   fileKindIcon,
@@ -142,6 +143,22 @@ async function deleteDocument(row) {
   await Promise.all([loadDocuments(), loadDetail()])
 }
 
+const deletingDocs = ref(false)
+const hasDocFilter = computed(() => docKeyword.value.trim() !== '' || docTypeFilter.value !== 'all')
+
+async function batchDeleteDocuments() {
+  const names = filteredDocuments.value.map((d) => d.display_filename)
+  if (!names.length) return
+  deletingDocs.value = true
+  try {
+    const res = await api.batchDeleteExpDocuments({ dataset_id: datasetId, filenames: names })
+    message.success(res.msg || `已删除 ${res.data?.deleted ?? names.length} 个文档`)
+    await Promise.all([loadDocuments(), loadDetail()])
+  } finally {
+    deletingDocs.value = false
+  }
+}
+
 const docColumns = computed(() => [
   {
     title: '文件名',
@@ -258,9 +275,17 @@ async function deleteQuestion(row) {
   await Promise.all([loadQuestions(), loadDetail()])
 }
 
-async function clearQuestions(oodOnly) {
-  await api.clearExpQuestions({ dataset_id: datasetId, ood_only: oodOnly })
-  message.success('已清空')
+// 清空跟随当前筛选：全部 / 库内题 / OOD 题
+const clearQuestionsLabel = computed(() => {
+  if (qOodFilter.value === null) return '清空全部题目'
+  return qOodFilter.value ? '清空 OOD 题' : '清空库内题'
+})
+
+async function clearQuestions() {
+  const params = { dataset_id: datasetId }
+  if (qOodFilter.value !== null) params.is_ood = qOodFilter.value
+  const res = await api.clearExpQuestions(params)
+  message.success(res.msg || `已清空 ${res.data?.deleted ?? 0} 个问题`)
   await Promise.all([loadQuestions(), loadDetail()])
 }
 
@@ -315,17 +340,26 @@ const qColumns = computed(() => [
 ])
 
 // ---------------------------------------------------------------- 实验运行
-const runs = ref([])
+const runsRetrieval = ref([])
+const runsQa = ref([])
 const runsLoading = ref(false)
+const runTab = ref('retrieval')
 const showRunModal = ref(false)
+const showQaModal = ref(false)
 let runsTimer = null
 
 async function loadRuns({ silent = false } = {}) {
   if (!silent) runsLoading.value = true
   try {
-    const res = await api.getExpRuns({ dataset_id: datasetId })
-    runs.value = res.data || []
-    const hasActive = runs.value.some((r) => ['queued', 'running'].includes(r.status))
+    const [retrievalRes, qaRes] = await Promise.all([
+      api.getExpRuns({ dataset_id: datasetId, kind: 'retrieval' }),
+      api.getExpRuns({ dataset_id: datasetId, kind: 'qa' }),
+    ])
+    runsRetrieval.value = retrievalRes.data || []
+    runsQa.value = qaRes.data || []
+    const hasActive = [...runsRetrieval.value, ...runsQa.value].some((r) =>
+      ['queued', 'running'].includes(r.status)
+    )
     if (hasActive && !runsTimer) runsTimer = setInterval(() => loadRuns({ silent: true }), 3000)
     if (!hasActive && runsTimer) {
       clearInterval(runsTimer)
@@ -356,115 +390,162 @@ async function deleteRun(row) {
   await loadRuns()
 }
 
-const runColumns = computed(() => [
-  { title: '名称', key: 'name', ellipsis: { tooltip: true } },
-  {
-    title: '配置',
-    key: 'configs',
-    width: 90,
-    align: 'center',
-    render: (row) => `${(row.configs || []).length} 组`,
-  },
-  {
-    title: '题数',
-    key: 'question_limit',
-    width: 110,
-    align: 'center',
-    render: (row) => `${row.question_limit || '全部'}${row.include_ood ? ' +OOD' : ''}`,
-  },
-  {
-    title: '进度',
-    key: 'progress',
-    width: 220,
-    render: (row) => {
-      const s = runStatusMap[row.status] || { label: row.status, type: 'default' }
-      const tag = h(NTag, { size: 'small', type: s.type, bordered: false }, () => s.label)
-      if (['queued', 'running'].includes(row.status)) {
-        const percent = Number(row.progress?.percent ?? 0)
-        return h('div', { class: 'exp-run-progress-cell' }, [
-          tag,
-          h(NProgress, {
-            type: 'line',
-            percentage: percent,
-            height: 6,
-            showIndicator: false,
-            class: 'exp-run-progress-bar',
-          }),
-          h('span', { class: 'exp-run-progress-pct' }, `${percent}%`),
-        ])
-      }
-      return tag
+function renderRunProgress(row) {
+  const s = runStatusMap[row.status] || { label: row.status, type: 'default' }
+  const tag = h(NTag, { size: 'small', type: s.type, bordered: false }, () => s.label)
+  if (!['queued', 'running'].includes(row.status)) return tag
+  const percent = Number(row.progress?.percent ?? 0)
+  const parts = [
+    h('div', { class: 'exp-run-progress-line' }, [
+      tag,
+      h(NProgress, {
+        type: 'line',
+        percentage: percent,
+        height: 6,
+        showIndicator: false,
+        class: 'exp-run-progress-bar',
+      }),
+      h('span', { class: 'exp-run-progress-pct' }, `${percent}%`),
+    ]),
+  ]
+  const stage = row.progress?.stage
+  if (stage) {
+    const elapsed = row.progress?.elapsed_seconds
+    parts.push(
+      h(
+        'div',
+        { class: 'exp-run-progress-stage' },
+        elapsed != null ? `${stage} · 已用 ${formatElapsed(elapsed)}` : stage
+      )
+    )
+  }
+  return h('div', { class: 'exp-run-progress-cell' }, parts)
+}
+
+function formatElapsed(seconds) {
+  const s = Number(seconds)
+  if (!Number.isFinite(s) || s < 0) return '-'
+  if (s < 60) return `${Math.floor(s)} 秒`
+  return `${Math.floor(s / 60)} 分 ${Math.floor(s % 60)} 秒`
+}
+
+function runActions(row, kind) {
+  const btns = []
+  if (row.status === 'completed' || row.status === 'cancelled') {
+    btns.push(
+      h(
+        NButton,
+        {
+          size: 'small',
+          quaternary: true,
+          type: 'primary',
+          onClick: () =>
+            router.push(
+              kind === 'qa'
+                ? `/system/experiment/qa-run/${row.id}`
+                : `/system/experiment/run/${row.id}`
+            ),
+        },
+        {
+          icon: () => h(TheIcon, { icon: 'mdi:chart-box-outline', size: 16 }),
+          default: () => '结果',
+        }
+      )
+    )
+  }
+  if (['queued', 'running'].includes(row.status)) {
+    btns.push(
+      h(
+        NButton,
+        { size: 'small', quaternary: true, onClick: () => cancelRun(row) },
+        {
+          icon: () => h(TheIcon, { icon: 'mdi:stop-circle-outline', size: 16 }),
+          default: () => '取消',
+        }
+      )
+    )
+  } else {
+    btns.push(
+      h(
+        NPopconfirm,
+        { onPositiveClick: () => deleteRun(row) },
+        {
+          trigger: () =>
+            h(
+              NButton,
+              { size: 'small', quaternary: true, type: 'error' },
+              {
+                icon: () => h(TheIcon, { icon: 'mdi:trash-can-outline', size: 16 }),
+                default: () => '删除',
+              }
+            ),
+          default: () => '确认删除该运行及全部结果？',
+        }
+      )
+    )
+  }
+  return h('div', { class: 'exp-row-actions' }, btns)
+}
+
+function buildRunColumns(kind) {
+  const cols = []
+  if (kind === 'qa') {
+    cols.push({
+      title: '策略',
+      key: 'strategy',
+      width: 150,
+      ellipsis: { tooltip: true },
+      render: (row) => row.configs?.[0]?.name || '-',
+    })
+  } else {
+    cols.push({
+      title: '配置',
+      key: 'configs',
+      width: 90,
+      align: 'center',
+      render: (row) => `${(row.configs || []).length} 组`,
+    })
+  }
+  cols.push(
+    { title: '名称', key: 'name', ellipsis: { tooltip: true } },
+    {
+      title: '题数',
+      key: 'question_limit',
+      width: 110,
+      align: 'center',
+      render: (row) => `${row.question_limit || '全部'}${row.include_ood ? ' +OOD' : ''}`,
     },
-  },
-  {
-    title: '创建时间',
-    key: 'created_at',
-    width: 160,
-    render: (row) => formatUpdatedAt(row.created_at),
-  },
-  {
-    title: '操作',
-    key: 'actions',
-    width: 190,
-    align: 'center',
-    render: (row) => {
-      const btns = []
-      if (row.status === 'completed' || row.status === 'cancelled') {
-        btns.push(
-          h(
-            NButton,
-            {
-              size: 'small',
-              quaternary: true,
-              type: 'primary',
-              onClick: () => router.push(`/system/experiment/run/${row.id}`),
-            },
-            {
-              icon: () => h(TheIcon, { icon: 'mdi:chart-box-outline', size: 16 }),
-              default: () => '结果',
-            }
-          )
-        )
-      }
-      if (['queued', 'running'].includes(row.status)) {
-        btns.push(
-          h(
-            NButton,
-            { size: 'small', quaternary: true, onClick: () => cancelRun(row) },
-            {
-              icon: () => h(TheIcon, { icon: 'mdi:stop-circle-outline', size: 16 }),
-              default: () => '取消',
-            }
-          )
-        )
-      } else {
-        btns.push(
-          h(
-            NPopconfirm,
-            { onPositiveClick: () => deleteRun(row) },
-            {
-              trigger: () =>
-                h(
-                  NButton,
-                  { size: 'small', quaternary: true, type: 'error' },
-                  {
-                    icon: () => h(TheIcon, { icon: 'mdi:trash-can-outline', size: 16 }),
-                    default: () => '删除',
-                  }
-                ),
-              default: () => '确认删除该运行及全部结果？',
-            }
-          )
-        )
-      }
-      return h('div', { class: 'exp-row-actions' }, btns)
+    { title: '进度', key: 'progress', width: 230, render: renderRunProgress },
+    {
+      title: '创建时间',
+      key: 'created_at',
+      width: 160,
+      render: (row) => formatUpdatedAt(row.created_at),
     },
-  },
-])
+    {
+      title: '操作',
+      key: 'actions',
+      width: 190,
+      align: 'center',
+      render: (row) => runActions(row, kind),
+    }
+  )
+  return cols
+}
+
+const retrievalRunColumns = computed(() => buildRunColumns('retrieval'))
+const qaRunColumns = computed(() => buildRunColumns('qa'))
 
 function onRunCreated() {
   showRunModal.value = false
   message.success('实验已启动')
+  loadRuns()
+}
+
+function onQaRunCreated() {
+  showQaModal.value = false
+  message.success('问答测评已启动')
+  runTab.value = 'qa'
   loadRuns()
 }
 
@@ -681,6 +762,29 @@ onUnmounted(() => {
                 class="exp-type-filter"
                 @update:value="docPage = 1"
               />
+              <div class="exp-toolbar-right">
+                <n-popconfirm @positive-click="batchDeleteDocuments">
+                  <template #trigger>
+                    <n-button size="small" quaternary type="error" :loading="deletingDocs">
+                      <template #icon
+                        ><TheIcon icon="mdi:delete-sweep-outline" :size="16"
+                      /></template>
+                      {{
+                        hasDocFilter
+                          ? `删除筛选结果（${filteredDocuments.length}）`
+                          : `清空全部文档（${documents.length}）`
+                      }}
+                    </n-button>
+                  </template>
+                  <template v-if="hasDocFilter">
+                    确认删除当前筛选出的
+                    {{ filteredDocuments.length }} 个文档？向量与元数据将一并清理
+                  </template>
+                  <template v-else>
+                    确认清空全部 {{ documents.length }} 个文档？向量与元数据将一并清理
+                  </template>
+                </n-popconfirm>
+              </div>
             </div>
 
             <n-data-table
@@ -743,28 +847,18 @@ onUnmounted(() => {
                   }
                 "
               />
-              <div class="exp-toolbar-right">
-                <n-popconfirm @positive-click="clearQuestions(true)">
-                  <template #trigger>
-                    <n-button size="small" quaternary>
-                      <template #icon
-                        ><TheIcon icon="mdi:delete-sweep-outline" :size="16"
-                      /></template>
-                      清空 OOD
-                    </n-button>
-                  </template>
-                  确认清空全部库外题？
-                </n-popconfirm>
-                <n-popconfirm @positive-click="clearQuestions(false)">
+              <div v-if="questions.total" class="exp-toolbar-right">
+                <n-popconfirm @positive-click="clearQuestions">
                   <template #trigger>
                     <n-button size="small" quaternary type="error">
                       <template #icon
-                        ><TheIcon icon="mdi:delete-forever-outline" :size="16"
+                        ><TheIcon icon="mdi:delete-sweep-outline" :size="16"
                       /></template>
-                      清空全部
+                      {{ clearQuestionsLabel }}（{{ questions.total }}）
                     </n-button>
                   </template>
-                  确认清空该数据集全部问题？
+                  确认{{ clearQuestionsLabel }}（共
+                  {{ questions.total }} 条）？仅删除问题记录，不影响文档。
                 </n-popconfirm>
               </div>
             </div>
@@ -802,24 +896,50 @@ onUnmounted(() => {
 
           <!-- 实验运行 -->
           <n-tab-pane name="runs" tab="实验运行">
-            <div class="exp-list-toolbar">
-              <n-button type="primary" size="small" @click="showRunModal = true">
-                <template #icon><TheIcon icon="mdi:play-circle-outline" :size="16" /></template>
-                新建消融实验
-              </n-button>
-              <n-button size="small" quaternary @click="loadRuns()">
-                <template #icon><TheIcon icon="mdi:refresh" :size="16" /></template>
-                刷新
-              </n-button>
-            </div>
-            <n-data-table
-              :columns="runColumns"
-              :data="runs"
-              :loading="runsLoading"
-              :bordered="true"
-              size="small"
-              :row-key="(r) => r.id"
-            />
+            <n-tabs v-model:value="runTab" type="segment" size="small" class="exp-run-subtabs">
+              <n-tab-pane name="retrieval" :tab="`检索消融（${runsRetrieval.length}）`">
+                <div class="exp-list-toolbar">
+                  <n-button type="primary" size="small" @click="showRunModal = true">
+                    <template #icon><TheIcon icon="mdi:play-circle-outline" :size="16" /></template>
+                    新建消融实验
+                  </n-button>
+                  <n-button size="small" quaternary @click="loadRuns()">
+                    <template #icon><TheIcon icon="mdi:refresh" :size="16" /></template>
+                    刷新
+                  </n-button>
+                </div>
+                <n-data-table
+                  :columns="retrievalRunColumns"
+                  :data="runsRetrieval"
+                  :loading="runsLoading"
+                  :bordered="true"
+                  size="small"
+                  :row-key="(r) => r.id"
+                />
+              </n-tab-pane>
+              <n-tab-pane name="qa" :tab="`问答测评（${runsQa.length}）`">
+                <div class="exp-list-toolbar">
+                  <n-button type="primary" size="small" @click="showQaModal = true">
+                    <template #icon
+                      ><TheIcon icon="mdi:comment-question-outline" :size="16"
+                    /></template>
+                    新建问答测评
+                  </n-button>
+                  <n-button size="small" quaternary @click="loadRuns()">
+                    <template #icon><TheIcon icon="mdi:refresh" :size="16" /></template>
+                    刷新
+                  </n-button>
+                </div>
+                <n-data-table
+                  :columns="qaRunColumns"
+                  :data="runsQa"
+                  :loading="runsLoading"
+                  :bordered="true"
+                  size="small"
+                  :row-key="(r) => r.id"
+                />
+              </n-tab-pane>
+            </n-tabs>
           </n-tab-pane>
         </n-tabs>
       </n-spin>
@@ -881,6 +1001,14 @@ onUnmounted(() => {
       :dataset-id="datasetId"
       :question-count="dataset?.question_count || 0"
       @created="onRunCreated"
+    />
+
+    <QaRunModal
+      v-model:show="showQaModal"
+      :dataset-id="datasetId"
+      :question-count="dataset?.question_count || 0"
+      :answer-count="dataset?.answer_count || 0"
+      @created="onQaRunCreated"
     />
   </AppPage>
 </template>
@@ -1230,6 +1358,11 @@ onUnmounted(() => {
 }
 :deep(.exp-run-progress-cell) {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+:deep(.exp-run-progress-line) {
+  display: flex;
   gap: 8px;
   align-items: center;
 }
@@ -1241,6 +1374,16 @@ onUnmounted(() => {
   flex: none;
   font-size: 12px;
   color: var(--n-text-color-3);
+}
+:deep(.exp-run-progress-stage) {
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--n-text-color-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.exp-run-subtabs {
+  margin-top: 4px;
 }
 :deep(.exp-row-actions) {
   display: flex;
