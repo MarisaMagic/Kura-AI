@@ -9,7 +9,7 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -36,6 +36,7 @@ from app.chat.compact_store import (
 )
 from app.chat.context_budget import budget_for
 from app.chat.db_models import ChatCompactSegment, ChatMessage as ChatMessageRow, ChatSession as ChatSessionRow
+from app.chat.tool_result_compact import CLEARED_PLACEHOLDER
 from app.settings import settings
 
 
@@ -386,6 +387,16 @@ class AttemptCompactionTest(unittest.TestCase):
         self.assertEqual(len(segs), 1)
         self.assertEqual(segs[0]["to_index"], res["keep_from"])
 
+    def test_emits_visible_compacting_status(self):
+        """同步压缩会阻塞首 token，必须先 emit 一条「进行中」状态供前端展示。"""
+        with mock.patch(
+            "app.chat.compact.run_summarizer", return_value=("摘要", [])
+        ), mock.patch("app.chat.tools.emit_rag_step") as emit:
+            res = self._call(keep_from=0)
+        self.assertTrue(res["ok"])
+        labels = [c.args[1] for c in emit.call_args_list if len(c.args) > 1]
+        self.assertIn("正在进行上下文压缩", labels)
+
     def test_success_keeps_legacy_keys_as_branch_fallback(self):
         """成功压缩不清理 v1 键：v2 段链优先，v1 作为其它分支的兜底摘要保留。"""
         # 先把 v1 metadata 落库，才能验证压缩后它未被抹掉
@@ -612,7 +623,6 @@ class BuildCompactedViewTest(unittest.TestCase):
         self.assertEqual(holder["model_name"], "m1")
         self.assertGreater(holder["estimated"], 0)
         self.assertEqual(holder["trigger"], holder["effective"] - holder["buffer"] if "buffer" in holder else holder["trigger"])
-        self.assertLess(holder["soft_trigger"], holder["trigger"])
 
     def test_over_trigger_compacts_and_injects_summary(self):
         upsert_segment(
@@ -683,6 +693,98 @@ class BuildCompactedViewTest(unittest.TestCase):
         text = render_summary_block(chain)
         self.assertIn("段甲", text)
         self.assertIn("延续", text)
+
+
+class MicroCompactPreprocessingTest(unittest.TestCase):
+    """压缩前的 micro-compact 预处理：先零成本清理，再决定是否付 LLM 摘要。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.engine = create_engine("sqlite+pysqlite:///:memory:")
+        ChatSessionRow.__table__.create(bind=cls.engine)
+        ChatMessageRow.__table__.create(bind=cls.engine)
+        ChatCompactSegment.__table__.create(bind=cls.engine)
+        factory = sessionmaker(bind=cls.engine, autoflush=False, autocommit=False, expire_on_commit=False)
+        cls._orig_store_sl = store_mod.SessionLocal
+        cls._orig_storage_sl = storage_mod.SessionLocal
+        cls._orig_cache = storage_mod.cache
+        store_mod.SessionLocal = factory
+        storage_mod.SessionLocal = factory
+        storage_mod.cache = _MemoryCache()
+        cls.storage = storage_mod.ConversationStorage()
+
+    @classmethod
+    def tearDownClass(cls):
+        store_mod.SessionLocal = cls._orig_store_sl
+        storage_mod.SessionLocal = cls._orig_storage_sl
+        storage_mod.cache = cls._orig_cache
+
+    def setUp(self):
+        self.uid, self.aid = 950001, 950001
+        self.sid = f"mc_{self.id().split('.')[-1]}"
+        self.storage.append_messages(self.uid, self.aid, self.sid, [HumanMessage(content="开场")])
+        self.storage.append_messages(self.uid, self.aid, self.sid, [AIMessage(content="好的")])
+        self.llm = {"api_key": "sk-test", "model_name": "m1", "base_url": ""}
+
+    def _messages_with_tools(self, sizes: list[int]) -> list:
+        msgs: list = [SystemMessage(content="系统提示词"), HumanMessage(content="问题1")]
+        for i, size in enumerate(sizes):
+            msgs.append(
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "web_search", "args": {"query": f"q{i}"}, "id": f"c{i}"}],
+                )
+            )
+            msgs.append(
+                ToolMessage(content=f"T{i}-" + "x" * size, tool_call_id=f"c{i}", name="web_search")
+            )
+        msgs.extend([AIMessage(content="回答1"), HumanMessage(content="问题2"), AIMessage(content="回答2")])
+        return msgs
+
+    def _build(self, messages: list) -> tuple[list, dict]:
+        holder: dict = {}
+        out = build_compacted_model_messages(
+            messages,
+            user_id=self.uid,
+            agent_id=self.aid,
+            session_id=self.sid,
+            llm_config=self.llm,
+            system_prompt="系统提示词",
+            context_window=128_000,
+            path_ids=list(range(1000, 1000 + len(messages))),
+            budget_out=holder,
+        )
+        return out, holder
+
+    def test_projection_avoids_unnecessary_summary(self):
+        """原始估算超触发点，但清理旧工具结果后已低于触发点 → 不调摘要器。"""
+        messages = self._messages_with_tools([300_000, 300_000])
+        with mock.patch.object(settings, "CHAT_MICROCOMPACT_ENABLED", True), mock.patch.object(
+            settings, "CHAT_MICROCOMPACT_TRIGGER_RATIO", 0.05
+        ), mock.patch.object(settings, "CHAT_MICROCOMPACT_KEEP_RECENT", 1), mock.patch(
+            "app.chat.compact.run_summarizer"
+        ) as rs:
+            out, holder = self._build(messages)
+        rs.assert_not_called()
+        blob = "\n".join(str(m.content) for m in out)
+        self.assertIn(CLEARED_PLACEHOLDER, blob)
+        self.assertNotIn("会话压缩摘要", blob)
+        self.assertGreaterEqual(holder["microcompacted"]["cleared"], 1)
+
+    def test_summarizer_sees_cleaned_input_when_still_over_trigger(self):
+        """清理后仍超触发点 → 摘要器输入是清理后的文本（旧工具结果只剩占位符）。"""
+        # 25 个工具结果，保留最近 20 个（每个被截断到 6000 token，合计仍超触发点）
+        messages = self._messages_with_tools([30_000] * 25)
+        with mock.patch.object(settings, "CHAT_MICROCOMPACT_ENABLED", True), mock.patch.object(
+            settings, "CHAT_MICROCOMPACT_TRIGGER_RATIO", 0.05
+        ), mock.patch.object(settings, "CHAT_MICROCOMPACT_KEEP_RECENT", 20), mock.patch.object(
+            settings, "CHAT_COMPACT_KEEP_TOKENS", 1000
+        ), mock.patch("app.chat.compact.run_summarizer", return_value=("摘要", [])) as rs:
+            out, holder = self._build(messages)
+        self.assertTrue(rs.called)
+        dropped_text = rs.call_args.kwargs["dropped_text"]
+        self.assertIn(CLEARED_PLACEHOLDER, dropped_text)
+        self.assertNotIn("T0-", dropped_text)
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ COMPACTABLE_TOOLS: frozenset[str] = frozenset(
         "read_session_attachment",
         "search_session_attachment",
         "list_session_attachments_brief",
-        "search_session_memory",
+        "read_user_memory",
         "read_session_history",
     }
 )
@@ -166,24 +166,43 @@ def clear_old_tool_results(
     return out, cleared, clipped
 
 
-def compact_tool_results_if_needed(
+def micro_compact_trigger(context_window: Any = None) -> int:
+    """轮内清理的触发 token 阈值（effective × ratio）。
+
+    压缩决策与 AgentMiddleware 共用同一口径：超过它就该先做零成本清理，
+    再判断是否真的需要付 LLM 摘要。
+    """
+    budget = budget_for(resolve_window(context_window))
+    ratio = min(max(0.05, _float_setting("CHAT_MICROCOMPACT_TRIGGER_RATIO", 0.6)), 0.98)
+    return max(1024, int(budget.effective * ratio))
+
+
+def project_micro_compact(
     messages: list[BaseMessage], *, context_window: Any = None
 ) -> tuple[list[BaseMessage], int, int]:
-    """达到轮内阈值才执行清理；未达阈值零改动。"""
+    """压缩前置投影：超阈值时清理旧工具结果，返回 (精简视图, 清理数, 裁剪数)。
+
+    与 AgentMiddleware 共用同一闸门与参数，未启用/未达阈值时原样返回入参。
+    本函数零 API 成本，供「摘要前先瘦身」与「模型调用前投影」两处复用。
+    """
     if not getattr(settings, "CHAT_MICROCOMPACT_ENABLED", True):
         return messages, 0, 0
     if not messages:
         return messages, 0, 0
-    budget = budget_for(resolve_window(context_window))
-    ratio = min(max(0.05, _float_setting("CHAT_MICROCOMPACT_TRIGGER_RATIO", 0.6)), 0.98)
-    trigger = max(1024, int(budget.effective * ratio))
-    if estimate_messages_tokens(messages) < trigger:
+    if estimate_messages_tokens(messages) < micro_compact_trigger(context_window):
         return messages, 0, 0
     return clear_old_tool_results(
         messages,
         keep_recent=_int_setting("CHAT_MICROCOMPACT_KEEP_RECENT", 5),
         max_result_tokens=_int_setting("CHAT_MICROCOMPACT_MAX_RESULT_TOKENS", 6000),
     )
+
+
+def compact_tool_results_if_needed(
+    messages: list[BaseMessage], *, context_window: Any = None
+) -> tuple[list[BaseMessage], int, int]:
+    """达到轮内阈值才执行清理；未达阈值零改动（project_micro_compact 的别名）。"""
+    return project_micro_compact(messages, context_window=context_window)
 
 
 def try_micro_compact_middleware(context_window: Any = None) -> Any | None:
@@ -277,6 +296,8 @@ __all__ = [
     "clear_old_tool_results",
     "compact_tool_results_if_needed",
     "is_compactable_tool",
+    "micro_compact_trigger",
+    "project_micro_compact",
     "try_micro_compact_middleware",
     "wrap_model_micro_compact",
 ]

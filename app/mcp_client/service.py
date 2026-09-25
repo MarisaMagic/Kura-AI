@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 _BUILTIN_TOOL_NAMES = {
     "search_knowledge_base",
     "search_knowledge_by_image",
-    "search_session_memory",
+    "read_user_memory",
+    "read_session_history",
     "search_session_attachment",
     "read_session_attachment",
     "list_session_attachments_brief",

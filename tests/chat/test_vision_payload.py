@@ -23,6 +23,7 @@ from app.chat.agent_service import (
 )
 from app.chat.message_codec import _prepare_vision_image_bytes, strip_image_urls_after_tools
 from app.chat.vision_caption import _CAPTION_SYSTEM_PROMPT
+from app.settings import settings
 
 
 def _png_bytes(width: int, height: int, color=(20, 80, 180)) -> bytes:
@@ -119,9 +120,16 @@ class TurnContextMergeAndDisciplineTests(unittest.TestCase):
 
     def test_compose_off_has_no_web_discipline(self):
         ua = SimpleNamespace(system_prompt="人设")
-        prompt = _compose_system_prompt(ua, use_web_search=False, use_knowledge_retrieval=False)
+        with mock.patch.object(settings, "CHAT_USE_SESSION_MEMORY", False):
+            prompt = _compose_system_prompt(ua, use_web_search=False, use_knowledge_retrieval=False)
         self.assertEqual(prompt, "人设")
         self.assertNotIn("web_search", prompt)
+
+    def test_compose_includes_long_term_memory_hint(self):
+        ua = SimpleNamespace(system_prompt="人设")
+        with mock.patch.object(settings, "CHAT_USE_SESSION_MEMORY", True):
+            prompt = _compose_system_prompt(ua, use_web_search=False, use_knowledge_retrieval=False)
+        self.assertIn("read_user_memory", prompt)
 
     def test_compose_kb_only_has_kb_discipline(self):
         ua = SimpleNamespace(system_prompt="人设")
@@ -234,7 +242,6 @@ class CaptionPrepareTests(unittest.TestCase):
                 user_id=1,
                 agent_id=2,
                 session_id="s1",
-                user_query_for_memory="图里是什么",
                 use_knowledge_retrieval=False,
                 use_web_search=True,
                 document_filter=None,
@@ -277,7 +284,6 @@ class CaptionPrepareTests(unittest.TestCase):
             use_web_search=True,
             document_filter=None,
             session_attachment_hint="",
-            memory_inject=None,
             mcp_approval_note=None,
             image_caption="长" * 5000,
         )

@@ -713,31 +713,23 @@ async def compact_chat_session(
     from app.chat.agent_service import _sub_llm_config_from_ua
     from app.chat.compact import context_usage_snapshot, manual_compact
     from app.chat.context_budget import estimate_tokens
-    from app.chat.post_turn_job import session_lock
 
     system_prompt = _compose_system_prompt(ua)
 
     def _do_manual_compact() -> dict:
-        # 与后台预压缩/归档共用同一把会话锁：两者都改段链与 metadata，
-        # 并发跑会重复调用 LLM 并互相覆盖状态。
-        with session_lock(user_id, agent_id, sid) as acquired:
-            if not acquired:
-                return {"ok": False, "reason": "locked"}
-            return manual_compact(
-                user_id,
-                agent_id,
-                sid,
-                llm_config=_sub_llm_config_from_ua(ua),
-                context_window=getattr(ua, "context_window", None),
-                system_prompt=system_prompt,
-                system_chars=len(system_prompt),
-                tools_tokens=int(_cached_tools_tokens(agent_id) or 0),
-                instructions=(request.instructions if request else None),
-            )
+        return manual_compact(
+            user_id,
+            agent_id,
+            sid,
+            llm_config=_sub_llm_config_from_ua(ua),
+            context_window=getattr(ua, "context_window", None),
+            system_prompt=system_prompt,
+            system_chars=len(system_prompt),
+            tools_tokens=int(_cached_tools_tokens(agent_id) or 0),
+            instructions=(request.instructions if request else None),
+        )
 
     result = await asyncio.to_thread(_do_manual_compact)
-    if result.get("reason") == "locked":
-        raise HTTPException(status_code=409, detail="该会话正在后台整理记忆中，请稍后重试")
     if result.get("reason") == "empty":
         raise HTTPException(status_code=404, detail="会话不存在")
     snap = await asyncio.to_thread(

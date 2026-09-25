@@ -18,6 +18,8 @@ from app.chat.tool_result_compact import (
     clear_old_tool_results,
     compact_tool_results_if_needed,
     is_compactable_tool,
+    micro_compact_trigger,
+    project_micro_compact,
 )
 from app.settings import settings
 
@@ -54,7 +56,7 @@ class AllowlistTest(unittest.TestCase):
             "web_image_search",
             "read_session_attachment",
             "search_session_attachment",
-            "search_session_memory",
+            "read_user_memory",
             "read_session_history",
         ):
             self.assertTrue(is_compactable_tool(name), name)
@@ -68,6 +70,39 @@ class AllowlistTest(unittest.TestCase):
     def test_mcp_tools_not_in_allowlist(self):
         for name in ("create_issue", "send_email", "context7_resolve-library-id", "playwright_click"):
             self.assertFalse(is_compactable_tool(name))
+
+
+class ProjectMicroCompactTest(unittest.TestCase):
+    """压缩前置投影：与中间件共用同一闸门，供「先清理再决定是否摘要」使用。"""
+
+    def test_below_trigger_zero_change(self):
+        msgs = _conversation([("web_search", 0)] * 3)
+        with mock.patch.object(settings, "CHAT_MICROCOMPACT_ENABLED", True), mock.patch.object(
+            settings, "CHAT_MICROCOMPACT_TRIGGER_RATIO", 0.99
+        ):
+            trigger = micro_compact_trigger(128_000)
+            out, cleared, clipped = project_micro_compact(msgs, context_window=128_000)
+        self.assertGreater(trigger, 0)
+        self.assertIs(out, msgs)
+        self.assertEqual((cleared, clipped), (0, 0))
+
+    def test_over_trigger_clears_old_results(self):
+        msgs = _conversation([("web_search", 0)] * 8, body_chars=3000)
+        with mock.patch.object(settings, "CHAT_MICROCOMPACT_ENABLED", True), mock.patch.object(
+            settings, "CHAT_MICROCOMPACT_TRIGGER_RATIO", 0.05
+        ), mock.patch.object(settings, "CHAT_MICROCOMPACT_KEEP_RECENT", 2):
+            out, cleared, clipped = project_micro_compact(msgs, context_window=128_000)
+        self.assertGreater(cleared, 0)
+        self.assertIsNot(out, msgs)
+        bodies = [str(m.content) for m in out if isinstance(m, ToolMessage)]
+        self.assertEqual(sum(CLEARED_PLACEHOLDER in b for b in bodies), cleared)
+
+    def test_disabled_is_noop(self):
+        msgs = _conversation([("web_search", 0)] * 8, body_chars=3000)
+        with mock.patch.object(settings, "CHAT_MICROCOMPACT_ENABLED", False):
+            out, cleared, clipped = project_micro_compact(msgs, context_window=128_000)
+        self.assertIs(out, msgs)
+        self.assertEqual((cleared, clipped), (0, 0))
 
 
 class ClearOldToolResultsTest(unittest.TestCase):
@@ -333,13 +368,13 @@ class HistoryToolSlotTest(unittest.TestCase):
         from app.chat.tools import (
             reset_tool_call_guards,
             try_acquire_history_tool_slot,
-            try_acquire_memory_tool_slot,
+            try_acquire_user_memory_tool_slot,
         )
 
         reset_tool_call_guards()
-        self.assertTrue(try_acquire_memory_tool_slot())
-        self.assertFalse(try_acquire_memory_tool_slot())
-        # 记忆槽用尽不影响原文翻牌槽
+        self.assertTrue(try_acquire_user_memory_tool_slot())
+        self.assertFalse(try_acquire_user_memory_tool_slot())
+        # 长期记忆槽用尽不影响原文翻牌槽
         self.assertTrue(try_acquire_history_tool_slot(2))
 
     def test_tool_is_registered_with_expected_name(self):
@@ -349,7 +384,7 @@ class HistoryToolSlotTest(unittest.TestCase):
         self.assertEqual(len(tools), 1)
         self.assertEqual(tools[0].name, "read_session_history")
         self.assertIn("逐字原文", tools[0].description)
-        self.assertIn("search_session_memory", tools[0].description)
+        self.assertIn("read_user_memory", tools[0].description)
 
     def test_tool_returns_limit_message_when_slot_exhausted(self):
         from app.chat.history_tool import make_session_history_tools

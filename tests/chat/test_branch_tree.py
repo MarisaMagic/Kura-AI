@@ -1,5 +1,5 @@
 """
-消息树纯逻辑单测：路径解析、版本元信息、turn_key 分组、压缩状态前缀匹配、Milvus 过滤表达式。
+消息树纯逻辑单测：路径解析、版本元信息、turn_key 分组、压缩状态前缀匹配。
 不依赖 PostgreSQL / Milvus / Redis 连接，仅测试静态/纯函数。
 """
 
@@ -12,7 +12,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.chat.compact import load_compact_states, match_compact_state
 from app.chat.memory_turns import group_turn_pairs, turn_keys_of
-from app.chat.milvus_memory import memory_filter_expr
 from app.chat.storage import ConversationStorage
 
 
@@ -133,21 +132,6 @@ class CompactStateTest(unittest.TestCase):
         # 分支在第二轮分叉：12 不在新路径上
         summary, covered = match_compact_state(states, [10, 20, 21])
         self.assertEqual((summary, covered), ("", 0))
-
-
-class MemoryFilterExprTest(unittest.TestCase):
-    def test_turn_keys_filter(self):
-        expr = memory_filter_expr("u1_a2_s3", turn_keys=[10, 12])
-        self.assertIn('memory_scope == "u1_a2_s3"', expr)
-        self.assertIn("turn_key in [10,12]", expr)
-
-    def test_empty_turn_keys_matches_nothing(self):
-        expr = memory_filter_expr("u1_a2_s3", turn_keys=[])
-        self.assertIn("turn_key in [-1]", expr)
-
-    def test_no_turn_keys_keeps_scope_only(self):
-        expr = memory_filter_expr("u1_a2_s3")
-        self.assertNotIn("turn_key", expr)
 
 
 if __name__ == "__main__":

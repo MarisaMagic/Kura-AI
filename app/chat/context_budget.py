@@ -128,7 +128,7 @@ def estimate_tokens_blind(chars: int) -> int:
 def tools_schema_tokens(tools: list[Any] | None) -> int:
     """实测工具 schema 的 token 占用（取代旧的固定 8000 字符拍脑袋值）。
 
-    序列化失败或 LangChain 版本不兼容时回退到 CHAT_COMPACT_TOOLS_ESTIMATE_CHARS。
+    按 name/description/parameters 序列化后估算；序列化失败时退化为按工具名估算。
     """
     if not tools:
         return 0
@@ -190,7 +190,6 @@ class ContextBudget:
     summary_reserve: int
     buffer: int
     keep_tokens: int
-    soft_ratio: float
 
     @property
     def effective(self) -> int:
@@ -199,13 +198,8 @@ class ContextBudget:
 
     @property
     def trigger(self) -> int:
-        """硬触发点：超过就必须压缩（对齐 Claude Code 的 window-20k-13k 双层缓冲）。"""
+        """触发点：超过就必须压缩（对齐 Claude Code 的 window-20k-13k 双层缓冲）。"""
         return max(self.keep_tokens + 1, self.effective - self.buffer)
-
-    @property
-    def soft_trigger(self) -> int:
-        """软触发点：后台预压缩阈值，命中即提前算好摘要，下一轮零延迟。"""
-        return max(self.keep_tokens + 1, int(self.effective * self.soft_ratio))
 
 
 def budget_for(context_window: int | None = None) -> ContextBudget:
@@ -217,13 +211,11 @@ def budget_for(context_window: int | None = None) -> ContextBudget:
     reserve = min(max(1024, _int_setting("CHAT_COMPACT_SUMMARY_RESERVE_TOKENS", 8000)), window // 4)
     buffer = min(max(512, _int_setting("CHAT_COMPACT_BUFFER_TOKENS", 6000)), window // 4)
     keep = max(512, _int_setting("CHAT_COMPACT_KEEP_TOKENS", 8000))
-    ratio = min(max(0.1, _float_setting("CHAT_COMPACT_PRECOMPACT_RATIO", 0.6)), 0.95)
     return ContextBudget(
         window=window,
         summary_reserve=reserve,
         buffer=buffer,
         keep_tokens=min(keep, max(512, window // 4)),
-        soft_ratio=ratio,
     )
 
 

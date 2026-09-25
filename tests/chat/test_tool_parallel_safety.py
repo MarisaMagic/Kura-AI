@@ -120,7 +120,7 @@ class RagContextMergeTests(_StateTestBase):
         self.assertEqual(len(ctx["web_sources"]), 1)
 
     def test_kb_trace_has_priority_over_memory(self):
-        _set_last_rag_context({"rag_trace": {"tool_name": "search_session_memory"}})
+        _set_last_rag_context({"rag_trace": {"tool_name": "read_user_memory"}})
         _set_last_rag_context(
             {"rag_trace": {"tool_name": "search_knowledge_base"}, "kb_sources": []}
         )
@@ -131,14 +131,14 @@ class RagContextMergeTests(_StateTestBase):
         _set_last_rag_context(
             {"rag_trace": {"tool_name": "search_knowledge_base"}, "kb_sources": [{"index": 1}]}
         )
-        _set_last_rag_context({"rag_trace": {"tool_name": "search_session_memory"}})
+        _set_last_rag_context({"rag_trace": {"tool_name": "read_user_memory"}})
         ctx = get_last_rag_context()
         self.assertEqual(ctx["rag_trace"]["tool_name"], "search_knowledge_base")
 
     def test_memory_trace_fills_when_empty(self):
-        _set_last_rag_context({"rag_trace": {"tool_name": "search_session_memory"}})
+        _set_last_rag_context({"rag_trace": {"tool_name": "read_user_memory"}})
         ctx = get_last_rag_context()
-        self.assertEqual(ctx["rag_trace"]["tool_name"], "search_session_memory")
+        self.assertEqual(ctx["rag_trace"]["tool_name"], "read_user_memory")
 
     def test_concurrent_sources_merge_all(self):
         def writer(i: int):

@@ -131,8 +131,7 @@ class ContextUsageResponse(BaseModel):
 
     window: int = Field(..., description="模型上下文窗口（token）")
     effective: int = Field(..., description="扣除摘要输出预留后的可用窗口")
-    trigger: int = Field(..., description="硬触发点：超过即压缩")
-    soft_trigger: int = Field(..., description="软触发点：超过即后台预压缩")
+    trigger: int = Field(..., description="触发点：超过即压缩")
     used: int = Field(..., description="当前估算占用（已按真实 usage 校准）")
     ratio: float = Field(..., description="used / window")
     turn_count: int = Field(..., description="当前路径总轮数")

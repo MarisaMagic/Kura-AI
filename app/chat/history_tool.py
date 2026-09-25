@@ -1,11 +1,8 @@
 """read_session_history：从 PostgreSQL 原文精确翻牌本会话较早的轮次。
 
-为什么需要这个工具（向量库的兜底通道）：
-向量库只存**蒸馏后**的摘要与稳定事实，为了控制体积还会滚动淘汰最旧的段。
-原文始终 append-only 留在 PG 里，所以「精确取证」不该走向量近似检索，
-而应直接按轮次区间/关键词查库——这等价于 Claude Code 压缩后附上的 transcript 文件路径。
-
-有了它，向量库才敢存得少、删得狠。
+压缩只把旧轮次蒸馏成摘要视图，原文始终 append-only 留在 PG 里。
+「精确取证」（逐字代码、表格、用户原话）不该靠摘要猜测，
+而应直接按轮次区间/关键词查库——等价于 Claude Code 压缩后附上的 transcript 文件路径。
 """
 
 from __future__ import annotations
@@ -39,8 +36,8 @@ def _int_setting(name: str, default: int) -> int:
 def read_path_turns(user_id: int, agent_id: int, session_id: str) -> list[dict[str, Any]]:
     """把当前路径的消息记录切成轮次列表。
 
-    轮次下标与记忆归档/压缩使用的 turn_index 同一套编号（按路径顺序从 0 起），
-    因此 search_session_memory 报出的「轮次 N」可以直接拿来这里翻原文。
+    轮次下标与压缩摘要使用的 turn_index 同一套编号（按路径顺序从 0 起），
+    因此摘要里标注的「轮次 N」可以直接拿来这里翻原文。
     :return: [{"turn_index", "turn_key", "user", "assistant", "error"}]
     """
     records = storage.get_session_messages(user_id, agent_id, session_id)
@@ -175,15 +172,14 @@ def make_session_history_tools(user_id: int, agent_id: int, session_id: str) -> 
         StructuredTool.from_function(
             name="read_session_history",
             description=(
-                "按轮次区间或关键词，从数据库读取**本会话较早轮次的逐字原文**。"
-                "与 search_session_memory 的分工：后者是向量召回的蒸馏摘要（模糊、可能不全），"
-                "本工具是精确取证（逐字、可靠）。"
-                "何时使用：（1）search_session_memory 返回的摘要不够具体，需要原文里的代码、数字、表格、原话；"
+                "按轮次区间或关键词，从数据库读取**本会话较早轮次的逐字原文**（精确、可靠）。"
+                "何时使用：（1）对话摘要不够具体，需要原文里的代码、数字、表格、用户原话；"
                 "（2）摘要中标注了轮次编号，需要展开该轮完整内容；"
                 "（3）用户要求「把我之前发的那段原文再贴一次」。"
-                "轮次下标从 0 起，与 search_session_memory 报出的「轮次 N」同一套编号。"
+                "轮次下标从 0 起，与压缩摘要中「覆盖轮次」的编号同一套。"
                 "参数：from_turn/to_turn 为闭区间轮次下标（都留空表示全部）；keyword 非空时改为关键词命中模式。"
                 "约束：同一用户提问轮次内最多成功调用 2 次；取得原文后请直接作答，不要反复翻阅。"
+                "跨会话的用户偏好/约束不在本工具范围，请用 read_user_memory。"
             ),
             func=_read_session_history,
         )

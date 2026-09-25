@@ -114,6 +114,12 @@ _KB_ANSWER_DISCIPLINE = (
     "注意区分知识库中的结论与你的一般常识推断，后者不得冒充知识库内容。"
 )
 
+_LONG_TERM_MEMORY_HINT = (
+    "长期记忆：你可以按需调用 read_user_memory 读取该用户**跨会话**的稳定偏好与硬约束；"
+    "当用户要求个性化、或任务可能受其既有偏好/约束影响（语言、格式、技术栈、称呼等）时，先读取再作答。"
+    "本会话较早的对话与逐字原文请用 read_session_history，不要臆造。"
+)
+
 
 def _format_kb_scope_for_turn(document_filter: list[str] | None) -> str:
     """本回合选档范围（写入最后一条 Human，不进 system）。"""
@@ -136,7 +142,6 @@ def _format_turn_context_block(
     use_web_search: bool,
     document_filter: list[str] | None,
     session_attachment_hint: str,
-    memory_inject: str | None,
     mcp_approval_note: str | None,
     image_caption: str | None = None,
 ) -> str:
@@ -177,12 +182,6 @@ def _format_turn_context_block(
                 "若需搜图，web_image_search 的 query 须用上文专名（可加立绘/Q版/手办等风格词），"
                 "不要用「这张图」「这个人物」「类似图片」。"
             )
-    if (memory_inject or "").strip():
-        parts.append(
-            "【本回合根据用户最新输入自动检索的较早会话摘录（仅供参考；"
-            "若仍不足可再调用 search_session_memory 工具）】\n\n"
-            + memory_inject.strip()
-        )
     if (mcp_approval_note or "").strip():
         parts.append(mcp_approval_note.strip())
     return "\n\n".join(parts)
@@ -226,5 +225,7 @@ def _compose_system_prompt(
     if use_knowledge_retrieval:
         parts.append(_KB_IMAGE_DISCIPLINE)
         parts.append(_KB_ANSWER_DISCIPLINE)
+    if getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
+        parts.append(_LONG_TERM_MEMORY_HINT)
     return "\n\n".join(parts)
 

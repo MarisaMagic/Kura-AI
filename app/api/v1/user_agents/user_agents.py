@@ -309,12 +309,12 @@ async def delete_user_agent(agent_id: int = Query(..., description="智能体 ID
     except Exception:
         pass
     try:
-        # 智能体删除后，属主与共享用户在该智能体下的跨会话长期记忆都成了孤儿数据
-        from app.chat.memory_archive import purge_all_user_memory_for_agent
+        # 智能体删除后，所有用户在该智能体下的跨会话长期记忆都成了孤儿数据
+        from app.chat.user_memory import purge_user_memory_for_agent
 
-        await asyncio.to_thread(purge_all_user_memory_for_agent, aid)
+        await asyncio.to_thread(purge_user_memory_for_agent, aid)
     except Exception:
-        logger.exception("purge_all_user_memory_for_agent agent_id=%s", aid)
+        logger.exception("purge_user_memory_for_agent agent_id=%s", aid)
     return Success(msg="删除成功")
 
 

@@ -8,7 +8,8 @@
   其中「All user messages」是枚举而非概括，「Current Work」要求最细颗粒度；
 - 存储形态：**分段**摘要落 mg_chat_compact_segments，各段保真度独立，
   段数/总 token 超限时由同一次 LLM 调用把旧链归并为 level+1 的粗粒度段（向量数收敛 O(log n)）；
-- 执行时机：后台预压缩（软阈值）为主，请求内同步压缩（硬阈值）仅兜底；
+- 执行时机：**请求内同步压缩**——达到触发点即当场摘要落段；压缩过程通过 emit_rag_step
+  向前端流式提示「正在进行上下文压缩」，用户可见；
 - 失败处理：连续失败 N 次熔断，降级为硬截断，不再反复烧钱。
 
 原文消息行永不改写，压缩只影响送给模型的视图。
@@ -73,8 +74,8 @@ _SUMMARY_SECTIONS = """1. Primary Request and Intent（用户请求与意图）�
 8. Current Work（当前工作）：用**最细颗粒度**描述中断前正在做什么。反例：「正在调试」；正例：「正在调试登录模块的 token 刷新逻辑，已定位到 cookie 过期判断有误，准备修改 auth.ts 的 refreshToken 函数」。
 9. Optional Next Step（下一步）：与 Current Work 直接衔接的下一步。若任务已收尾则写「无」。"""
 
-_FACTS_INSTRUCTION = """另外，在 </summary> 之后追加一个 <facts> 块，输出 JSON 数组，抽取值得跨会话长期记住的稳定信息：
-- 类型只能是 preference（用户偏好）/ decision（已定方案）/ entity（关键实体）/ constraint（硬约束）之一；
+_FACTS_INSTRUCTION = """另外，在 </summary> 之后追加一个 <facts> 块，输出 JSON 数组，抽取值得跨会话长期记住的**用户稳定偏好与硬约束**：
+- 类型只能是 preference（用户偏好）/ constraint（硬约束）之一；已定方案与关键实体不必输出（摘要正文已覆盖）；
 - 每项形如 {"type":"preference","subject":"回答语言","content":"始终用中文","why":"用户明确要求","how_to_apply":"生成回答时默认中文"}；
 - 相对时间必须转为绝对日期（「周四前」→「2026-03-05 前」）；
 - 不要记录：能从当前对话/知识库/系统提示词推导出的内容、临时任务状态、一次性调试细节；
@@ -557,10 +558,10 @@ def _summarizer_input_max_tokens() -> int:
 
 
 def _facts_enabled() -> bool:
-    """是否让摘要器顺带抽取长期事实（与摘要共用同一次调用，几乎零额外成本）。"""
+    """是否让摘要器顺带抽取跨会话用户偏好/约束（与摘要共用同一次调用，几乎零额外成本）。"""
     if not getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
         return False
-    v = getattr(settings, "CHAT_MEMORY_FACTUAL_ENABLED", True)
+    v = getattr(settings, "CHAT_USER_MEMORY_ENABLED", True)
     return True if v is None else bool(v)
 
 
@@ -732,6 +733,13 @@ def attempt_compaction(
     if instructions:
         dropped_text = f"【用户对本次压缩的额外要求】{instructions.strip()}\n\n{dropped_text}"
 
+    # 同步压缩会阻塞本轮首 token，先向前端发一条「进行中」状态，让用户知道在等什么。
+    emit_rag_step(
+        "⏳",
+        "正在进行上下文压缩",
+        f"正在摘要较早的 {new_keep - keep_from} 轮对话，请稍候…",
+    )
+
     out = run_summarizer(
         old_summary=old_summary,
         dropped_text=dropped_text,
@@ -758,22 +766,16 @@ def attempt_compaction(
 
     summary, facts = out
     if facts:
-        # 与摘要共用同一次 LLM 调用，抽取稳定事实几乎零额外成本
+        # 与摘要共用同一次 LLM 调用，抽取用户偏好/约束写入 PG 长期记忆，几乎零额外成本
         try:
-            from app.chat.memory_archive import store_facts
+            from app.chat.user_memory import store_user_facts
 
-            stored = store_facts(
-                user_id,
-                agent_id,
-                session_id,
-                facts,
-                turn_key=int(turn_keys[max(0, new_keep - 1)]),
-                turn_index=max(0, new_keep - 1),
-            )
-            if stored.get("inserted"):
-                emit_rag_step("🧠", "长期记忆更新", f"已记住 {stored['inserted']} 条稳定事实/偏好")
+            stored = store_user_facts(user_id, agent_id, facts, session_id=session_id)
+            changed = int(stored.get("inserted") or 0) + int(stored.get("updated") or 0)
+            if changed:
+                emit_rag_step("🧠", "长期记忆更新", f"已记住 {changed} 条用户偏好/约束")
         except Exception:  # noqa: BLE001
-            logger.exception("store_facts failed")
+            logger.exception("store_user_facts failed")
     new_chain, seg_id = _persist_segment(
         session_ref_id=session_ref_id,
         chain=chain,
@@ -870,10 +872,13 @@ def build_compacted_model_messages(
 ) -> list[BaseMessage]:
     """构建送给主模型的压缩视图（不修改 storage 中的原文）。
 
-    命中软阈值时通常已由后台预压缩写好段，这里只读；仅在超硬阈值且无可用段时才现场摘要。
-    :param budget_out: 可选出参字典，回写本轮预算/估算/校准，供落库后做 usage 校准与预压缩。
+    流程：先用 micro-compact 零成本投影清理旧工具结果，再据此重新估算；
+    仍超过触发点才做同步摘要（摘要器只看到占位符，输入更小、质量更高）。
+    :param budget_out: 可选出参字典，回写本轮预算/估算/校准，供落库后做 usage 校准。
     """
     from app.chat.storage import storage
+    from app.chat.tool_result_compact import project_micro_compact
+    from app.chat.tools import emit_rag_step
 
     prefix, body = split_system_prefix(messages)
     turns = group_turns(body)
@@ -894,6 +899,21 @@ def build_compacted_model_messages(
         meta=meta, session_ref_id=session_ref_id, turn_keys=turn_keys, turn_count=len(turns)
     )
     summary_text = render_summary_block(chain, legacy_summary=legacy_summary)
+
+    # micro-compact 前置：超轮内阈值先用零成本投影清理旧工具结果，再据此估算。
+    # 否则「清一下就够了」的场景也会触发一次 3-8s 的同步 LLM 摘要。
+    projected, mc_cleared, mc_clipped = project_micro_compact(
+        prefix + body, context_window=context_window
+    )
+    if mc_cleared or mc_clipped:
+        prefix, body = split_system_prefix(projected)
+        turns = group_turns(body)
+        emit_rag_step(
+            "🧹",
+            "轮内上下文清理",
+            f"压缩预处理：已清理 {mc_cleared} 条旧工具结果，裁剪 {mc_clipped} 条超长结果",
+        )
+
     verbatim = [m for t in turns[keep_from:] for m in t]
     estimated = estimate_prompt_tokens(
         system_prompt=system_prompt,
@@ -910,7 +930,6 @@ def build_compacted_model_messages(
                 "window": budget.window,
                 "effective": budget.effective,
                 "trigger": budget.trigger,
-                "soft_trigger": budget.soft_trigger,
                 "estimated": estimated,
                 "factor": factor,
                 "model_name": model_name,
@@ -922,6 +941,7 @@ def build_compacted_model_messages(
                 "system_chars": system_chars,
                 "tools_tokens": tools_tokens,
                 "turn_keys": turn_keys,
+                "microcompacted": {"cleared": mc_cleared, "clipped": mc_clipped},
                 "degraded": is_breaker_tripped(meta),
             }
         )
@@ -978,92 +998,8 @@ def _turn_keys_of(messages: list[BaseMessage], path_ids: list[int] | None) -> li
 
 
 # ---------------------------------------------------------------------------
-# 后台预压缩 / 观测
+# 观测
 # ---------------------------------------------------------------------------
-
-
-def precompute_compaction(
-    user_id: int,
-    agent_id: int,
-    session_id: str,
-    *,
-    llm_config: dict[str, Any],
-    context_window: Any = None,
-    system_prompt: str = "",
-    system_chars: int = 0,
-    tools_tokens: int = 0,
-) -> dict[str, Any]:
-    """后台预压缩：超软阈值就提前把摘要算好落库，下一轮请求零额外延迟。
-
-    与请求内同步压缩共用 attempt_compaction，幂等（段按 turn_key 区间唯一）。
-    :return: 与 attempt_compaction 相同结构；未触发时 reason 说明原因
-    """
-    from app.chat.storage import storage
-
-    if not getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
-        return {"ok": False, "reason": "disabled"}
-    if not getattr(settings, "CHAT_COMPACT_ENABLED", True):
-        return {"ok": False, "reason": "disabled"}
-    if not getattr(settings, "CHAT_COMPACT_PRECOMPUTE", True):
-        return {"ok": False, "reason": "precompute_disabled"}
-    # 没有打杂模型 Key 就不要空跑：既省一次无用的库查询，也避免被误记为压缩失败
-    if not ((llm_config or {}).get("api_key") or "").strip():
-        return {"ok": False, "reason": "no_api_key"}
-
-    pairs = storage.load_path_with_ids(user_id, agent_id, session_id)
-    if not pairs:
-        return {"ok": False, "reason": "empty"}
-    msgs = [m for _, m in pairs]
-    ids = [i for i, _ in pairs]
-    prefix, body = split_system_prefix(msgs)
-    turns = group_turns(body)
-    turn_keys = _turn_keys_of(msgs, ids)
-    if not turns or not turn_keys:
-        return {"ok": False, "reason": "no_turn_keys"}
-
-    budget = _budget_of(context_window)
-    model_name = str(llm_config.get("model_name") or "")
-    meta, session_ref_id = storage.get_session_meta_and_ref(user_id, agent_id, session_id)
-    factor = factor_of(meta.get(_META_CALIB), model_name)
-    chain, legacy_summary, keep_from = _resolve_state(
-        meta=meta, session_ref_id=session_ref_id, turn_keys=turn_keys, turn_count=len(turns)
-    )
-    summary_text = render_summary_block(chain, legacy_summary=legacy_summary)
-    estimated = estimate_prompt_tokens(
-        system_prompt=system_prompt,
-        system_chars=system_chars,
-        tools_tokens=tools_tokens,
-        summary_text=summary_text,
-        verbatim=prefix + [m for t in turns[keep_from:] for m in t],
-        factor=factor,
-    )
-    if estimated < budget.soft_trigger:
-        return {"ok": False, "reason": "below_soft_trigger", "estimated": estimated}
-    if keep_from >= len(turns) - 1:
-        return {"ok": False, "reason": "nothing_to_drop", "estimated": estimated}
-    if is_breaker_tripped(meta):
-        return {"ok": False, "reason": "breaker_tripped", "estimated": estimated}
-
-    return attempt_compaction(
-        user_id=user_id,
-        agent_id=agent_id,
-        session_id=session_id,
-        turns=turns,
-        turn_keys=turn_keys,
-        chain=chain,
-        legacy_summary=legacy_summary,
-        keep_from=keep_from,
-        budget=budget,
-        factor=factor,
-        llm_config=llm_config,
-        meta=meta,
-        session_ref_id=session_ref_id,
-        system_prompt=system_prompt,
-        system_chars=system_chars,
-        tools_tokens=tools_tokens,
-        estimated=estimated,
-        auto=True,
-    )
 
 
 def record_usage_calibration(
@@ -1226,7 +1162,6 @@ def context_usage_snapshot(
         "window": budget.window,
         "effective": budget.effective,
         "trigger": budget.trigger,
-        "soft_trigger": budget.soft_trigger,
         "keep_tokens": budget.keep_tokens,
         "used": estimated,
         "ratio": round(min(1.5, estimated / budget.window), 4) if budget.window else 0.0,

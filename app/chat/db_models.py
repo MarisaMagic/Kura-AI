@@ -308,37 +308,12 @@ class ChatSession(Base):
     path_message_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
-    memory_cursor = relationship(
-        "ChatMemoryCursor",
-        back_populates="session",
-        uselist=False,
-        cascade="all, delete-orphan",
-        passive_deletes=True,
-    )
     compact_segments = relationship(
         "ChatCompactSegment",
         back_populates="session",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
-
-
-class ChatMemoryCursor(Base):
-    """
-    会话记忆归档水位线：已成功写入 Milvus 的最后一轮 turn 索引（从 0 起）。
-    与 mg_chat_sessions 一对一，随会话删除级联删除。
-    """
-
-    __tablename__ = "mg_chat_memory_cursor"
-
-    session_ref_id: Mapped[int] = mapped_column(
-        ForeignKey("mg_chat_sessions.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    last_archived_turn_index: Mapped[int] = mapped_column(Integer, nullable=False, default=-1)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-
-    session: Mapped[ChatSession] = relationship("ChatSession", back_populates="memory_cursor")
 
 
 class ChatMessage(Base):
@@ -423,6 +398,39 @@ class ChatCompactSegment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     session = relationship("ChatSession", back_populates="compact_segments")
+
+
+class ChatUserMemory(Base):
+    """
+    跨会话用户长期记忆：只存稳定的**偏好/约束**（从压缩摘要同一次 LLM 调用顺带抽出）。
+
+    刻意不存会话级记忆（决策/实体）——那类信息已由分段摘要覆盖，模型可用
+    read_session_history 翻原文精确取证。因此本表无 Milvus/embedding 依赖，
+    模型通过 read_user_memory 工具按需读取。
+
+    :param fact_key: 槽位键 = hash(type|归一化 subject)；同槽位更新覆盖而非堆积
+    :param content_hash: 同槽位内容指纹，未变化则跳过写入
+    """
+
+    __tablename__ = "mg_chat_user_memories"
+    __table_args__ = (
+        UniqueConstraint("user_id", "agent_id", "fact_key", name="uq_mg_user_mem_slot"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    agent_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    fact_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    fact_type: Mapped[str] = mapped_column(String(20), nullable=False, default="preference")
+    subject: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    why: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    how_to_apply: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    content_hash: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
 
 
 class ChatAttachment(Base):

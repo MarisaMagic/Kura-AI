@@ -420,7 +420,6 @@ class ImageDedupeTests(unittest.TestCase):
             use_web_search=True,
             document_filter=None,
             session_attachment_hint="",
-            memory_inject=None,
             mcp_approval_note=None,
             image_caption="角色：Alice Margatroid。外观标签：金发、红色发带。",
         )
@@ -436,7 +435,6 @@ class ImageDedupeTests(unittest.TestCase):
             use_web_search=False,
             document_filter=None,
             session_attachment_hint="",
-            memory_inject=None,
             mcp_approval_note=None,
             image_caption="角色：Alice Margatroid。",
         )

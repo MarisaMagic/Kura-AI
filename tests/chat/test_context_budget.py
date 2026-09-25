@@ -103,12 +103,6 @@ class BudgetTest(unittest.TestCase):
     def test_keep_tokens_much_smaller_than_trigger(self):
         b = budget_for(128_000)
         self.assertLess(b.keep_tokens, b.trigger)
-        self.assertLess(b.soft_trigger, b.trigger)
-
-    def test_soft_trigger_is_ratio_of_effective(self):
-        with mock.patch.object(settings, "CHAT_COMPACT_PRECOMPACT_RATIO", 0.6):
-            b = budget_for(100_000)
-            self.assertEqual(b.soft_trigger, int(b.effective * 0.6))
 
     def test_small_window_clamps_reserve_and_buffer(self):
         """小窗口模型下预留/缓冲被压到窗口的 1/4 以内，避免 trigger 变负。"""

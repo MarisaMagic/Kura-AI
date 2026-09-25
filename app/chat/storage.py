@@ -749,14 +749,6 @@ class ConversationStorage:
             if not session:
                 return False
 
-            # 删除 Milvus 中本会话的记忆向量（PG 会话行删除后无法再查 session_id）
-            try:
-                from app.chat.memory_archive import purge_session_memory_vectors
-
-                purge_session_memory_vectors(user_id, agent_id, session_id)
-            except Exception:
-                pass
-
             try:
                 from app.chat.attachment_service import purge_attachments_for_session
 
@@ -764,7 +756,7 @@ class ConversationStorage:
             except Exception:
                 pass
 
-            # 删除会话（级联删除消息与 mg_chat_memory_cursor）
+            # 删除会话（级联删除消息与分段摘要）
             db.delete(session)
             # 提交事务到数据库
             db.commit()
@@ -779,11 +771,10 @@ class ConversationStorage:
 
     def purge_chat_data_for_agent(self, user_id: int, agent_id: int) -> int:
         """
-        删除某用户某智能体下全部会话、消息、记忆向量、附件与相关 Redis 缓存。
+        删除某用户某智能体下全部会话、消息、附件与相关 Redis 缓存。
         :return: 删除的会话条数
         """
         from app.chat.attachment_service import purge_attachments_for_agent
-        from app.chat.memory_archive import purge_session_memory_vectors
 
         db = SessionLocal()
         session_ids: list[str] = []
@@ -798,10 +789,6 @@ class ConversationStorage:
             )
             session_ids = [s.session_id for s in sessions]
             for s in sessions:
-                try:
-                    purge_session_memory_vectors(user_id, agent_id, s.session_id)
-                except Exception:
-                    pass
                 db.delete(s)
             db.commit()
         finally:
@@ -887,7 +874,7 @@ class ConversationStorage:
     def mutate_session_metadata(self, user_id: int, agent_id: int, session_id: str, mutate) -> dict:
         """在会话行锁内做 read-modify-write，杜绝「先读后写」的并发丢更新。
 
-        后台归档线程与请求线程可能同时改同一个键（如 memory_archived_turn_keys）；
+        请求线程与其它写入方可能同时改同一个键（如压缩熔断计数、校准系数）；
         patch_session_metadata 只在键级别原子，值仍需调用方自己合并，故提供本方法。
 
         :param mutate: callable(meta: dict) -> dict | None，返回要合并的 patch；返回 None/空则不写
@@ -923,8 +910,7 @@ class ConversationStorage:
 
         注意：本方法只在**键级别**原子（行锁内 update），patch 的值是调用方算好的。
         若值来自「先 get_session_metadata 读一遍再改」，两个并发写入者仍会互相覆盖
-        （历史 bug：后台归档线程与请求线程同时改 memory_archived_turn_keys，
-        丢更新导致同一轮被重复嵌入，Milvus 里出现重复行）。
+        （历史 bug：并发写入同一键导致丢更新）。
         凡是 read-modify-write 一律用 mutate_session_metadata。
         """
         from sqlalchemy.orm.attributes import flag_modified

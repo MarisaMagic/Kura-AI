@@ -263,8 +263,8 @@ def try_acquire_knowledge_tool_slot() -> bool:
         return True
 
 
-def try_acquire_memory_tool_slot() -> bool:
-    """同一轮对话仅允许一次会话记忆检索；成功占用返回 True。"""
+def try_acquire_user_memory_tool_slot() -> bool:
+    """同一轮对话仅允许一次用户长期记忆读取（read_user_memory）；成功占用返回 True。"""
     state = _state()
     with state._lock:
         if state.memory_calls >= 1:
@@ -276,7 +276,7 @@ def try_acquire_memory_tool_slot() -> bool:
 def try_acquire_history_tool_slot(limit: int = 2) -> bool:
     """同一轮对话允许有限次原文翻牌（read_session_history）；成功占用返回 True。
 
-    与记忆检索各自独立计槽：向量召回负责模糊语义，原文翻牌负责精确取证，两者互补。
+    与用户长期记忆读取各自独立计槽：长期记忆管跨会话偏好，原文翻牌管本会话精确取证。
     """
     state = _state()
     n = max(1, int(limit or 1))

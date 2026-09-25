@@ -23,9 +23,8 @@ from langchain_core.messages import (
 from app.chat.attachment_service import build_storable_human_content, format_attachment_hint
 from app.chat.attachment_tools import make_session_attachment_tools
 from app.chat.history_tool import make_session_history_tools
-from app.chat.memory_tool import make_search_session_memory_tool
 from app.chat.memory_turns import apply_sliding_window_turns
-from app.chat.post_turn_job import schedule_post_turn
+from app.chat.user_memory_tool import make_read_user_memory_tool
 from app.chat.message_codec import (
     expand_messages_for_model,
     msg_content_to_str,
@@ -200,7 +199,6 @@ def _prepare_to_invoke_messages(
     user_id: int,
     agent_id: int,
     session_id: str,
-    user_query_for_memory: str,
     *,
     use_knowledge_retrieval: bool,
     use_web_search: bool,
@@ -209,23 +207,18 @@ def _prepare_to_invoke_messages(
     mcp_approval_note: str | None = None,
     path_ids: list[int] | None = None,
     image_caption: str | None = None,
-    memory_inject_prefetched: str | None = None,
-    skip_memory_retrieve: bool = False,
     tools_tokens: int = 0,
     budget_out: dict[str, Any] | None = None,
 ) -> list:
     """
-    压缩或滑动窗口 → 可选会话记忆预检索 → 展开多模态（仅本轮 Human 带图）→ 本轮上下文并入最后一条 Human。
+    压缩或滑动窗口 → 展开多模态（仅本轮 Human 带图）→ 本轮上下文并入最后一条 Human。
     path_ids 为 messages 对应的存储行 id（等长），供压缩与记忆按分支定位。
     image_caption 非空时（两阶段读图）：不再展开图片，描述随本轮上下文注入，agent 全程纯文本。
     :param tools_tokens: 本轮绑定工具 schema 的实测 token 数（由 build_model_and_agent 回写）
-    :param budget_out: 可选出参，回写本轮 token 预算/估算/校准，供落库后做 usage 校准与后台预压缩
+    :param budget_out: 可选出参，回写本轮 token 预算/估算/校准，供落库后做 usage 校准
     """
     from app.chat.compact import build_compacted_model_messages
     from app.chat.context_budget import resolve_window
-    from app.chat.memory_search import proactive_session_memory_inject_text
-    from app.chat.memory_turns import turn_keys_of
-    from app.chat.tools import emit_rag_step
 
     llm_cfg = _sub_llm_config_from_ua(ua)
     system_prompt = _compose_system_prompt(
@@ -249,19 +242,6 @@ def _prepare_to_invoke_messages(
         )
     else:
         viewed = apply_sliding_window_turns(messages)
-    if skip_memory_retrieve:
-        inj = memory_inject_prefetched
-    else:
-        inj = proactive_session_memory_inject_text(
-            (user_query_for_memory or "").strip(),
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-            llm_config=llm_cfg,
-            path_turn_keys=turn_keys_of(messages, path_ids) or None,
-        )
-    if inj:
-        emit_rag_step("📌", "会话记忆预注入", "已附加较早轮次摘录")
     has_caption = bool((image_caption or "").strip())
     expanded = expand_messages_for_model(
         viewed,
@@ -276,7 +256,6 @@ def _prepare_to_invoke_messages(
         use_web_search=use_web_search,
         document_filter=document_filter,
         session_attachment_hint=session_attachment_hint,
-        memory_inject=inj,
         mcp_approval_note=mcp_approval_note,
         image_caption=image_caption,
     )
@@ -339,7 +318,7 @@ def build_model_and_agent(
     )
     tools.append(make_search_knowledge_by_image_tool(kb_scope, user_id, agent_id, session_id))
     if getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
-        tools.append(make_search_session_memory_tool(user_id, agent_id, session_id, llm_config))
+        tools.append(make_read_user_memory_tool(user_id, agent_id))
         tools.extend(make_session_history_tools(user_id, agent_id, session_id))
     if extra_tools:
         tools.extend(extra_tools)
@@ -455,6 +434,31 @@ def _extract_usage_metadata(result: Any) -> Any:
         if usage:
             return usage
     return None
+
+
+def _calibrate_token_estimate(
+    user_id: int,
+    agent_id: int,
+    session_id: str,
+    *,
+    usage: Any,
+    estimated: int,
+    model_name: str,
+) -> None:
+    """用本轮真实 usage 校准 token 估算系数（同步小写入）。
+
+    长期记忆由压缩摘要同一次 LLM 调用顺带抽取并落 PG，这里不再做归档。
+    """
+    from app.chat.compact import record_usage_calibration
+
+    record_usage_calibration(
+        user_id,
+        agent_id,
+        session_id,
+        usage=usage,
+        estimated=int(estimated or 0),
+        model_name=str(model_name or ""),
+    )
 
 
 def chat_with_agent_sync(
@@ -601,7 +605,6 @@ def chat_with_agent_sync(
         user_id,
         agent_id,
         session_id,
-        (user_text or "").strip(),
         use_knowledge_retrieval=use_knowledge_retrieval,
         use_web_search=use_web_search,
         document_filter=retrieval_filter if use_knowledge_retrieval else None,
@@ -669,18 +672,11 @@ def chat_with_agent_sync(
         ],
     )
 
-    # 落库后收尾：token 校准 → 后台预压缩 → 记忆归档（按配置走线程或 Redis 队列）
-    schedule_post_turn(
+    # 落库后收尾：用真实 usage 同步校准 token 估算系数（长期记忆由摘要调用顺带写入）
+    _calibrate_token_estimate(
         user_id,
         agent_id,
         session_id,
-        llm_config=_sub_llm_config_from_ua(ua),
-        context_window=getattr(ua, "context_window", None),
-        system_prompt=str(budget_info.get("system_prompt") or ""),
-        system_chars=int(agent_metrics.get("system_chars") or 0),
-        tools_tokens=int(agent_metrics.get("tools_tokens") or 0),
-        use_knowledge_retrieval=use_knowledge_retrieval,
-        use_web_search=use_web_search,
         usage=_extract_usage_metadata(result),
         estimated=int(budget_info.get("estimated") or 0),
         model_name=str(budget_info.get("model_name") or ua.model_name or ""),
@@ -809,7 +805,6 @@ async def iter_chat_stream_events(
 
     kb_preselect_meta: dict[str, Any] = {}
     retrieval_filter: list[str] | None = None
-    memory_inject_prefetched: str | None = None
 
     async def _prefetch_kb():
         if not use_knowledge_retrieval:
@@ -825,27 +820,7 @@ async def iter_chat_stream_events(
             )
         )
 
-    async def _prefetch_memory():
-        from app.chat.memory_search import proactive_session_memory_inject_text
-
-        if not getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
-            return None
-        if not getattr(settings, "CHAT_MEMORY_PROACTIVE_INJECT", True):
-            return None
-        llm_cfg = _sub_llm_config_from_ua(ua)
-        return await asyncio.to_thread(
-            proactive_session_memory_inject_text,
-            preselect_query,
-            user_id=user_id,
-            agent_id=agent_id,
-            session_id=session_id,
-            llm_config=llm_cfg,
-        )
-
-    (retrieval_filter, kb_preselect_meta), memory_inject_prefetched = await asyncio.gather(
-        _prefetch_kb(),
-        _prefetch_memory(),
-    )
+    retrieval_filter, kb_preselect_meta = await _prefetch_kb()
 
     # 加载该智能体已启用的 MCP 工具（单服务失败仅记录，不中断对话）；
     # 共享（非属主）会话跳过加载，避免属主凭据被共享用户对话驱动。
@@ -913,10 +888,6 @@ async def iter_chat_stream_events(
         if len(path_ids) != len(messages):
             path_ids = None
 
-    memory_query = (user_text or "").strip()
-    if regenerate:
-        memory_query = msg_content_to_str(messages[-1].content).strip()
-
     # 先 flush 已排队步骤（MCP 加载结果等），随后的两阶段读图事件直接产出，
     # 保证思考区顺序与实时性（队列事件要到生成阶段才被消费）
     while not output_queue.empty():
@@ -982,28 +953,55 @@ async def iter_chat_stream_events(
                 yield _image_step_event("⚠️", "图片理解失败", "改为直接带图问答")
 
     budget_info: dict[str, Any] = {}
-    to_invoke = await asyncio.to_thread(
-        _prepare_to_invoke_messages,
-        messages,
-        ua,
-        user_id,
-        agent_id,
-        session_id,
-        memory_query,
-        use_knowledge_retrieval=use_knowledge_retrieval,
-        use_web_search=use_web_search,
-        document_filter=retrieval_filter if use_knowledge_retrieval else None,
-        session_attachment_hint=session_attachment_hint,
-        mcp_approval_note=_mcp_approval_note(
-            mcp_approved_pending_id, user_id=user_id, agent_id=agent_id, session_id=session_id
-        ),
-        path_ids=path_ids,
-        image_caption=image_caption,
-        memory_inject_prefetched=memory_inject_prefetched,
-        skip_memory_retrieve=True,
-        tools_tokens=int(agent_metrics.get("tools_tokens") or 0),
-        budget_out=budget_info,
+    # 压缩（含 micro-compact 前置清理）在 _prepare 内同步执行，期间会 emit_rag_step
+    # （如「正在进行上下文压缩」）。放进 task 边等边把队列事件实时 yield，
+    # 避免压缩阻塞首 token 时前端白屏。
+    prep_task = asyncio.create_task(
+        asyncio.to_thread(
+            _prepare_to_invoke_messages,
+            messages,
+            ua,
+            user_id,
+            agent_id,
+            session_id,
+            use_knowledge_retrieval=use_knowledge_retrieval,
+            use_web_search=use_web_search,
+            document_filter=retrieval_filter if use_knowledge_retrieval else None,
+            session_attachment_hint=session_attachment_hint,
+            mcp_approval_note=_mcp_approval_note(
+                mcp_approved_pending_id, user_id=user_id, agent_id=agent_id, session_id=session_id
+            ),
+            path_ids=path_ids,
+            image_caption=image_caption,
+            tools_tokens=int(agent_metrics.get("tools_tokens") or 0),
+            budget_out=budget_info,
+        )
     )
+    try:
+        while not prep_task.done():
+            if cancel_probe is not None and await cancel_probe():
+                prep_task.cancel()
+                get_last_rag_context(clear=True)
+                get_pending_mcp_confirmations(clear=True)
+                set_rag_step_queue(None)
+                yield {"type": "cancelled"}
+                yield {"type": "done", "cancelled": True}
+                return
+            try:
+                event = await asyncio.wait_for(output_queue.get(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+            if event is not None:
+                yield event
+        to_invoke = await prep_task
+    except (asyncio.CancelledError, GeneratorExit):
+        prep_task.cancel()
+        raise
+    # flush 准备阶段剩余步骤（含压缩完成提示「📦 会话压缩」）
+    while not output_queue.empty():
+        event = output_queue.get_nowait()
+        if event is not None:
+            yield event
 
     # 初始化响应内容
     full_response = ""
@@ -1210,18 +1208,12 @@ async def iter_chat_stream_events(
             user_id, agent_id, session_id, [ai_msg], extra_message_data=[ai_extra]
         )
 
-    # 落库后收尾：token 校准 → 后台预压缩 → 记忆归档（按配置走线程或 Redis 队列）
-    schedule_post_turn(
+    # 落库后收尾：用真实 usage 同步校准 token 估算系数（长期记忆由摘要调用顺带写入）
+    await asyncio.to_thread(
+        _calibrate_token_estimate,
         user_id,
         agent_id,
         session_id,
-        llm_config=_sub_llm_config_from_ua(ua),
-        context_window=getattr(ua, "context_window", None),
-        system_prompt=str(budget_info.get("system_prompt") or ""),
-        system_chars=int(agent_metrics.get("system_chars") or 0),
-        tools_tokens=int(agent_metrics.get("tools_tokens") or 0),
-        use_knowledge_retrieval=use_knowledge_retrieval,
-        use_web_search=use_web_search,
         usage=usage_meta,
         estimated=int(budget_info.get("estimated") or 0),
         model_name=str(budget_info.get("model_name") or ua.model_name or ""),
