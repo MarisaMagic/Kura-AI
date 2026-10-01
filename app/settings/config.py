@@ -119,10 +119,14 @@ class Settings(BaseSettings):
     REDIS_CACHE_TTL_SECONDS: int = 300
     # Redis 客户端连接池上限（cache 单例；限流/队列/缓存共用）
     REDIS_MAX_CONNECTIONS: int = 64
-    # 聊天库 SQLAlchemy 连接池（每进程/副本独立，多副本时需按进程数核算 PG max_connections）
-    CHAT_DB_POOL_SIZE: int = 10
-    CHAT_DB_MAX_OVERFLOW: int = 10
+    # 聊天库 SQLAlchemy 连接池（同步，余量供工具/压缩/实验等线程路径；
+    # 对话链路已迁异步池，故同步池缩减。多副本时需按进程数核算 PG max_connections）
+    CHAT_DB_POOL_SIZE: int = 5
+    CHAT_DB_MAX_OVERFLOW: int = 5
     CHAT_DB_POOL_TIMEOUT: float = 10.0
+    # 聊天库异步引擎连接池（对话链路，与同步池独立；Windows Proactor 下自动退化为线程池）
+    CHAT_DB_ASYNC_POOL_SIZE: int = 10
+    CHAT_DB_ASYNC_MAX_OVERFLOW: int = 10
     # 管理端 Tortoise/asyncpg 连接池（每进程独立）
     TORTOISE_DB_POOL_MINSIZE: int = 2
     TORTOISE_DB_POOL_MAXSIZE: int = 10

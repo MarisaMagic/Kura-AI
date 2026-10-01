@@ -11,12 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import func, select
 
-from app.chat.database import SessionLocal
+from app.chat.database import SessionLocal, get_async_session
 from app.chat.db_models import ChatAttachment as ChatAttachmentRow
 from app.core import object_storage as obs
 from app.settings import settings
+from app.utils.async_compat import sync_fallback_fn
 
 # 支持的上传附件类型
 _EXT_KIND = {
@@ -545,3 +546,131 @@ def read_attachment_text(
     assert ext is not None
     text = ext.text
     return text[:max_chars] + ("…\n（已截断）" if len(text) > max_chars else "")
+
+
+# ================================================================
+# P1：异步热路径（对话链路专用；同步路径继续用上方同步实现）
+# Windows Proactor 下自动退化为线程池执行同步实现（async_compat）。
+# 注意：同步版修改需同步检查本区块。
+# ================================================================
+
+
+@sync_fallback_fn(get_attachment_row)
+async def aget_attachment_row(
+    attachment_id: str, *, user_id: int, agent_id: int, session_id: str
+) -> ChatAttachmentRow | None:
+    """异步获取附件行（AsyncSession）。"""
+    adb = get_async_session()
+    try:
+        return (
+            (
+                await adb.execute(
+                    select(ChatAttachmentRow).where(
+                        ChatAttachmentRow.id == attachment_id,
+                        ChatAttachmentRow.user_id == user_id,
+                        ChatAttachmentRow.agent_id == agent_id,
+                        ChatAttachmentRow.session_id == session_id,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+    finally:
+        await adb.close()
+
+
+@sync_fallback_fn(list_session_attachments)
+async def alist_session_attachments(user_id: int, agent_id: int, session_id: str) -> list[dict[str, Any]]:
+    """异步获取会话附件元数据列表。"""
+    adb = get_async_session()
+    try:
+        rows = (
+            (
+                await adb.execute(
+                    select(ChatAttachmentRow)
+                    .where(
+                        ChatAttachmentRow.user_id == user_id,
+                        ChatAttachmentRow.agent_id == agent_id,
+                        ChatAttachmentRow.session_id == session_id,
+                    )
+                    .order_by(ChatAttachmentRow.created_at.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "filename": r.original_filename,
+                "kind": r.kind,
+                "mime": r.mime,
+                "size_bytes": r.size_bytes,
+            }
+            for r in rows
+        ]
+    finally:
+        await adb.close()
+
+
+@sync_fallback_fn(format_attachment_hint)
+async def aformat_attachment_hint(user_id: int, agent_id: int, session_id: str) -> str:
+    """异步版会话附件提示（供对话流式链使用）。"""
+    items = await alist_session_attachments(user_id, agent_id, session_id)
+    if not items:
+        return ""
+    lines = ["本会话中用户已上传的附件（元数据）："]
+    for it in items:
+        lines.append(
+            f"- attachment_id={it['id']} 文件名={it['filename']} 类型={it['kind']} 大小={it['size_bytes']} 字节"
+        )
+    return "\n".join(lines)
+
+
+@sync_fallback_fn(build_storable_human_content)
+async def abuild_storable_human_content(
+    user_text: str,
+    attachment_ids: list[str],
+    *,
+    user_id: int,
+    agent_id: int,
+    session_id: str,
+    supports_vision: bool,
+) -> str | list[dict[str, Any]]:
+    """异步版：构造写入会话历史的 HumanMessage.content（含 image_ref）。"""
+    ids = [x.strip() for x in (attachment_ids or []) if x and str(x).strip()]
+    text = (user_text or "").strip() or "（请根据附件回答问题。）"
+    if not ids:
+        return text
+
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": text}]
+    for aid in ids:
+        row = await aget_attachment_row(aid, user_id=user_id, agent_id=agent_id, session_id=session_id)
+        if not row:
+            raise ValueError(f"附件不存在或无权访问：{aid}")
+        if row.kind == "image":
+            if not supports_vision:
+                raise ValueError(
+                    "当前智能体未启用「多模态视觉」或所用模型不支持图片：无法处理图片附件。"
+                    "请在智能体中开启多模态视觉后重试，或仅上传文本文档/表格。"
+                )
+            blocks.append(
+                {
+                    "type": "image_ref",
+                    "attachment_id": aid,
+                    "mime": row.mime,
+                    "filename": row.original_filename,
+                }
+            )
+        else:
+            blocks.append(
+                {
+                    "type": "file_ref",
+                    "attachment_id": aid,
+                    "filename": row.original_filename,
+                    "kind": row.kind,
+                    "mime": row.mime,
+                }
+            )
+    return blocks

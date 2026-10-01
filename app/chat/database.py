@@ -7,9 +7,18 @@ SQLAlchemy 的模型定义与数据库表结构分离，通过 ORM 映射，可�
 
 from __future__ import annotations
 
+import asyncio
 import os
+import threading
+from typing import Any
 
 from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 from app.settings import settings
@@ -50,6 +59,57 @@ def _make_engine():
 
 engine = _make_engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+
+def _make_async_engine() -> AsyncEngine:
+    """
+    异步引擎（psycopg3 async）：对话链路 DB IO 在事件循环上完成，不再占用默认线程池。
+
+    与同步引擎各自独立配置连接池；多副本部署时两份池均按进程分摊 PG 连接预算。
+    """
+    url = _sqlalchemy_database_url(settings.chat_database_url)
+    return create_async_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=max(2, int(getattr(settings, "CHAT_DB_ASYNC_POOL_SIZE", 10) or 10)),
+        max_overflow=max(0, int(getattr(settings, "CHAT_DB_ASYNC_MAX_OVERFLOW", 10) or 10)),
+        pool_timeout=max(1.0, float(getattr(settings, "CHAT_DB_POOL_TIMEOUT", 10.0) or 10.0)),
+        pool_recycle=1800,
+    )
+
+
+# 按事件循环缓存异步引擎：生产仅 1 个 loop；测试多 asyncio.run 场景各自独立连接池
+# （异步连接与连接池绑定创建它的 loop，跨 loop 复用会报错）。
+_async_engines: "dict[Any, AsyncEngine]" = {}
+_async_engines_lock = threading.Lock()
+_ASYNC_ENGINE_CACHE_MAX = 8
+
+
+def get_async_engine() -> AsyncEngine:
+    """获取当前事件循环的异步引擎（首次调用时创建）。"""
+    loop = asyncio.get_running_loop()
+    with _async_engines_lock:
+        eng = _async_engines.get(loop)
+        if eng is None:
+            eng = _make_async_engine()
+            _async_engines[loop] = eng
+            while len(_async_engines) > _ASYNC_ENGINE_CACHE_MAX:
+                old_loop, _old_eng = next(iter(_async_engines.items()))
+                if old_loop is loop:
+                    break
+                _async_engines.pop(old_loop, None)
+        return eng
+
+
+def get_async_session() -> AsyncSession:
+    """异步会话（须在事件循环内使用；调用方负责 await session.close()）。"""
+    maker = async_sessionmaker(
+        bind=get_async_engine(),
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+    )
+    return maker()
 
 # 创建SQLAlchemy基类, 用于创建聊天数据库模型
 Base = declarative_base()  

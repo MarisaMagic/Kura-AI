@@ -13,10 +13,11 @@ from typing import List, Optional
 from sqlalchemy import select
 from loguru import logger
 
-from app.chat.database import SessionLocal
+from app.chat.database import SessionLocal, get_async_session
 from app.chat.db_models import KbImage
 from app.core import object_storage as obs
 from app.settings import settings
+from app.utils.async_compat import sync_fallback
 
 
 class ImageStore:
@@ -212,6 +213,19 @@ class ImageStore:
             return list(result)
         finally:
             db.close()
+
+    @sync_fallback("get_images_by_chunk_ids")
+    async def aget_images_by_chunk_ids(self, chunk_ids: List[str]) -> List[KbImage]:
+        """异步版（P1：异步检索链使用；Windows Proactor 自动退化为线程池）。"""
+        if not chunk_ids:
+            return []
+        adb = get_async_session()
+        try:
+            stmt = select(KbImage).where(KbImage.chunk_id.in_(chunk_ids))
+            result = await adb.execute(stmt)
+            return list(result.scalars().all())
+        finally:
+            await adb.close()
 
     def get_images_by_page(self, kb_scope: str, page_number: int) -> List[KbImage]:
         """

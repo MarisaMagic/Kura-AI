@@ -12,7 +12,11 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response, StreamingResponse
 
 from app.chat.agent_service import chat_with_agent_stream, chat_with_agent_sync
-from app.chat.attachment_service import file_bytes_for_attachment, get_attachment_row, save_uploaded_file
+from app.chat.attachment_service import (
+    aget_attachment_row,
+    file_bytes_for_attachment,
+    save_uploaded_file,
+)
 from app.chat.chat_job import (
     cancel_active_session_job,
     create_chat_job,
@@ -72,7 +76,7 @@ async def _check_chat_quota(user_id: int, agent_id: int, session_id: str, *, res
     :param reserve: 预计本轮新增消息行数（普通一轮 = 2，重新生成 = 1）
     """
     try:
-        await run_sync(storage.check_chat_quota, user_id, agent_id, session_id, reserve=reserve, timeout=10.0)
+        await storage.acheck_chat_quota(user_id, agent_id, session_id, reserve=reserve)
     except ChatQuotaExceeded as e:
         raise HTTPException(status_code=429, detail=e.detail) from e
 
@@ -155,9 +159,7 @@ async def preview_chat_attachment(
     aid = (attachment_id or "").strip()
     if not aid:
         raise HTTPException(status_code=400, detail="attachment_id 不能为空")
-    row = await run_sync(
-        get_attachment_row, aid, user_id=user_id, agent_id=agent_id, session_id=sid, timeout=10.0
-    )
+    row = await aget_attachment_row(aid, user_id=user_id, agent_id=agent_id, session_id=sid)
     if not row:
         raise HTTPException(status_code=404, detail="附件不存在")
     raw = await run_sync(
@@ -545,7 +547,7 @@ async def list_chat_sessions(
     # 如果limit为None，则返回全量
     if limit is None:
         # 获取会话列表, 通过 PostgreSQL 和 Redis 缓存获取（同步 IO 移出事件循环）
-        items = await run_sync(storage.list_session_infos, user_id, agent_id, timeout=15.0)
+        items = await storage.alist_session_infos(user_id, agent_id)
         # 补全会话列表信息
         enriched = _enrich_session_rows(ua, items)
         # 按更新时间倒序
@@ -558,9 +560,7 @@ async def list_chat_sessions(
         return Success(data=body.model_dump())
 
     # 如果limit不为None，则分页返回会话列表。通过 PostgreSQL 和 Redis 缓存获取
-    items, total = await run_sync(
-        storage.list_session_infos_paginated, user_id, agent_id, limit, offset, timeout=15.0
-    )
+    items, total = await storage.alist_session_infos_paginated(user_id, agent_id, limit, offset)
     # 补全会话列表信息
     enriched = _enrich_session_rows(ua, items)
     # 是否有更多
@@ -595,7 +595,7 @@ async def list_chat_sessions_all(
     # 获取当前用户ID
     user_id = current_user.id
     # 获取会话列表, 通过 PostgreSQL 和 Redis 缓存获取（同步 IO 移出事件循环）
-    items, total = await run_sync(storage.list_session_infos_all_paginated, user_id, limit, offset, timeout=15.0)
+    items, total = await storage.alist_session_infos_all_paginated(user_id, limit, offset)
     # 补全当前用户所有会话列表信息
     enriched = await _enrich_all_user_sessions(items)
     # 是否有更多
@@ -660,7 +660,7 @@ async def get_chat_session_messages(
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     # 获取会话消息（当前路径），通过 PostgreSQL 和 Redis 缓存获取（同步 IO 移出事件循环）
-    raw = await run_sync(storage.get_session_messages, user_id, agent_id, session_id, timeout=15.0)
+    raw = await storage.aget_session_messages(user_id, agent_id, session_id)
     return Success(data=SessionMessagesResponse(messages=_to_message_infos(raw)).model_dump())
 
 
@@ -691,7 +691,7 @@ async def select_chat_branch(
     sid = (session_id or "").strip()
     if await get_running_session_job(user_id, agent_id, sid):
         raise HTTPException(status_code=409, detail="该会话有进行中的生成任务，请等待完成或停止后再切换版本")
-    records = await run_sync(storage.select_branch, user_id, agent_id, sid, request.assistant_message_id, timeout=15.0)
+    records = await storage.aselect_branch(user_id, agent_id, sid, request.assistant_message_id)
     if records is None:
         raise HTTPException(status_code=400, detail="目标回复不存在或不属于当前会话")
     return Success(data=SessionMessagesResponse(messages=_to_message_infos(records)).model_dump())
@@ -823,7 +823,7 @@ async def delete_chat_session(
     """
     user_id = current_user.id
     # 只校验会话属于当前用户（智能体已删除时仍允许清掉侧栏残留）；同步 IO 移出事件循环
-    deleted = await run_sync(storage.delete_session, user_id, agent_id, session_id, timeout=15.0)
+    deleted = await storage.adelete_session(user_id, agent_id, session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="会话不存在")
     # 返回会话删除响应

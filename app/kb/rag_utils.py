@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
+import threading
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Tuple
 
+import httpx
 import requests
 from langchain.chat_models import init_chat_model
 from loguru import logger
@@ -31,6 +34,24 @@ _parent_chunk_store = ParentChunkStore()
 
 # rerank 复用连接池的模块级 Session（替代每次一次性 requests.post）
 _rerank_session = requests.Session()
+
+# 异步 rerank 共享客户端（P0：检索链协程化；模块级复用连接池）
+_rerank_aclient: "httpx.AsyncClient | None" = None
+_rerank_aclient_lock = threading.Lock()
+
+
+def _get_rerank_aclient() -> httpx.AsyncClient:
+    """异步 rerank 客户端（懒加载；须在事件循环内调用）。"""
+    global _rerank_aclient
+    if _rerank_aclient is None:
+        with _rerank_aclient_lock:
+            if _rerank_aclient is None:
+                _rerank_aclient = httpx.AsyncClient(
+                    limits=httpx.Limits(max_connections=16, max_keepalive_connections=8, keepalive_expiry=30.0),
+                    trust_env=False,
+                    follow_redirects=False,
+                )
+    return _rerank_aclient
 
 # 以文检索时 document_filenames 白名单条数上限（与智能体选档方案一致）
 KB_MAX_DOCUMENT_FILTER = 10
@@ -370,6 +391,103 @@ def _auto_merge_documents(docs: List[dict], top_k: int) -> Tuple[List[dict], Dic
     }
 
 
+def _select_rerank_candidates(
+    docs_with_rank: List[dict],
+    image_docs: List[dict],
+    *,
+    include_img: bool,
+    max_candidates: int,
+    image_uris: Dict[str, str],
+) -> Tuple[List[dict], List[dict]]:
+    """
+    组装送排候选（文本 + 可读图片），按向量分截断到单次上限。
+    image_uris：chunk_id → data URI（由调用方以同步/异步方式先行获取）。
+    :return: (candidates, excluded_images)
+    """
+    candidates: List[dict] = list(docs_with_rank)
+    excluded_images: List[dict] = []
+    if include_img:
+        for doc in image_docs:
+            cid = str(doc.get("chunk_id") or "").strip()
+            data_uri = image_uris.get(cid) if cid else None
+            if data_uri:
+                candidates.append({**doc, "_rerank_image_uri": data_uri})
+            else:
+                excluded_images.append(doc)
+    else:
+        excluded_images = list(image_docs)
+    candidates.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+    return candidates[:max_candidates], excluded_images
+
+
+def _build_rerank_payload(rm: str, query: str, candidates: List[dict], return_cap: int) -> dict:
+    """构造 DashScope 多模态 rerank 请求体（文本/图片混排）。"""
+    documents: List[dict] = []
+    for doc in candidates:
+        if doc.get("content_type") == "image":
+            documents.append({"image": doc["_rerank_image_uri"]})
+        else:
+            documents.append({"text": doc.get("text", "") or ""})
+    return {
+        "model": rm,
+        "input": {
+            "query": {"text": query},
+            "documents": documents,
+        },
+        "parameters": {
+            "top_n": min(return_cap, len(candidates)),
+            "return_documents": False,
+        },
+    }
+
+
+def _apply_rerank_response(
+    items: Any,
+    candidates: List[dict],
+    excluded_images: List[dict],
+    *,
+    return_cap: int,
+    meta: Dict[str, Any],
+) -> Tuple[List[dict] | None, Dict[str, Any]]:
+    """
+    解析 rerank 响应：relevance_score 覆盖 score、阈值门控、拼接未参与图片并按 cap 截断。
+    :return: (结果, meta)；无有效重排项时返回 (None, meta)（meta 内标记 error，调用方走向量分兜底）
+    """
+    reranked: List[dict] = []
+    for item in items:
+        idx = item.get("index")
+        if isinstance(idx, int) and 0 <= idx < len(candidates):
+            doc = dict(candidates[idx])
+            doc.pop("_rerank_image_uri", None)
+            sc = item.get("relevance_score")
+            if sc is not None:
+                # relevance_score 覆盖 score，使下游排序/展示统一使用重排分
+                doc["vector_score"] = doc.get("score")
+                doc["rerank_score"] = sc
+                try:
+                    doc["score"] = float(sc)
+                except (TypeError, ValueError):
+                    pass
+            reranked.append(doc)
+    if not reranked:
+        meta["rerank_error"] = "empty_rerank_results"
+        return None, meta
+    # rerank 分数阈值门控（可选）：最高分低于 RERANK_MIN_SCORE 时标记不达标
+    below_min = False
+    min_score = getattr(settings, "RERANK_MIN_SCORE", None)
+    if min_score is not None:
+        try:
+            top = max((float(d.get("rerank_score") or 0.0) for d in reranked), default=0.0)
+            meta["max_rerank_score"] = top
+            below_min = top < float(min_score)
+        except (TypeError, ValueError):
+            meta["max_rerank_score"] = None
+    meta["rerank_below_min"] = below_min
+    # 保持 rerank 返回顺序；未参与重排的图片块按向量分排在末尾
+    excluded_images.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+    return (reranked + excluded_images)[:return_cap], meta
+
+
 def _rerank_documents(
     query: str,
     docs: List[dict],
@@ -434,38 +552,20 @@ def _rerank_documents(
 
     # 组装多模态候选：文本块 +（可选）可读取的图片块；按向量分截断到单次送排上限
     max_candidates = max(1, int(getattr(settings, "RERANK_MAX_CANDIDATES", 30) or 30))
-    candidates: List[dict] = list(docs_with_rank)
-    excluded_images: List[dict] = []
+    image_uris: Dict[str, str] = {}
     if include_img:
         for doc in image_docs:
-            data_uri = _kb_image_data_uri(doc)
-            if data_uri:
-                candidates.append({**doc, "_rerank_image_uri": data_uri})
-            else:
-                excluded_images.append(doc)
-    else:
-        excluded_images = list(image_docs)
-    candidates.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-    candidates = candidates[:max_candidates]
+            cid = str(doc.get("chunk_id") or "").strip()
+            if not cid or cid in image_uris:
+                continue
+            uri = _kb_image_data_uri(doc)
+            if uri:
+                image_uris[cid] = uri
+    candidates, excluded_images = _select_rerank_candidates(
+        docs_with_rank, image_docs, include_img=include_img, max_candidates=max_candidates, image_uris=image_uris
+    )
+    payload = _build_rerank_payload(rm, query, candidates, return_cap)
 
-    documents: List[dict] = []
-    for doc in candidates:
-        if doc.get("content_type") == "image":
-            documents.append({"image": doc["_rerank_image_uri"]})
-        else:
-            documents.append({"text": doc.get("text", "") or ""})
-
-    payload = {
-        "model": rm,
-        "input": {
-            "query": {"text": query},
-            "documents": documents,
-        },
-        "parameters": {
-            "top_n": min(return_cap, len(candidates)),
-            "return_documents": False,
-        },
-    }
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {rk}"}
     timeout = max(5, int(getattr(settings, "RERANK_TIMEOUT_SECONDS", 15) or 15))
     from app.utils.upstream_quota import (
@@ -487,40 +587,10 @@ def _rerank_documents(
             return _fallback_by_vector_score()
         quota.record_success()
         items = (response.json().get("output") or {}).get("results") or []
-        reranked: List[dict] = []
-        for item in items:
-            idx = item.get("index")
-            if isinstance(idx, int) and 0 <= idx < len(candidates):
-                doc = dict(candidates[idx])
-                doc.pop("_rerank_image_uri", None)
-                sc = item.get("relevance_score")
-                if sc is not None:
-                    # relevance_score 覆盖 score，使下游排序/展示统一使用重排分
-                    doc["vector_score"] = doc.get("score")
-                    doc["rerank_score"] = sc
-                    try:
-                        doc["score"] = float(sc)
-                    except (TypeError, ValueError):
-                        pass
-                reranked.append(doc)
-        if reranked:
-            # rerank 分数阈值门控（可选）：最高分低于 RERANK_MIN_SCORE 时标记不达标，供上层走「无相关资料」路径
-            below_min = False
-            min_score = getattr(settings, "RERANK_MIN_SCORE", None)
-            if min_score is not None:
-                try:
-                    top = max((float(d.get("rerank_score") or 0.0) for d in reranked), default=0.0)
-                    meta["max_rerank_score"] = top
-                    below_min = top < float(min_score)
-                except (TypeError, ValueError):
-                    meta["max_rerank_score"] = None
-            meta["rerank_below_min"] = below_min
-            # 保持 rerank 返回顺序（API 按 relevance_score 降序）；未参与重排的图片块按向量分排在末尾
-            excluded_images.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-            final_docs = reranked + excluded_images
-            return final_docs[:return_cap], meta
-        meta["rerank_error"] = "empty_rerank_results"
-        return _fallback_by_vector_score()
+        parsed, out_meta = _apply_rerank_response(items, candidates, excluded_images, return_cap=return_cap, meta=meta)
+        if parsed is None:
+            return _fallback_by_vector_score()
+        return parsed, out_meta
     except (QuotaBreakerOpenError, QuotaTimeoutError) as e:
         # 配额保护触发（熔断/等待超时）：快速降级为向量分排序，不阻塞检索
         meta["rerank_applied"] = False
@@ -938,3 +1008,462 @@ def retrieve_documents_by_image(
                 "focus": focus,
             },
         }
+
+
+# ================================================================
+# P0：异步检索链（对话路径专用；与同步实现行为对齐，IO 点全异步）
+# - embedding / Milvus 检索 / rerank 使用真异步客户端（零线程占用）
+# - 父块/图片元数据等短查询保留 to_thread 过渡（毫秒级；随 P1 DB 异步化清理）
+# 注意：与上方同步实现保持行为一致，同步版修改需同步检查本区块。
+# ================================================================
+
+
+async def _acached_query_embedding(query: str) -> List[float]:
+    """异步查询向量缓存（同同步版语义：Redis 命中零上游调用）。"""
+    from app.chat.cache import cache
+
+    text = (query or "").strip()
+    model = (getattr(settings, "EMBEDDING_MODEL", "") or "").strip()
+    dim = int(getattr(settings, "EMBEDDING_DIM", 1536) or 1536)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    key = f"emb_query:{model}:{dim}:{digest}"
+    cached = _decode_query_embedding(await cache.aget_json(key))
+    if cached is not None:
+        return cached
+    embeddings = await _multimodal_embedding_service.aget_text_embeddings(
+        [text], request_timeout=_retrieve_embedding_timeout()
+    )
+    vec = embeddings[0]
+    try:
+        ttl = max(60, int(getattr(settings, "EMBEDDING_QUERY_CACHE_TTL_SECONDS", 604800) or 604800))
+        await cache.aset_json(key, _encode_query_embedding(vec), ttl)
+    except Exception:
+        pass
+    return vec
+
+
+async def _a_rerank_documents(
+    query: str,
+    docs: List[dict],
+    return_cap: int,
+    include_images: bool = True,
+    *,
+    skip_rerank: bool = False,
+) -> Tuple[List[dict], Dict[str, Any]]:
+    """异步 rerank（HTTP 走 httpx.AsyncClient、配额异步；逻辑与同步版一致）。"""
+    for d in docs:
+        d["content_type"] = _normalize_content_type(d.get("content_type"), d.get("chunk_level", 0))
+    text_docs = [doc for doc in docs if doc.get("content_type") == "text"]
+    image_docs = [doc for doc in docs if doc.get("content_type") == "image"]
+    docs_with_rank = [{**doc, "rrf_rank": i} for i, doc in enumerate(text_docs, 1)] if text_docs else []
+
+    rm = (getattr(settings, "RERANK_MODEL", None) or "").strip()
+    rk = (getattr(settings, "RERANK_API_KEY", None) or "").strip()
+    rh = (getattr(settings, "RERANK_BINDING_HOST", None) or "").strip()
+    include_img = include_images and bool(getattr(settings, "RERANK_INCLUDE_IMAGES", True))
+    meta: Dict[str, Any] = {
+        "rerank_enabled": bool(rm and rk and rh),
+        "rerank_applied": False,
+        "rerank_model": rm,
+        "rerank_endpoint": _rerank_endpoint(),
+        "rerank_error": None,
+        "candidate_count": len(docs),
+        "text_count": len(text_docs),
+        "image_count": len(image_docs),
+        "include_images": include_images,
+        "rerank_include_images": include_img,
+        "return_cap": return_cap,
+        "rerank_below_min": False,
+    }
+
+    def _fallback_by_vector_score() -> Tuple[List[dict], Dict[str, Any]]:
+        final_docs = docs_with_rank + image_docs
+        final_docs.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+        return final_docs[:return_cap], meta
+
+    if skip_rerank:
+        meta["rerank_skipped"] = "image_query"
+        return _fallback_by_vector_score()
+    if not meta["rerank_enabled"] or not docs_with_rank:
+        return _fallback_by_vector_score()
+
+    max_candidates = max(1, int(getattr(settings, "RERANK_MAX_CANDIDATES", 30) or 30))
+    image_uris: Dict[str, str] = {}
+    if include_img and image_docs:
+        # 图片 base64 读取为同步 MinIO SDK → 线程池并发读取（对事件循环零阻塞）
+        async def _fetch_uri(doc: dict) -> tuple[str, str] | None:
+            cid = str(doc.get("chunk_id") or "").strip()
+            if not cid:
+                return None
+            uri = await asyncio.to_thread(_kb_image_data_uri, doc)
+            return (cid, uri) if uri else None
+
+        fetched = await asyncio.gather(*[_fetch_uri(d) for d in image_docs])
+        for item in fetched:
+            if item:
+                image_uris.setdefault(item[0], item[1])
+    candidates, excluded_images = _select_rerank_candidates(
+        docs_with_rank, image_docs, include_img=include_img, max_candidates=max_candidates, image_uris=image_uris
+    )
+    payload = _build_rerank_payload(rm, query, candidates, return_cap)
+
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {rk}"}
+    timeout = max(5, int(getattr(settings, "RERANK_TIMEOUT_SECONDS", 15) or 15))
+    from app.utils.upstream_quota import (
+        QuotaBreakerOpenError,
+        QuotaTimeoutError,
+        rerank_quota,
+    )
+
+    quota = rerank_quota()
+    try:
+        async with quota.acquire():
+            meta["rerank_applied"] = True
+            response = await _get_rerank_aclient().post(
+                meta["rerank_endpoint"], headers=headers, json=payload, timeout=timeout
+            )
+        if response.status_code >= 400:
+            if response.status_code == 429:
+                quota.record_failure()
+            meta["rerank_error"] = f"HTTP {response.status_code}: {response.text[:500]}"
+            return _fallback_by_vector_score()
+        quota.record_success()
+        items = (response.json().get("output") or {}).get("results") or []
+        parsed, out_meta = _apply_rerank_response(items, candidates, excluded_images, return_cap=return_cap, meta=meta)
+        if parsed is None:
+            return _fallback_by_vector_score()
+        return parsed, out_meta
+    except (QuotaBreakerOpenError, QuotaTimeoutError) as e:
+        meta["rerank_applied"] = False
+        meta["rerank_error"] = f"quota_limited: {e}"
+        return _fallback_by_vector_score()
+    except (httpx.HTTPError, json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+        meta["rerank_error"] = str(e)[:500]
+        return _fallback_by_vector_score()
+
+
+async def _afinalize_retrieved_docs(
+    retrieved: List[dict],
+    *,
+    query: str,
+    kb_scope: str,
+    top_k: int,
+    candidate_k: int,
+    include_images: bool,
+    image_store: Any,
+    retrieval_mode: str,
+    skip_rerank: bool = False,
+    expand_related: bool = True,
+) -> tuple[List[dict], Dict[str, Any]]:
+    """异步版 _finalize_retrieved_docs（短 PG 查询走线程池过渡，rerank 走异步）。"""
+    for d in retrieved:
+        d["content_type"] = _normalize_content_type(d.get("content_type"), d.get("chunk_level", 0))
+    image_chunks = [doc for doc in retrieved if doc.get("content_type") == "image"]
+    if image_chunks:
+        chunk_ids = [c.get("chunk_id") for c in image_chunks if c.get("chunk_id")]
+        images = await image_store.aget_images_by_chunk_ids(chunk_ids)
+        image_map = {img.chunk_id: img for img in images}
+        for chunk in retrieved:
+            if chunk.get("content_type") != "image":
+                continue
+            chunk_id = chunk.get("chunk_id")
+            if not chunk_id or chunk_id not in image_map:
+                continue
+            img = image_map[chunk_id]
+            chunk["image_metadata"] = {
+                "id": img.id,
+                "stored_relpath": img.stored_relpath,
+                "display_filename": img.display_filename,
+                "file_size": img.file_size,
+                "width": img.width,
+                "height": img.height,
+                "format": img.format,
+                "position_x": img.position_x,
+                "position_y": img.position_y,
+                "position_width": img.position_width,
+                "position_height": img.position_height,
+                "related_text_ids": img.related_text_ids,
+            }
+
+    do_expand = include_images and expand_related
+    retrieved, rel_added = await asyncio.to_thread(
+        _expand_related_image_docs, retrieved, kb_scope, image_store, do_expand
+    )
+    min_slots = int(getattr(settings, "KB_MIN_IMAGE_SLOTS", 0) or 0) if include_images else 0
+    work_cap = min(
+        len(retrieved),
+        max(
+            candidate_k,
+            top_k + (min_slots * 2 + 4 if min_slots else 0),
+        ),
+    )
+
+    reranked, rerank_meta = await _a_rerank_documents(
+        query=query,
+        docs=retrieved,
+        return_cap=work_cap,
+        include_images=include_images,
+        skip_rerank=skip_rerank,
+    )
+    rerank_meta["related_image_expansion_count"] = rel_added
+    rerank_meta["retrieval_mode"] = retrieval_mode
+    rerank_meta["candidate_k"] = candidate_k
+    rerank_meta["leaf_retrieve_level"] = LEAF_RETRIEVE_LEVEL
+    rerank_meta["include_images"] = include_images
+    rerank_meta["work_cap"] = work_cap
+    rerank_meta["final_top_k"] = top_k
+
+    merged_docs, merge_meta = await asyncio.to_thread(_auto_merge_documents, docs=reranked, top_k=work_cap)
+    rerank_meta.update(merge_meta)
+
+    if include_images and min_slots > 0:
+        merged_docs = _final_slice_with_image_floor(merged_docs, top_k, min_slots)
+    else:
+        merged_docs = sorted(merged_docs, key=lambda x: float(x.get("score") or 0.0), reverse=True)[:top_k]
+    rerank_meta["image_slot_floor"] = min_slots if include_images else 0
+    return merged_docs, rerank_meta
+
+
+async def aretrieve_documents(
+    query: str,
+    kb_scope: str,
+    top_k: int = 5,
+    include_images: bool = True,
+    *,
+    document_filenames: list[str] | None = None,
+) -> Dict[str, Any]:
+    """异步检索文档（对话路径专用）：embedding → 异步 Milvus 混合检索 → rerank → merge。"""
+    from app.kb.image_store import get_image_store
+    from app.kb.milvus_client import get_async_milvus_manager
+    from app.utils.upstream_quota import QuotaBreakerOpenError, QuotaTimeoutError
+
+    image_store = get_image_store()
+    candidate_k = max(top_k * 3, top_k)
+    esc = milvus_escape(kb_scope)
+    if include_images:
+        base_filter = f'kb_scope == "{esc}" && (chunk_level == {LEAF_RETRIEVE_LEVEL} || chunk_level == 4)'
+    else:
+        base_filter = f'kb_scope == "{esc}" && chunk_level == {LEAF_RETRIEVE_LEVEL}'
+    if document_filenames:
+        filter_expr = f"({base_filter}) && ({filename_in_filter_expr(document_filenames)})"
+    else:
+        filter_expr = base_filter
+
+    try:
+        dense_embedding = await _acached_query_embedding(query)
+        retrieved = await get_async_milvus_manager().a_hybrid_retrieve(
+            dense_embedding=dense_embedding,
+            query_text=query,
+            top_k=candidate_k,
+            filter_expr=filter_expr,
+        )
+        merged_docs, rerank_meta = await _afinalize_retrieved_docs(
+            retrieved,
+            query=query,
+            kb_scope=kb_scope,
+            top_k=top_k,
+            candidate_k=candidate_k,
+            include_images=include_images,
+            image_store=image_store,
+            retrieval_mode="hybrid",
+            skip_rerank=False,
+        )
+        rerank_meta["document_filenames_filter"] = document_filenames
+        return {"docs": merged_docs, "meta": rerank_meta}
+    except Exception as primary_exc:
+        if isinstance(primary_exc, (QuotaBreakerOpenError, QuotaTimeoutError)):
+            logger.warning("检索降级（嵌入配额受限，异步）: {}", primary_exc)
+            return _degraded_quota_retrieval_result(include_images, candidate_k)
+        try:
+            dense_embedding = await _acached_query_embedding(query)
+            retrieved = await get_async_milvus_manager().a_dense_retrieve(
+                dense_embedding=dense_embedding,
+                top_k=candidate_k,
+                filter_expr=filter_expr,
+            )
+            merged_docs, rerank_meta = await _afinalize_retrieved_docs(
+                retrieved,
+                query=query,
+                kb_scope=kb_scope,
+                top_k=top_k,
+                candidate_k=candidate_k,
+                include_images=include_images,
+                image_store=image_store,
+                retrieval_mode="dense_fallback",
+                skip_rerank=False,
+            )
+            rerank_meta["document_filenames_filter"] = document_filenames
+            return {"docs": merged_docs, "meta": rerank_meta}
+        except Exception as fallback_exc:
+            if isinstance(fallback_exc, (QuotaBreakerOpenError, QuotaTimeoutError)):
+                logger.warning("检索降级（嵌入配额受限，异步）: {}", fallback_exc)
+                return _degraded_quota_retrieval_result(include_images, candidate_k)
+            return {
+                "docs": [],
+                "meta": {
+                    "rerank_enabled": False,
+                    "rerank_applied": False,
+                    "rerank_error": "retrieve_failed",
+                    "retrieval_mode": "failed",
+                    "candidate_k": candidate_k,
+                    "leaf_retrieve_level": LEAF_RETRIEVE_LEVEL,
+                    "include_images": include_images,
+                    "auto_merge_enabled": AUTO_MERGE_ENABLED,
+                    "auto_merge_applied": False,
+                    "auto_merge_threshold": AUTO_MERGE_THRESHOLD,
+                    "auto_merge_replaced_chunks": 0,
+                    "auto_merge_steps": 0,
+                    "candidate_count": 0,
+                },
+            }
+
+
+async def aretrieve_documents_by_image(
+    image_abs_path: str,
+    kb_scope: str,
+    top_k: int = 5,
+    *,
+    focus: Literal["text", "image", "mixed"] = "mixed",
+    include_related_image_expansion: bool | None = None,
+) -> Dict[str, Any]:
+    """异步以图检索（对话路径专用）。"""
+    from app.kb.image_store import get_image_store
+    from app.kb.milvus_client import get_async_milvus_manager
+
+    image_store = get_image_store()
+    candidate_k = max(top_k * 3, top_k)
+    esc = milvus_escape(kb_scope)
+
+    if focus == "text":
+        filter_expr = f'kb_scope == "{esc}" && chunk_level == {LEAF_RETRIEVE_LEVEL}'
+    elif focus == "image":
+        filter_expr = f'kb_scope == "{esc}" && chunk_level == 4'
+    else:
+        filter_expr = f'kb_scope == "{esc}" && (chunk_level == {LEAF_RETRIEVE_LEVEL} || chunk_level == 4)'
+
+    if include_related_image_expansion is None:
+        include_related_image_expansion = focus != "text"
+    include_img_finalize = focus in ("image", "mixed")
+    expand_rel = bool(include_related_image_expansion) if include_img_finalize else False
+
+    try:
+        dense_embeddings = await _multimodal_embedding_service.aget_image_embeddings(
+            [image_abs_path], request_timeout=_retrieve_embedding_timeout()
+        )
+        if not dense_embeddings or not dense_embeddings[0]:
+            raise ValueError("empty_image_embedding")
+        retrieved = await get_async_milvus_manager().a_dense_retrieve(
+            dense_embedding=dense_embeddings[0],
+            top_k=candidate_k,
+            filter_expr=filter_expr,
+        )
+        merged_docs, rerank_meta = await _afinalize_retrieved_docs(
+            retrieved,
+            query="",  # 以图检索不传入 rerank 文本
+            kb_scope=kb_scope,
+            top_k=top_k,
+            candidate_k=candidate_k,
+            include_images=include_img_finalize,
+            image_store=image_store,
+            retrieval_mode="dense_image_query",
+            skip_rerank=True,
+            expand_related=expand_rel,
+        )
+        rerank_meta["focus"] = focus
+        rerank_meta["include_related_image_expansion"] = expand_rel
+        return {"docs": merged_docs, "meta": rerank_meta}
+    except Exception as e:
+        logger.warning("aretrieve_documents_by_image 失败: {}", e)
+        return {
+            "docs": [],
+            "meta": {
+                "rerank_enabled": False,
+                "rerank_applied": False,
+                "rerank_error": str(e)[:200],
+                "retrieval_mode": "dense_image_query_failed",
+                "candidate_k": candidate_k,
+                "leaf_retrieve_level": LEAF_RETRIEVE_LEVEL,
+                "include_images": include_img_finalize,
+                "auto_merge_enabled": AUTO_MERGE_ENABLED,
+                "auto_merge_applied": False,
+                "auto_merge_threshold": AUTO_MERGE_THRESHOLD,
+                "auto_merge_replaced_chunks": 0,
+                "auto_merge_steps": 0,
+                "candidate_count": 0,
+                "focus": focus,
+            },
+        }
+
+
+# ---------------------------------------------------------------- 异步查询扩展生成（P0）
+
+async def _agenerate_step_back_question(query: str, llm_config: dict | None) -> str:
+    """异步生成退步问题（prompt 与同步版一致；model.ainvoke 零线程占用）。"""
+    model = _chat_from_config(llm_config, 0.2)
+    if not model:
+        return ""
+    prompt = (
+        "请将用户的具体问题抽象成更高层次、更概括的'退步问题'，"
+        "用于探寻背后的通用原理或核心概念。只输出退步问题一句话，不要解释。\n"
+        f"用户问题：{query}"
+    )
+    try:
+        resp = await model.ainvoke(prompt)
+        return (resp.content or "").strip()
+    except Exception:
+        return ""
+
+
+async def _a_answer_step_back_question(step_back_question: str, llm_config: dict | None) -> str:
+    """异步回答退步问题（prompt 与同步版一致）。"""
+    model = _chat_from_config(llm_config, 0.2)
+    if not model or not step_back_question:
+        return ""
+    prompt = (
+        "请简要回答以下退步问题，提供通用原理/背景知识，"
+        "控制在120字以内。只输出答案，不要列出推理过程。\n"
+        f"退步问题：{step_back_question}"
+    )
+    try:
+        resp = await model.ainvoke(prompt)
+        return (resp.content or "").strip()
+    except Exception:
+        return ""
+
+
+async def agenerate_hypothetical_document(query: str, llm_config: dict | None) -> str:
+    """异步生成假设性文档（prompt 与同步版一致）。"""
+    model = _chat_from_config(llm_config, 0.2)
+    if not model:
+        return ""
+    prompt = (
+        "请基于用户问题生成一段'假设性文档'，内容应像真实资料片段，"
+        "用于帮助检索相关信息。文档可以包含合理推测，但需与问题语义相关。"
+        "只输出文档正文，不要标题或解释。\n"
+        f"用户问题：{query}"
+    )
+    try:
+        resp = await model.ainvoke(prompt)
+        return (resp.content or "").strip()
+    except Exception:
+        return ""
+
+
+async def astep_back_expand(query: str, llm_config: dict | None) -> dict:
+    """异步 step-back 扩展（组装逻辑与同步版一致）。"""
+    step_back_question = await _agenerate_step_back_question(query, llm_config)
+    step_back_answer = ""
+    if getattr(settings, "RAG_STEP_BACK_ANSWER_ENABLED", False):
+        step_back_answer = await _a_answer_step_back_question(step_back_question, llm_config)
+    if step_back_question or step_back_answer:
+        if step_back_answer:
+            expanded_query = f"{query}\n\n退步问题：{step_back_question}\n退步问题答案：{step_back_answer}"
+        else:
+            expanded_query = f"{query}\n\n退步问题：{step_back_question}"
+    else:
+        expanded_query = query
+    return {
+        "step_back_question": step_back_question,
+        "step_back_answer": step_back_answer,
+        "expanded_query": expanded_query,
+    }

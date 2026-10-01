@@ -9,16 +9,17 @@ import logging
 from datetime import datetime
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from sqlalchemy import desc, func
+from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 
 from app.chat.cache import cache
-from app.chat.database import SessionLocal
+from app.chat.database import SessionLocal, get_async_session
 from app.chat.db_models import ChatAttachment as ChatAttachmentRow
 from app.chat.db_models import ChatMessage as ChatMessageRow
 from app.chat.db_models import ChatSession as ChatSessionRow
 from app.chat.errors import ChatQuotaExceeded
 from app.chat.message_codec import envelope_to_langchain_message, msg_content_to_str, serialize_message_envelope
+from app.utils.async_compat import sync_fallback
 from app.chat.preview_session import (
     EDITOR_PREVIEW_SESSION_PREFIX,
     is_editor_preview_session,
@@ -1129,6 +1130,640 @@ class ConversationStorage:
             raise
         finally:
             db.close()
+
+    # ================================================================
+    # P1：异步对话存储（对话链路专用；SQLAlchemy AsyncSession / psycopg async）
+    # - 与上方同步实现行为对齐；同步路径（/chat、工具线程、worker）继续用同步版
+    # - 缓存交互走异步 Redis（cache.a*）；短 IO 无 to_thread 跳转
+    # 注意：同步版修改需同步检查本区块。
+    # ================================================================
+
+    async def _aget_or_create_session(
+        self,
+        adb,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        metadata: dict | None = None,
+    ) -> ChatSessionRow:
+        """异步版 _get_or_create_session（行锁 + 唯一约束竞态回退）。"""
+        stmt = (
+            select(ChatSessionRow)
+            .where(
+                ChatSessionRow.user_id == user_id,
+                ChatSessionRow.agent_id == agent_id,
+                ChatSessionRow.session_id == session_id,
+            )
+            .with_for_update()
+        )
+        session = (await adb.execute(stmt)).scalars().first()
+        if session:
+            if metadata is not None:
+                session.metadata_json = metadata
+            return session
+        session = ChatSessionRow(
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            metadata_json=metadata if metadata is not None else {},
+        )
+        adb.add(session)
+        try:
+            await adb.flush()
+        except IntegrityError:
+            await adb.rollback()
+            session = (await adb.execute(stmt)).scalars().first()
+            if session is None:
+                raise
+            if metadata is not None:
+                session.metadata_json = metadata
+        return session
+
+    async def _aenforce_session_quota(self, adb, user_id: int, agent_id: int, session_id: str) -> None:
+        """异步版会话数配额检查（已存在则放行）。"""
+        limit = _int_setting("CHAT_MAX_SESSIONS_PER_USER_AGENT", 200)
+        if limit <= 0:
+            return
+        exists = (
+            await adb.execute(
+                select(ChatSessionRow.id).where(
+                    ChatSessionRow.user_id == user_id,
+                    ChatSessionRow.agent_id == agent_id,
+                    ChatSessionRow.session_id == session_id,
+                )
+            )
+        ).first()
+        if exists:
+            return
+        count = int(
+            (
+                await adb.execute(
+                    select(func.count(ChatSessionRow.id)).where(
+                        ChatSessionRow.user_id == int(user_id),
+                        ChatSessionRow.agent_id == int(agent_id),
+                    )
+                )
+            ).scalar()
+            or 0
+        )
+        if count >= limit:
+            raise ChatQuotaExceeded("session_limit", limit=limit)
+
+    async def _aload_message_records(self, adb, session: ChatSessionRow) -> list[dict]:
+        """异步加载当前选中路径上的消息记录（附带版本信息）。"""
+        rows = (
+            (
+                await adb.execute(
+                    select(ChatMessageRow)
+                    .where(ChatMessageRow.session_ref_id == session.id)
+                    .order_by(ChatMessageRow.id.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return self._records_from_rows(rows, self._walk_path(rows))
+
+    async def _acommit_and_refresh_caches(
+        self,
+        adb,
+        session: ChatSessionRow,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        rows: list | None = None,
+    ) -> None:
+        """异步版：提交消息变更并按库回填缓存（rows 传入时跳过重复全量 SELECT）。"""
+        session.updated_at = datetime.utcnow()
+        await adb.flush()
+        if rows is None:
+            rows = (
+                (
+                    await adb.execute(
+                        select(ChatMessageRow)
+                        .where(ChatMessageRow.session_ref_id == session.id)
+                        .order_by(ChatMessageRow.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        path = self._walk_path(rows)
+        session.last_user_preview = self._preview_from_path_rows(path)
+        session.path_message_count = len(path)
+        await adb.commit()
+        # expire_on_commit=False：提交后内存行属性仍有效，直接据此构建记录，无需重查
+        records = self._records_from_rows(rows, path)
+        await cache.aset_json(self._messages_cache_key(user_id, agent_id, session_id), records)
+        await cache.adelete(self._sessions_cache_key(user_id, agent_id))
+        await cache.adelete(self._sessions_all_cache_key(user_id))
+
+    @sync_fallback("check_chat_quota")
+    async def acheck_chat_quota(
+        self, user_id: int, agent_id: int, session_id: str, *, reserve: int = 2
+    ) -> None:
+        """异步对话入口预检（与同步版语义一致）。"""
+        adb = get_async_session()
+        try:
+            session = (
+                await adb.execute(
+                    select(ChatSessionRow.id).where(
+                        ChatSessionRow.user_id == user_id,
+                        ChatSessionRow.agent_id == agent_id,
+                        ChatSessionRow.session_id == session_id,
+                    )
+                )
+            ).first()
+            if session is None:
+                limit = _int_setting("CHAT_MAX_SESSIONS_PER_USER_AGENT", 200)
+                if limit > 0:
+                    count = int(
+                        (
+                            await adb.execute(
+                                select(func.count(ChatSessionRow.id)).where(
+                                    ChatSessionRow.user_id == int(user_id),
+                                    ChatSessionRow.agent_id == int(agent_id),
+                                )
+                            )
+                        ).scalar()
+                        or 0
+                    )
+                    if count >= limit:
+                        raise ChatQuotaExceeded("session_limit", limit=limit)
+                return
+            total = int(
+                (
+                    await adb.execute(
+                        select(func.count(ChatMessageRow.id)).where(
+                            ChatMessageRow.session_ref_id == int(session[0])
+                        )
+                    )
+                ).scalar()
+                or 0
+            )
+            self._enforce_message_quota(total, max(0, int(reserve)))
+        finally:
+            await adb.close()
+
+    @sync_fallback("append_messages")
+    async def aappend_messages(
+        self,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        new_messages: list,
+        extra_message_data: list | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        """异步版 append_messages（增量追加消息行，不改写已有行）。"""
+        if not new_messages:
+            return
+        adb = get_async_session()
+        try:
+            await self._aenforce_session_quota(adb, user_id, agent_id, session_id)
+            session = await self._aget_or_create_session(adb, user_id, agent_id, session_id, metadata)
+            now = datetime.utcnow()
+            # 单次加载全量行：叶子定位与缓存回填复用同一份内存数据
+            rows = (
+                (
+                    await adb.execute(
+                        select(ChatMessageRow)
+                        .where(ChatMessageRow.session_ref_id == session.id)
+                        .order_by(ChatMessageRow.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            self._enforce_message_quota(len(rows), len(new_messages))
+            path = self._walk_path(rows)
+            parent = path[-1] if path else None
+            extras = extra_message_data or []
+            for idx, msg in enumerate(new_messages):
+                extra = extras[idx] if idx < len(extras) else None
+                row = self._insert_message_row(
+                    adb, session, msg, extra, now, parent_id=parent.id if parent else None
+                )
+                await adb.flush()
+                if parent is not None:
+                    parent.selected_child_id = row.id
+                parent = row
+                rows.append(row)
+            await self._acommit_and_refresh_caches(adb, session, user_id, agent_id, session_id, rows=rows)
+        finally:
+            await adb.close()
+
+    @sync_fallback("insert_assistant_version")
+    async def ainsert_assistant_version(
+        self,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        target_ai_id: int,
+        ai_message,
+        extra: dict | None = None,
+        metadata: dict | None = None,
+    ) -> bool:
+        """异步版 insert_assistant_version（兄弟版本插入 + 版本淘汰）。"""
+        adb = get_async_session()
+        try:
+            session = await self._aget_or_create_session(adb, user_id, agent_id, session_id, metadata)
+            target = (
+                await adb.execute(select(ChatMessageRow).where(ChatMessageRow.id == int(target_ai_id)))
+            ).scalars().first()
+            if (
+                not target
+                or target.session_ref_id != session.id
+                or target.message_type != "ai"
+                or target.parent_id is None
+            ):
+                return False
+            parent = (
+                await adb.execute(select(ChatMessageRow).where(ChatMessageRow.id == target.parent_id))
+            ).scalars().first()
+            if not parent or parent.message_type != "human":
+                return False
+            version_cap = _int_setting("CHAT_MAX_ASSISTANT_VERSIONS", 5)
+            sibs = (
+                (
+                    await adb.execute(
+                        select(ChatMessageRow)
+                        .where(
+                            ChatMessageRow.session_ref_id == session.id,
+                            ChatMessageRow.parent_id == parent.id,
+                            ChatMessageRow.message_type == "ai",
+                        )
+                        .order_by(ChatMessageRow.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            evict = 0
+            if version_cap > 0 and len(sibs) >= version_cap:
+                evict = len(sibs) - (version_cap - 1)
+            total = int(
+                (
+                    await adb.execute(
+                        select(func.count(ChatMessageRow.id)).where(
+                            ChatMessageRow.session_ref_id == session.id
+                        )
+                    )
+                ).scalar()
+                or 0
+            )
+            self._enforce_message_quota(total, 1 - evict)
+            row = self._insert_message_row(
+                adb, session, ai_message, extra, datetime.utcnow(), parent_id=parent.id
+            )
+            await adb.flush()
+            parent.selected_child_id = row.id
+            for old in sibs[:evict]:
+                await adb.delete(old)
+            await self._acommit_and_refresh_caches(adb, session, user_id, agent_id, session_id)
+            return True
+        finally:
+            await adb.close()
+
+    @sync_fallback("update_assistant_in_place")
+    async def aupdate_assistant_in_place(
+        self,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        target_ai_id: int,
+        ai_message,
+        extra: dict | None = None,
+        metadata: dict | None = None,
+    ) -> bool:
+        """异步版 update_assistant_in_place（MCP 续跑原地覆盖）。"""
+        adb = get_async_session()
+        try:
+            session = await self._aget_or_create_session(adb, user_id, agent_id, session_id, metadata)
+            row = (
+                await adb.execute(select(ChatMessageRow).where(ChatMessageRow.id == int(target_ai_id)))
+            ).scalars().first()
+            if not row or row.session_ref_id != session.id or row.message_type != "ai":
+                return False
+            fields = self._parse_extra(extra)
+            preview = _cap_preview(msg_content_to_str(getattr(ai_message, "content", "")))
+            row.content = preview
+            row.content_json = serialize_message_envelope(ai_message)
+            row.timestamp = datetime.utcnow()
+            row.rag_trace = fields["rag_trace"]
+            row.rag_steps = fields["rag_steps"]
+            row.error_text = fields["error_text"]
+            row.image_references = fields["image_references"]
+            row.sources = fields["sources"]
+            row.thinking_text = fields["thinking_text"]
+            row.thinking_items = fields["thinking_items"]
+            await self._acommit_and_refresh_caches(adb, session, user_id, agent_id, session_id)
+            return True
+        finally:
+            await adb.close()
+
+    @sync_fallback("select_branch")
+    async def aselect_branch(
+        self,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        assistant_id: int,
+    ) -> list[dict] | None:
+        """异步版 select_branch（切换助手版本后返回当前路径记录）。"""
+        adb = get_async_session()
+        try:
+            session = (
+                await adb.execute(
+                    select(ChatSessionRow)
+                    .where(
+                        ChatSessionRow.user_id == user_id,
+                        ChatSessionRow.agent_id == agent_id,
+                        ChatSessionRow.session_id == session_id,
+                    )
+                    .with_for_update()
+                )
+            ).scalars().first()
+            if not session:
+                return None
+            row = (
+                await adb.execute(select(ChatMessageRow).where(ChatMessageRow.id == int(assistant_id)))
+            ).scalars().first()
+            if (
+                not row
+                or row.session_ref_id != session.id
+                or row.message_type != "ai"
+                or row.parent_id is None
+            ):
+                return None
+            parent = (
+                await adb.execute(select(ChatMessageRow).where(ChatMessageRow.id == row.parent_id))
+            ).scalars().first()
+            if not parent or parent.message_type != "human":
+                return None
+            parent.selected_child_id = row.id
+            await self._acommit_and_refresh_caches(adb, session, user_id, agent_id, session_id)
+        finally:
+            await adb.close()
+        return await self.aget_session_messages(user_id, agent_id, session_id)
+
+    @sync_fallback("get_regenerate_context")
+    async def aget_regenerate_context(
+        self,
+        user_id: int,
+        agent_id: int,
+        session_id: str,
+        target_ai_id: int,
+    ) -> tuple[list, str, list[int]] | None:
+        """异步版重新生成上下文。"""
+        adb = get_async_session()
+        try:
+            session = (
+                await adb.execute(
+                    select(ChatSessionRow).where(
+                        ChatSessionRow.user_id == user_id,
+                        ChatSessionRow.agent_id == agent_id,
+                        ChatSessionRow.session_id == session_id,
+                    )
+                )
+            ).scalars().first()
+            if not session:
+                return None
+            rows = (
+                (
+                    await adb.execute(
+                        select(ChatMessageRow)
+                        .where(ChatMessageRow.session_ref_id == session.id)
+                        .order_by(ChatMessageRow.id.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            by_id = {r.id: r for r in rows}
+            target = by_id.get(int(target_ai_id))
+            if not target or target.message_type != "ai" or target.parent_id is None:
+                return None
+            human = by_id.get(target.parent_id)
+            if not human or human.message_type != "human":
+                return None
+            chain = []
+            node = human
+            seen = set()
+            while node is not None and node.id not in seen:
+                seen.add(node.id)
+                chain.append(node)
+                node = by_id.get(node.parent_id) if node.parent_id else None
+            chain.reverse()
+            records = [self._row_to_record(r) for r in chain]
+            messages = self._to_langchain_messages(records)
+            if not messages:
+                return None
+            return (
+                messages,
+                msg_content_to_str(getattr(messages[-1], "content", "")),
+                [int(r["message_id"]) for r in records],
+            )
+        finally:
+            await adb.close()
+
+    @sync_fallback("load")
+    async def aload(self, user_id: int, agent_id: int, session_id: str) -> list:
+        """异步版 load（缓存优先，未命中查库并回填）。"""
+        cached = await cache.aget_json(self._messages_cache_key(user_id, agent_id, session_id))
+        if cached is not None:
+            return self._to_langchain_messages(cached)
+        records = await self.aget_session_messages(user_id, agent_id, session_id)
+        await cache.aset_json(self._messages_cache_key(user_id, agent_id, session_id), records)
+        return self._to_langchain_messages(records)
+
+    @sync_fallback("get_session_messages")
+    async def aget_session_messages(self, user_id: int, agent_id: int, session_id: str) -> list[dict]:
+        """异步版 get_session_messages。"""
+        cached = await cache.aget_json(self._messages_cache_key(user_id, agent_id, session_id))
+        if cached is not None:
+            return cached
+        adb = get_async_session()
+        try:
+            session = (
+                await adb.execute(
+                    select(ChatSessionRow).where(
+                        ChatSessionRow.user_id == user_id,
+                        ChatSessionRow.agent_id == agent_id,
+                        ChatSessionRow.session_id == session_id,
+                    )
+                )
+            ).scalars().first()
+            if not session:
+                return []
+            result = await self._aload_message_records(adb, session)
+            await cache.aset_json(self._messages_cache_key(user_id, agent_id, session_id), result)
+            return result
+        finally:
+            await adb.close()
+
+    @sync_fallback("delete_session")
+    async def adelete_session(self, user_id: int, agent_id: int, session_id: str) -> bool:
+        """异步版 delete_session（级联删除消息并失效缓存）。"""
+        import asyncio
+
+        adb = get_async_session()
+        try:
+            session = (
+                await adb.execute(
+                    select(ChatSessionRow).where(
+                        ChatSessionRow.user_id == user_id,
+                        ChatSessionRow.agent_id == agent_id,
+                        ChatSessionRow.session_id == session_id,
+                    )
+                )
+            ).scalars().first()
+            if not session:
+                return False
+            try:
+                from app.chat.attachment_service import purge_attachments_for_session
+
+                await asyncio.to_thread(purge_attachments_for_session, user_id, agent_id, session_id)
+            except Exception:
+                pass
+            await adb.delete(session)
+            await adb.commit()
+            await cache.adelete(self._messages_cache_key(user_id, agent_id, session_id))
+            await cache.adelete(self._sessions_cache_key(user_id, agent_id))
+            await cache.adelete(self._sessions_all_cache_key(user_id))
+            return True
+        finally:
+            await adb.close()
+
+    async def _abuild_session_info_dict(self, adb, s: ChatSessionRow) -> dict:
+        """异步版 _build_session_info_dict（列回填缺失时查库走 fallback）。"""
+        if s.path_message_count is not None:
+            return {
+                "session_id": s.session_id,
+                "agent_id": s.agent_id,
+                "updated_at": s.updated_at.isoformat(),
+                "message_count": int(s.path_message_count),
+                "last_user_preview": (s.last_user_preview or ""),
+            }
+        rows = (
+            await adb.execute(
+                select(
+                    ChatMessageRow.id,
+                    ChatMessageRow.parent_id,
+                    ChatMessageRow.selected_child_id,
+                    ChatMessageRow.message_type,
+                    ChatMessageRow.content,
+                    ChatMessageRow.content_json,
+                )
+                .where(ChatMessageRow.session_ref_id == s.id)
+                .order_by(ChatMessageRow.id.asc())
+            )
+        ).all()
+        path = self._walk_path(rows)
+        preview = self._preview_from_path_rows(path)
+        return {
+            "session_id": s.session_id,
+            "agent_id": s.agent_id,
+            "updated_at": s.updated_at.isoformat(),
+            "message_count": len(path),
+            "last_user_preview": preview,
+        }
+
+    @sync_fallback("list_session_infos")
+    async def alist_session_infos(self, user_id: int, agent_id: int) -> list[dict]:
+        """异步版 list_session_infos（全量列表：缓存优先）。"""
+        cached = await cache.aget_json(self._sessions_cache_key(user_id, agent_id))
+        if cached is not None:
+            return [x for x in cached if not is_editor_preview_session(x.get("session_id"))]
+        adb = get_async_session()
+        try:
+            sessions = (
+                (
+                    await adb.execute(
+                        select(ChatSessionRow)
+                        .where(
+                            ChatSessionRow.user_id == user_id,
+                            ChatSessionRow.agent_id == agent_id,
+                            ~ChatSessionRow.session_id.like(EDITOR_PREVIEW_SESSION_PREFIX + "%"),
+                        )
+                        .order_by(desc(ChatSessionRow.updated_at), desc(ChatSessionRow.id))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            result = [await self._abuild_session_info_dict(adb, s) for s in sessions]
+            await cache.aset_json(self._sessions_cache_key(user_id, agent_id), result)
+            return result
+        finally:
+            await adb.close()
+
+    @sync_fallback("list_session_infos_paginated")
+    async def alist_session_infos_paginated(
+        self, user_id: int, agent_id: int, limit: int, offset: int
+    ) -> tuple[list[dict], int]:
+        """异步版分页会话列表（直接查库，不走全量缓存）。"""
+        adb = get_async_session()
+        try:
+            base_where = (
+                ChatSessionRow.user_id == user_id,
+                ChatSessionRow.agent_id == agent_id,
+                ~ChatSessionRow.session_id.like(EDITOR_PREVIEW_SESSION_PREFIX + "%"),
+            )
+            total = int(
+                (await adb.execute(select(func.count(ChatSessionRow.id)).where(*base_where))).scalar() or 0
+            )
+            rows = (
+                (
+                    await adb.execute(
+                        select(ChatSessionRow)
+                        .where(*base_where)
+                        .order_by(desc(ChatSessionRow.updated_at), desc(ChatSessionRow.id))
+                        .offset(offset)
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            items = [await self._abuild_session_info_dict(adb, s) for s in rows]
+            return items, total
+        finally:
+            await adb.close()
+
+    @sync_fallback("list_session_infos_all_paginated")
+    async def alist_session_infos_all_paginated(
+        self, user_id: int, limit: int, offset: int
+    ) -> tuple[list[dict], int]:
+        """异步版跨智能体会话列表（缓存优先）。"""
+        key = self._sessions_all_cache_key(user_id)
+        cached = await cache.aget_json(key)
+        if cached is not None:
+            filtered = [x for x in cached if not is_editor_preview_session(x.get("session_id"))]
+            total = len(filtered)
+            return filtered[offset : offset + limit], total
+        adb = get_async_session()
+        try:
+            rows = (
+                (
+                    await adb.execute(
+                        select(ChatSessionRow)
+                        .where(
+                            ChatSessionRow.user_id == user_id,
+                            ~ChatSessionRow.session_id.like(EDITOR_PREVIEW_SESSION_PREFIX + "%"),
+                        )
+                        .order_by(desc(ChatSessionRow.updated_at), desc(ChatSessionRow.id))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            items = [await self._abuild_session_info_dict(adb, s) for s in rows]
+            await cache.aset_json(key, items)
+            total = len(items)
+            return items[offset : offset + limit], total
+        finally:
+            await adb.close()
 
 
 storage = ConversationStorage()

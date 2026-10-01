@@ -21,7 +21,12 @@ from langchain_core.messages import (
     HumanMessage,
 )
 
-from app.chat.attachment_service import build_storable_human_content, format_attachment_hint
+from app.chat.attachment_service import (
+    abuild_storable_human_content,
+    aformat_attachment_hint,
+    build_storable_human_content,
+    format_attachment_hint,
+)
 from app.chat.attachment_tools import make_session_attachment_tools
 from app.chat.history_tool import make_session_history_tools
 from app.chat.memory_turns import apply_sliding_window_turns
@@ -279,11 +284,14 @@ def build_model_and_agent(
     use_knowledge_retrieval: bool = True,
     use_web_search: bool = False,
     metrics_out: dict[str, Any] | None = None,
+    async_tools: bool = False,
 ) -> tuple[Any, Any]:
     """
     构建模型和智能体。检索工具始终挂载（本轮禁用由工具函数返回 TOOL_DISABLED_THIS_TURN）。
     知识库检索按属主隔离：使用他人已发布智能体时检索发布者的知识库。
     :param metrics_out: 可选出参，回写 tools_tokens / tools_count / system_tokens 供上下文预算使用
+    :param async_tools: True 时知识库工具注册 coroutine 版本（对话异步 Agent；RAG 链全异步），
+        同步路径（/chat、实验）保持 False 走线程模型
     """
     plain = decrypt_api_key_safe(ua.api_key_ciphertext)
     if not plain or not plain.strip():
@@ -316,9 +324,12 @@ def build_model_and_agent(
             kb_scope,
             llm_config,
             knowledge_base_document_filter=knowledge_base_document_filter,
+            prefer_async=async_tools,
         )
     )
-    tools.append(make_search_knowledge_by_image_tool(kb_scope, user_id, agent_id, session_id))
+    tools.append(
+        make_search_knowledge_by_image_tool(kb_scope, user_id, agent_id, session_id, prefer_async=async_tools)
+    )
     if getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
         if getattr(settings, "CHAT_USER_MEMORY_ENABLED", True):
             tools.extend(make_user_memory_tools(user_id, agent_id))
@@ -798,9 +809,7 @@ async def iter_chat_stream_events(
         if target_message_id:
             regen_target_ai_id = int(target_message_id)
         else:
-            path_records = await run_sync(
-                storage.get_session_messages, user_id, agent_id, session_id, timeout=15.0
-            )
+            path_records = await storage.aget_session_messages(user_id, agent_id, session_id)
             target_rec = next((r for r in reversed(path_records) if r.get("type") == "ai"), None)
             if target_rec is not None:
                 regen_target_ai_id = int(target_rec.get("message_id") or 0) or None
@@ -809,9 +818,7 @@ async def iter_chat_stream_events(
             yield {"type": "error", "content": "没有可重新生成的对话"}
             yield {"type": "done", "cancelled": False}
             return
-        ctx = await run_sync(
-            storage.get_regenerate_context, user_id, agent_id, session_id, regen_target_ai_id, timeout=15.0
-        )
+        ctx = await storage.aget_regenerate_context(user_id, agent_id, session_id, regen_target_ai_id)
         if ctx is None:
             yield {"type": "error", "content": "无法重新生成：目标回复不存在或不属于当前会话"}
             yield {"type": "done", "cancelled": False}
@@ -826,16 +833,14 @@ async def iter_chat_stream_events(
             yield {"type": "done", "cancelled": False}
             return
     else:
-        messages = await run_sync(storage.load, user_id, agent_id, session_id, timeout=15.0)
+        messages = await storage.aload(user_id, agent_id, session_id)
 
     if regenerate:
         preselect_query = msg_content_to_str(messages[-1].content).strip()
     else:
         preselect_query = (user_text or "").strip()
 
-    session_attachment_hint = await run_sync(
-        format_attachment_hint, user_id, agent_id, session_id, timeout=10.0
-    )
+    session_attachment_hint = await aformat_attachment_hint(user_id, agent_id, session_id)
 
     kb_preselect_meta: dict[str, Any] = {}
     retrieval_filter: list[str] | None = None
@@ -864,7 +869,8 @@ async def iter_chat_stream_events(
         mcp_tools, mcp_errors = [], []
 
     agent_metrics: dict[str, Any] = {}
-    # 构建 agent 含同步 Redis（token 缓存）与首次建连 DNS 解析，移出事件循环
+    # 构建 agent 含同步 Redis（token 缓存）与首次建连 DNS 解析，移出事件循环。
+    # async_tools=True：对话异步 Agent 的知识库工具走 coroutine 版（RAG 链全异步）。
     agent, model = await run_sync(
         build_model_and_agent,
         ua,
@@ -876,6 +882,7 @@ async def iter_chat_stream_events(
         use_knowledge_retrieval=use_knowledge_retrieval,
         use_web_search=use_web_search,
         metrics_out=agent_metrics,
+        async_tools=True,
         timeout=60.0,
     )
 
@@ -903,29 +910,25 @@ async def iter_chat_stream_events(
 
     if not regenerate:
         # 构造落库内容会逐个附件查 PG，移出事件循环
-        human_content = await run_sync(
-            build_storable_human_content,
+        human_content = await abuild_storable_human_content(
             user_text,
             attachment_ids,
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
             supports_vision=bool(getattr(ua, "supports_vision", False)),
-            timeout=15.0,
         )
         human_msg = HumanMessage(content=human_content)
         messages.append(human_msg)
 
         # 生成完成前即落库用户消息，刷新后仍可从历史会话看到提问（助手在结束时再写入）
-        await run_sync(storage.append_messages, user_id, agent_id, session_id, [human_msg], timeout=30.0)
+        await storage.aappend_messages(user_id, agent_id, session_id, [human_msg])
 
     # 当前上下文各消息对应的存储行 id（与 messages 等长对齐），供压缩/记忆按 turn_key 定位
     if regenerate:
         path_ids: list[int] | None = regen_path_ids
     else:
-        path_records = await run_sync(
-            storage.get_session_messages, user_id, agent_id, session_id, timeout=15.0
-        )
+        path_records = await storage.aget_session_messages(user_id, agent_id, session_id)
         path_ids = [int(r.get("message_id") or 0) for r in path_records]
         if len(path_ids) != len(messages):
             path_ids = None
@@ -1241,40 +1244,34 @@ async def iter_chat_stream_events(
         saved = False
         if regen_target_ai_id is not None:
             if mcp_approved_pending_id:
-                saved = await run_sync(
-                    storage.update_assistant_in_place,
+                saved = await storage.aupdate_assistant_in_place(
                     user_id,
                     agent_id,
                     session_id,
                     regen_target_ai_id,
                     ai_msg,
                     extra=ai_extra,
-                    timeout=30.0,
                 )
             else:
-                saved = await run_sync(
-                    storage.insert_assistant_version,
+                saved = await storage.ainsert_assistant_version(
                     user_id,
                     agent_id,
                     session_id,
                     regen_target_ai_id,
                     ai_msg,
                     extra=ai_extra,
-                    timeout=30.0,
                 )
         if not saved:
             yield {"type": "error", "content": "重新生成失败：目标回复已被移除，请刷新后重试"}
             yield {"type": "done", "cancelled": False}
             return
     else:
-        await run_sync(
-            storage.append_messages,
+        await storage.aappend_messages(
             user_id,
             agent_id,
             session_id,
             [ai_msg],
             extra_message_data=[ai_extra],
-            timeout=30.0,
         )
 
     # 落库后收尾：用真实 usage 同步校准 token 估算系数（长期记忆由摘要调用顺带写入）
