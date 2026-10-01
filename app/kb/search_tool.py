@@ -1,4 +1,8 @@
-"""绑定 kb_scope 与智能体 LLM 配置的 search_knowledge_base 工具（多模态：文本 + 图片元数据来自 PostgreSQL）。"""
+"""绑定 kb_scope 与智能体 LLM 配置的 search_knowledge_base 工具（多模态：文本 + 图片元数据来自 PostgreSQL）。
+
+P0：`prefer_async=True` 时注册 coroutine 版本（对话异步 Agent 使用）——
+RAG 子图全异步（检索/embedding/rerank 零线程占用）。
+"""
 
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ def make_search_knowledge_tool(
     llm_config: dict[str, Any],
     *,
     knowledge_base_document_filter: list[str] | None = None,
+    prefer_async: bool = False,
 ) -> StructuredTool:
     """
     knowledge_base_document_filter 由对话入口「前置选档」注入：
@@ -31,7 +36,8 @@ def make_search_knowledge_tool(
     class _SearchKbArgs(BaseModel):
         query: str = Field(description="用于检索的自然语言问题或关键词，应与用户意图一致。")
 
-    def _search_knowledge_base(query: str) -> str:
+    def _guard_or_none() -> str | None:
+        """公共前置守卫（轻量内存态；sync/async 共用）。"""
         from app.chat.tools import (
             is_knowledge_allowed_this_turn,
             knowledge_disabled_this_turn_msg,
@@ -42,7 +48,6 @@ def make_search_knowledge_tool(
             limit_msg = knowledge_disabled_this_turn_msg("search_knowledge_base")
             log_kb_tool_return_to_terminal(limit_msg, tool_label="search_knowledge_base")
             return limit_msg
-
         if not try_acquire_knowledge_tool_slot():
             limit_msg = (
                 "TOOL_CALL_LIMIT_REACHED: search_knowledge_base has already been called once in this turn. "
@@ -50,36 +55,27 @@ def make_search_knowledge_tool(
             )
             log_kb_tool_return_to_terminal(limit_msg, tool_label="search_knowledge_base")
             return limit_msg
+        return None
 
-        if knowledge_base_document_filter:
-            emit_rag_step("📄", "文档范围过滤", f"file_key 数量: {len(knowledge_base_document_filter)}")
-
-        try:
-            from app.kb.rag_pipeline import run_rag_graph
-
-            rag_result = run_rag_graph(
-                question=query.strip(),
-                kb_scope=kb_scope,
-                llm_config=llm_config,
-                document_filenames=knowledge_base_document_filter,
-            )
-        except Exception as e:
-            emit_rag_step("⚠️", "知识库检索失败", str(e)[:200])
-            _set_last_rag_context(
-                {
-                    "rag_trace": {
-                        "tool_used": True,
-                        "tool_name": "search_knowledge_base",
-                        "query": query,
-                        "document_filenames": knowledge_base_document_filter,
-                        "error": str(e),
-                    }
+    def _handle_exception(e: Exception, query: str) -> str:
+        emit_rag_step("⚠️", "知识库检索失败", str(e)[:200])
+        _set_last_rag_context(
+            {
+                "rag_trace": {
+                    "tool_used": True,
+                    "tool_name": "search_knowledge_base",
+                    "query": query,
+                    "document_filenames": knowledge_base_document_filter,
+                    "error": str(e),
                 }
-            )
-            err_msg = f"知识库检索出错：{e}"
-            log_kb_tool_return_to_terminal(err_msg, tool_label="search_knowledge_base")
-            return err_msg
+            }
+        )
+        err_msg = f"知识库检索出错：{e}"
+        log_kb_tool_return_to_terminal(err_msg, tool_label="search_knowledge_base")
+        return err_msg
 
+    def _handle_result(rag_result: Any, query: str) -> str:
+        """公共结果处理（degraded / no_answer / empty / 格式化；纯逻辑）。"""
         docs = rag_result.get("docs", []) if isinstance(rag_result, dict) else []
         rag_trace = rag_result.get("rag_trace", {}) if isinstance(rag_result, dict) else {}
         no_answer = bool(rag_result.get("no_answer")) if isinstance(rag_result, dict) else False
@@ -115,7 +111,6 @@ def make_search_knowledge_tool(
 
         out, image_references, kb_sources = format_knowledge_retrieval_tool_output(docs)
         log_kb_tool_return_to_terminal(out, tool_label="search_knowledge_base")
-
         _set_last_rag_context(
             {
                 "rag_trace": rag_trace,
@@ -123,12 +118,54 @@ def make_search_knowledge_tool(
                 "kb_sources": kb_sources,
             }
         )
-
         return out
 
-    return StructuredTool.from_function(
-        name="search_knowledge_base",
-        description=(
+    def _search_knowledge_base(query: str) -> str:
+        early = _guard_or_none()
+        if early is not None:
+            return early
+
+        if knowledge_base_document_filter:
+            emit_rag_step("📄", "文档范围过滤", f"file_key 数量: {len(knowledge_base_document_filter)}")
+
+        try:
+            from app.kb.rag_pipeline import run_rag_graph
+
+            rag_result = run_rag_graph(
+                question=query.strip(),
+                kb_scope=kb_scope,
+                llm_config=llm_config,
+                document_filenames=knowledge_base_document_filter,
+            )
+        except Exception as e:
+            return _handle_exception(e, query)
+        return _handle_result(rag_result, query)
+
+    async def _asearch_knowledge_base(query: str) -> str:
+        """异步壳（对话路径）：RAG 子图全异步执行。"""
+        early = _guard_or_none()
+        if early is not None:
+            return early
+
+        if knowledge_base_document_filter:
+            emit_rag_step("📄", "文档范围过滤", f"file_key 数量: {len(knowledge_base_document_filter)}")
+
+        try:
+            from app.kb.rag_pipeline import run_rag_graph_async
+
+            rag_result = await run_rag_graph_async(
+                question=query.strip(),
+                kb_scope=kb_scope,
+                llm_config=llm_config,
+                document_filenames=knowledge_base_document_filter,
+            )
+        except Exception as e:
+            return _handle_exception(e, query)
+        return _handle_result(rag_result, query)
+
+    options = {
+        "name": "search_knowledge_base",
+        "description": (
             "在本智能体「知识库」中检索与用户问题相关的文档片段（多模态：文本 + 图片）。"
             "本回合可检索的文档范围已由系统预先确定，你只需传 query，不要尝试指定文件名或换库。"
             "每个图片块都会给出一行现成的 Markdown，形如 `![说明](/api/v1/media/...?exp=...&sig=...)`。"
@@ -137,6 +174,8 @@ def make_search_knowledge_tool(
             "回答中凡引用检索到的内容，必须以 [来源N] 标注（N 与工具返回中的编号一致），让用户可追溯出处。"
             "调用约束：同一用户提问轮次内最多成功检索一次；得到工具返回后应直接整合为最终回答，勿重复检索。"
         ),
-        args_schema=_SearchKbArgs,
-        func=_search_knowledge_base,
-    )
+        "args_schema": _SearchKbArgs,
+    }
+    if prefer_async:
+        return StructuredTool.from_function(coroutine=_asearch_knowledge_base, **options)
+    return StructuredTool.from_function(func=_search_knowledge_base, **options)

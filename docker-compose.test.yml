@@ -15,6 +15,8 @@ services:
       MOCK_LLM_CHUNK_INTERVAL_MS: "60"
     volumes:
       - ./tests/load/mock_llm_server.py:/mock/mock_llm_server.py:ro
+    ports:
+      - "127.0.0.1:8090:8000"
     restart: unless-stopped
 
   backend:

@@ -710,3 +710,521 @@ def run_rag_graph(
             "no_answer": False,
         }
     )
+
+
+# ================================================================
+# P0：异步 RAG 图（对话路径专用；拓扑与同步图一致，节点 IO 全异步）
+# - 检索 / embedding / rerank：真异步客户端（等待期间零线程占用）
+# - grader / router / step-back / HyDE：LangChain ainvoke
+# - 并行：complex 策略下 step-back 与 HyDE 生成并发（省 1 次 LLM 等待）
+# - 降级：嵌入配额熔断 → retrieve 返回 degraded_quota → 路由直接结束（同同步图）
+# 注意：与同步图保持行为一致；同步版修改需同步检查本区块。
+# ================================================================
+
+
+async def aretrieve_initial(state: RAGState) -> RAGState:
+    from app.chat.tools import emit_rag_step
+    from app.kb.rag_utils import aretrieve_documents
+
+    query = state["question"]  # 用户问题
+    kb_scope = state["kb_scope"]  # 当前智能体检索的知识库范围
+
+    include_images = state.get("include_images", True)
+    document_filenames = state.get("document_filenames")
+
+    emit_rag_step("🔍", "正在检索知识库...", f"查询: {query[:50]}")
+    retrieved = await aretrieve_documents(
+        query,
+        kb_scope=kb_scope,
+        top_k=5,
+        include_images=include_images,
+        document_filenames=document_filenames,
+    )
+    results = retrieved.get("docs", [])
+    retrieve_meta = retrieved.get("meta", {})
+    if retrieve_meta.get("rerank_below_min"):
+        # rerank 分数未达阈值：质量门控为「无相关资料」，结果清空，后续走拒答路径
+        results = []
+        retrieve_meta = dict(retrieve_meta)
+        retrieve_meta["gated_by_rerank_min_score"] = True
+        emit_rag_step("🚫", "检索结果低于 rerank 分数阈值", "按知识库无相关资料处理")
+    context = _format_docs(results)
+    emit_rag_step(
+        "🧱",
+        "三级分块检索",
+        (
+            f"叶子层 L{retrieve_meta.get('leaf_retrieve_level', 3)} 召回，"
+            f"候选 {retrieve_meta.get('candidate_k', 0)}"
+        ),
+    )
+    emit_rag_step(
+        "🧩",
+        "Auto-merging 合并",
+        (
+            f"启用: {bool(retrieve_meta.get('auto_merge_enabled'))}，"
+            f"应用: {bool(retrieve_meta.get('auto_merge_applied'))}，"
+            f"替换片段: {retrieve_meta.get('auto_merge_replaced_chunks', 0)}"
+        ),
+    )
+    emit_rag_step("✅", f"检索完成，找到 {len(results)} 个片段", f"模式: {retrieve_meta.get('retrieval_mode', 'hybrid')}")
+    rag_trace = {
+        "tool_used": True,
+        "tool_name": "search_knowledge_base",
+        "kb_scope": kb_scope,
+        "query": query,
+        "expanded_query": query,
+        "initial_empty": len(results) == 0,
+        "retrieved_chunks": results,
+        "initial_retrieved_chunks": results,
+        "retrieval_stage": "initial",
+        "rerank_enabled": retrieve_meta.get("rerank_enabled"),
+        "rerank_applied": retrieve_meta.get("rerank_applied"),
+        "rerank_model": retrieve_meta.get("rerank_model"),
+        "rerank_endpoint": retrieve_meta.get("rerank_endpoint"),
+        "rerank_error": retrieve_meta.get("rerank_error"),
+        "retrieval_mode": retrieve_meta.get("retrieval_mode"),
+        "candidate_k": retrieve_meta.get("candidate_k"),
+        "leaf_retrieve_level": retrieve_meta.get("leaf_retrieve_level"),
+        "auto_merge_enabled": retrieve_meta.get("auto_merge_enabled"),
+        "auto_merge_applied": retrieve_meta.get("auto_merge_applied"),
+        "auto_merge_threshold": retrieve_meta.get("auto_merge_threshold"),
+        "auto_merge_replaced_chunks": retrieve_meta.get("auto_merge_replaced_chunks"),
+        "auto_merge_steps": retrieve_meta.get("auto_merge_steps"),
+        "document_filenames_filter": retrieve_meta.get("document_filenames_filter"),
+    }
+    return {
+        "query": query,
+        "docs": results,
+        "context": context,
+        "rag_trace": rag_trace,
+    }
+
+
+async def agrade_documents_node(state: RAGState) -> RAGState:
+    from app.chat.tools import emit_rag_step
+
+    llm_config = state.get("llm_config") or {}
+    grader = _grader_model(llm_config)
+    rag_trace = state.get("rag_trace", {}) or {}
+    docs = state.get("docs") or []
+
+    if not docs:
+        grade_update = {
+            "grade_score": "no",
+            "grade_route": "rewrite_question",
+            "rewrite_needed": True,
+            "per_chunk_grades": [],
+        }
+        rag_trace.update(grade_update)
+        return {"route": "rewrite_question", "rag_trace": rag_trace}
+
+    if not grader:
+        emit_rag_step("📊", "无可用评分模型，跳过相关性评估")
+        grade_update = {
+            "grade_score": "unknown",
+            "grade_route": "rewrite_question",
+            "rewrite_needed": True,
+            "per_chunk_grades": [],
+        }
+        rag_trace.update(grade_update)
+        return {"route": "rewrite_question", "rag_trace": rag_trace}
+
+    emit_rag_step("📊", "正在逐块评估文档相关性...", f"候选 {len(docs)} 块")
+    question = state["question"]
+    prompt = PER_CHUNK_GRADE_PROMPT.format(question=question, context=_to_chunk_grading_payload(docs))
+    try:
+        response = await grader.with_structured_output(ChunkGrades, method="json_mode").ainvoke(
+            [{"role": "user", "content": prompt}]
+        )
+        ratings = getattr(response, "ratings", None)
+    except Exception as e:
+        # 打分失败时放行生成，避免检索链路整体报错
+        emit_rag_step("⚠️", "逐块相关性评估失败，放行生成", str(e)[:120])
+        grade_update = {
+            "grade_score": "unknown",
+            "grade_route": "generate_answer",
+            "rewrite_needed": False,
+            "per_chunk_grades": [],
+            "grade_error": str(e)[:200],
+        }
+        rag_trace.update(grade_update)
+        return {"route": "generate_answer", "rag_trace": rag_trace}
+
+    per_chunk_grades, passed = _apply_per_chunk_grades(docs, ratings)
+    route = "generate_answer" if passed else "rewrite_question"
+    yes_count = sum(1 for g in per_chunk_grades if g.get("binary_score") == "yes")
+    if route == "generate_answer":
+        emit_rag_step("✅", "文档相关性评估通过", f"{yes_count}/{len(per_chunk_grades)} 块相关")
+    else:
+        emit_rag_step("⚠️", "文档相关性不足，将重写查询", f"{yes_count}/{len(per_chunk_grades)} 块均不相关")
+    grade_update = {
+        "grade_score": "yes" if passed else "no",
+        "grade_route": route,
+        "rewrite_needed": route == "rewrite_question",
+        "per_chunk_grades": per_chunk_grades,
+    }
+    rag_trace.update(grade_update)
+    return {"route": route, "rag_trace": rag_trace}
+
+
+async def agrade_expanded_node(state: RAGState) -> RAGState:
+    from app.chat.tools import emit_rag_step
+
+    rag_trace = state.get("rag_trace", {}) or {}
+    docs = state.get("docs") or []
+    refusal_enabled = bool(getattr(settings, "KB_GRADE_REFUSAL_ENABLED", True))
+
+    if not refusal_enabled:
+        rag_trace.update({"second_grade": "skipped", "second_grade_reason": "KB_GRADE_REFUSAL_ENABLED=false"})
+        return {"route": "generate_answer", "rag_trace": rag_trace}
+
+    if not docs:
+        emit_rag_step("🚫", "知识库无相关资料", "扩展检索无结果，将告知用户")
+        rag_trace.update({"second_grade": "empty", "grade_route": "no_answer", "no_answer": True})
+        return {"route": "no_answer", "no_answer": True, "rag_trace": rag_trace}
+
+    llm_config = state.get("llm_config") or {}
+    grader = _grader_model(llm_config)
+    if not grader:
+        rag_trace.update({"second_grade": "no_model", "no_answer": False})
+        return {"route": "generate_answer", "rag_trace": rag_trace}
+
+    emit_rag_step("📊", "正在二次评估扩展检索相关性...", f"候选 {len(docs)} 块")
+    question = state["question"]
+    prompt = PER_CHUNK_GRADE_PROMPT.format(question=question, context=_to_chunk_grading_payload(docs))
+    try:
+        response = await grader.with_structured_output(ChunkGrades, method="json_mode").ainvoke(
+            [{"role": "user", "content": prompt}]
+        )
+        ratings = getattr(response, "ratings", None)
+    except Exception as e:
+        emit_rag_step("⚠️", "二次相关性评估失败，放行生成", str(e)[:120])
+        rag_trace.update({"second_grade": "error", "second_grade_error": str(e)[:200], "no_answer": False})
+        return {"route": "generate_answer", "rag_trace": rag_trace}
+
+    per_chunk_grades, passed = _apply_per_chunk_grades(docs, ratings)
+    rag_trace["second_grade_per_chunk_grades"] = per_chunk_grades
+    yes_count = sum(1 for g in per_chunk_grades if g.get("binary_score") == "yes")
+    if passed:
+        emit_rag_step("✅", "扩展检索相关性通过", f"{yes_count}/{len(per_chunk_grades)} 块相关")
+        rag_trace.update({"second_grade": "pass", "grade_route": "generate_answer", "no_answer": False})
+        return {"route": "generate_answer", "rag_trace": rag_trace}
+    emit_rag_step("🚫", "知识库无相关资料", "多次检索均未通过相关性评估，将告知用户")
+    rag_trace.update({"second_grade": "fail_all", "grade_route": "no_answer", "no_answer": True})
+    return {"route": "no_answer", "no_answer": True, "rag_trace": rag_trace}
+
+
+async def arewrite_question_node(state: RAGState) -> RAGState:
+    import asyncio as _asyncio
+
+    from app.chat.tools import emit_rag_step
+    from app.kb.rag_utils import agenerate_hypothetical_document, astep_back_expand
+
+    question = state["question"]
+    llm_config = state.get("llm_config") or {}
+    emit_rag_step("✏️", "正在重写查询...")
+    router = _router_model(llm_config)
+    strategy = "step_back"
+    if router:
+        prompt = (
+            "请根据用户问题选择最合适的查询扩展策略。\n"
+            "- step_back：包含具体名称、日期、代码等细节，需要先理解通用概念的问题。\n"
+            "- hyde：模糊、概念性、需要解释或定义的问题。\n"
+            "- complex：多步骤、需要分解或综合多种信息的复杂问题。\n"
+            f"用户问题：{question}\n"
+            "用 JSON 输出 strategy 字段，取值必须是 step_back、hyde、complex 之一。"
+            "（兼容接口要求提示中出现 json 字样。）"
+        )
+        try:
+            decision = await router.with_structured_output(RewriteStrategy, method="json_mode").ainvoke(
+                [{"role": "user", "content": prompt}]
+            )
+            strategy = decision.strategy
+        except Exception:
+            strategy = "step_back"
+
+    if strategy == "complex" and not bool(getattr(settings, "RAG_ALLOW_COMPLEX_STRATEGY", False)):
+        strategy = "step_back"
+
+    expanded_query = question
+    step_back_question = ""
+    step_back_answer = ""
+    hypothetical_doc = ""
+
+    if strategy == "complex":
+        # 并行：step-back 与 HyDE 生成相互独立，同时发起（省一次 LLM 等待）
+        emit_rag_step("🧠", f"使用策略: {strategy}", "并发生成退步问题与 HyDE 文档")
+        step_back_task = _asyncio.create_task(astep_back_expand(question, llm_config))
+        hyde_task = _asyncio.create_task(agenerate_hypothetical_document(question, llm_config))
+        step_back = await step_back_task
+        hypothetical_doc = await hyde_task
+        step_back_question = step_back.get("step_back_question", "")
+        step_back_answer = step_back.get("step_back_answer", "")
+        expanded_query = step_back.get("expanded_query", question)
+    elif strategy == "step_back":
+        emit_rag_step("🧠", f"使用策略: {strategy}", "生成退步问题")
+        step_back = await astep_back_expand(question, llm_config)
+        step_back_question = step_back.get("step_back_question", "")
+        step_back_answer = step_back.get("step_back_answer", "")
+        expanded_query = step_back.get("expanded_query", question)
+    elif strategy == "hyde":
+        emit_rag_step("📝", "HyDE 假设性文档生成中...")
+        hypothetical_doc = await agenerate_hypothetical_document(question, llm_config)
+
+    rag_trace = state.get("rag_trace", {}) or {}
+    rag_trace.update(
+        {
+            "rewrite_strategy": strategy,
+            "rewrite_query": expanded_query,
+        }
+    )
+
+    return {
+        "expansion_type": strategy,
+        "expanded_query": expanded_query,
+        "step_back_question": step_back_question,
+        "step_back_answer": step_back_answer,
+        "hypothetical_doc": hypothetical_doc,
+        "rag_trace": rag_trace,
+    }
+
+
+async def aretrieve_expanded(state: RAGState) -> RAGState:
+    from app.chat.tools import emit_rag_step
+    from app.kb.rag_utils import agenerate_hypothetical_document, aretrieve_documents
+
+    kb_scope = state["kb_scope"]
+    strategy = state.get("expansion_type") or "step_back"
+    emit_rag_step("🔄", "使用扩展查询重新检索...", f"策略: {strategy}")
+    results: List[dict] = []
+    rerank_applied_any = False
+    rerank_enabled_any = False
+    rerank_model = None
+    rerank_endpoint = None
+    rerank_errors: list[str] = []
+    retrieval_mode = None
+    candidate_k = None
+    leaf_retrieve_level = None
+    auto_merge_enabled = None
+    auto_merge_applied = False
+    auto_merge_threshold = None
+    auto_merge_replaced_chunks = 0
+    auto_merge_steps = 0
+
+    doc_fn = state.get("document_filenames")
+    inc_img = state.get("include_images", True)
+    hyde_chunk_count = 0
+    if strategy in ("hyde", "complex"):
+        hypothetical_doc = state.get("hypothetical_doc") or await agenerate_hypothetical_document(
+            state["question"], state.get("llm_config")
+        )
+        retrieved_hyde = await aretrieve_documents(
+            hypothetical_doc,
+            kb_scope=kb_scope,
+            top_k=5,
+            include_images=inc_img,
+            document_filenames=doc_fn,
+        )
+        hyde_meta = retrieved_hyde.get("meta", {})
+        hyde_docs = retrieved_hyde.get("docs", [])
+        if hyde_meta.get("rerank_below_min"):
+            hyde_docs = []
+            emit_rag_step("🚫", "HyDE 检索低于 rerank 分数阈值", "已丢弃该路结果")
+        hyde_chunk_count = len(hyde_docs)
+        results.extend(hyde_docs)
+        emit_rag_step(
+            "🧱",
+            "HyDE 三级检索",
+            (
+                f"L{hyde_meta.get('leaf_retrieve_level', 3)} 召回，"
+                f"候选 {hyde_meta.get('candidate_k', 0)}，"
+                f"合并替换 {hyde_meta.get('auto_merge_replaced_chunks', 0)}"
+            ),
+        )
+        rerank_applied_any = rerank_applied_any or bool(hyde_meta.get("rerank_applied"))
+        rerank_enabled_any = rerank_enabled_any or bool(hyde_meta.get("rerank_enabled"))
+        rerank_model = rerank_model or hyde_meta.get("rerank_model")
+        rerank_endpoint = rerank_endpoint or hyde_meta.get("rerank_endpoint")
+        if hyde_meta.get("rerank_error"):
+            rerank_errors.append(f"hyde:{hyde_meta.get('rerank_error')}")
+        retrieval_mode = retrieval_mode or hyde_meta.get("retrieval_mode")
+        candidate_k = candidate_k or hyde_meta.get("candidate_k")
+        leaf_retrieve_level = leaf_retrieve_level or hyde_meta.get("leaf_retrieve_level")
+        auto_merge_enabled = auto_merge_enabled if auto_merge_enabled is not None else hyde_meta.get("auto_merge_enabled")
+        auto_merge_applied = auto_merge_applied or bool(hyde_meta.get("auto_merge_applied"))
+        auto_merge_threshold = auto_merge_threshold or hyde_meta.get("auto_merge_threshold")
+        auto_merge_replaced_chunks += int(hyde_meta.get("auto_merge_replaced_chunks") or 0)
+        auto_merge_steps += int(hyde_meta.get("auto_merge_steps") or 0)
+
+    # complex：第二次检索（HyDE）仍为 0 条时不再做 Step-back，避免第三次向量检索
+    skip_step_back = strategy == "complex" and hyde_chunk_count == 0
+    if skip_step_back:
+        emit_rag_step(
+            "⏭️",
+            "已结束扩展检索",
+            "第二次检索（HyDE）无片段，跳过 Step-back 检索",
+        )
+
+    if strategy in ("step_back", "complex") and not skip_step_back:
+        expanded_query = state.get("expanded_query") or state["question"]
+        retrieved_stepback = await aretrieve_documents(
+            expanded_query,
+            kb_scope=kb_scope,
+            top_k=5,
+            include_images=inc_img,
+            document_filenames=doc_fn,
+        )
+        step_meta = retrieved_stepback.get("meta", {})
+        step_docs = retrieved_stepback.get("docs", [])
+        if step_meta.get("rerank_below_min"):
+            step_docs = []
+            emit_rag_step("🚫", "Step-back 检索低于 rerank 分数阈值", "已丢弃该路结果")
+        results.extend(step_docs)
+        emit_rag_step(
+            "🧱",
+            "Step-back 三级检索",
+            (
+                f"L{step_meta.get('leaf_retrieve_level', 3)} 召回，"
+                f"候选 {step_meta.get('candidate_k', 0)}，"
+                f"合并替换 {step_meta.get('auto_merge_replaced_chunks', 0)}"
+            ),
+        )
+        rerank_applied_any = rerank_applied_any or bool(step_meta.get("rerank_applied"))
+        rerank_enabled_any = rerank_enabled_any or bool(step_meta.get("rerank_enabled"))
+        rerank_model = rerank_model or step_meta.get("rerank_model")
+        rerank_endpoint = rerank_endpoint or step_meta.get("rerank_endpoint")
+        if step_meta.get("rerank_error"):
+            rerank_errors.append(f"step_back:{step_meta.get('rerank_error')}")
+        retrieval_mode = retrieval_mode or step_meta.get("retrieval_mode")
+        candidate_k = candidate_k or step_meta.get("candidate_k")
+        leaf_retrieve_level = leaf_retrieve_level or step_meta.get("leaf_retrieve_level")
+        auto_merge_enabled = auto_merge_enabled if auto_merge_enabled is not None else step_meta.get("auto_merge_enabled")
+        auto_merge_applied = auto_merge_applied or bool(step_meta.get("auto_merge_applied"))
+        auto_merge_threshold = auto_merge_threshold or step_meta.get("auto_merge_threshold")
+        auto_merge_replaced_chunks += int(step_meta.get("auto_merge_replaced_chunks") or 0)
+        auto_merge_steps += int(step_meta.get("auto_merge_steps") or 0)
+
+    deduped = []
+    seen = set()
+    for item in results:
+        key = (item.get("filename"), item.get("page_number"), item.get("text"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+
+    for idx, item in enumerate(deduped, 1):
+        item["rrf_rank"] = idx
+
+    context = _format_docs(deduped)
+    emit_rag_step("✅", f"扩展检索完成，共 {len(deduped)} 个片段")
+    rag_trace = state.get("rag_trace", {}) or {}
+    rag_trace.update(
+        {
+            "expanded_query": state.get("expanded_query") or state["question"],
+            "step_back_question": state.get("step_back_question", ""),
+            "step_back_answer": state.get("step_back_answer", ""),
+            "hypothetical_doc": state.get("hypothetical_doc", ""),
+            "expansion_type": strategy,
+            "skipped_step_back_after_empty_hyde": bool(skip_step_back),
+            "retrieved_chunks": deduped,
+            "expanded_retrieved_chunks": deduped,
+            "retrieval_stage": "expanded",
+            "rerank_enabled": rerank_enabled_any,
+            "rerank_applied": rerank_applied_any,
+            "rerank_model": rerank_model,
+            "rerank_endpoint": rerank_endpoint,
+            "rerank_error": "; ".join(rerank_errors) if rerank_errors else None,
+            "retrieval_mode": retrieval_mode,
+            "candidate_k": candidate_k,
+            "leaf_retrieve_level": leaf_retrieve_level,
+            "auto_merge_enabled": auto_merge_enabled,
+            "auto_merge_applied": auto_merge_applied,
+            "auto_merge_threshold": auto_merge_threshold,
+            "auto_merge_replaced_chunks": auto_merge_replaced_chunks,
+            "auto_merge_steps": auto_merge_steps,
+        }
+    )
+    return {"docs": deduped, "context": context, "rag_trace": rag_trace}
+
+
+def build_rag_agraph():
+    """构建异步 RAG 子图（拓扑与同步图一致）。"""
+    graph = StateGraph(RAGState)
+    graph.add_node("retrieve_initial", aretrieve_initial)
+    graph.add_node("grade_documents", agrade_documents_node)
+    graph.add_node("rewrite_question", arewrite_question_node)
+    graph.add_node("retrieve_expanded", aretrieve_expanded)
+    graph.add_node("grade_expanded", agrade_expanded_node)
+
+    graph.set_entry_point("retrieve_initial")
+
+    def _route_after_initial(state: RAGState) -> str:
+        docs = state.get("docs") or []
+        trace = state.get("rag_trace") or {}
+        if str(trace.get("retrieval_mode") or "") == "degraded_quota":
+            trace["degraded_quota"] = True
+            return "no_answer"
+        return "rewrite_question" if len(docs) == 0 else "grade_documents"
+
+    graph.add_conditional_edges(
+        "retrieve_initial",
+        _route_after_initial,
+        {
+            "rewrite_question": "rewrite_question",
+            "grade_documents": "grade_documents",
+            "no_answer": END,
+        },
+    )
+    graph.add_conditional_edges(
+        "grade_documents",
+        lambda state: state.get("route"),
+        {
+            "generate_answer": END,
+            "rewrite_question": "rewrite_question",
+        },
+    )
+    graph.add_edge("rewrite_question", "retrieve_expanded")
+    graph.add_edge("retrieve_expanded", "grade_expanded")
+    graph.add_conditional_edges(
+        "grade_expanded",
+        lambda state: state.get("route"),
+        {
+            "generate_answer": END,
+            "no_answer": END,
+        },
+    )
+    return graph.compile()
+
+
+rag_agraph = build_rag_agraph()
+
+
+async def run_rag_graph_async(
+    question: str,
+    kb_scope: str,
+    llm_config: dict[str, Any],
+    *,
+    document_filenames: list[str] | None = None,
+) -> dict:
+    """异步运行 RAG 子图（对话路径专用）。"""
+    return await rag_agraph.ainvoke(
+        {
+            "question": question,
+            "kb_scope": kb_scope,
+            "llm_config": llm_config,
+            "query": question,
+            "context": "",
+            "docs": [],
+            "route": None,
+            "expansion_type": None,
+            "expanded_query": None,
+            "step_back_question": None,
+            "step_back_answer": None,
+            "hypothetical_doc": None,
+            "rag_trace": None,
+            "include_images": True,
+            "document_filenames": document_filenames,
+            "no_answer": False,
+        }
+    )

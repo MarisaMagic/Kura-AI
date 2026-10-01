@@ -5,10 +5,12 @@ Milvus：密集 + 稀疏混合检索，按 kb_scope 隔离。
 
 from __future__ import annotations
 
+import asyncio
 import threading
 
 from pymilvus import (
     AnnSearchRequest,
+    AsyncMilvusClient,
     DataType,
     Function,
     FunctionType,
@@ -133,6 +135,106 @@ def filename_in_filter_expr(filenames: list[str]) -> str:
         return f'filename == "{milvus_escape(filenames[0])}"'
     parts = ", ".join(f'"{milvus_escape(fn)}"' for fn in filenames)
     return f"filename in [{parts}]"
+
+
+# 检索输出字段（dense / hybrid 共用；同步与异步检索格式一致）
+_RETRIEVE_OUTPUT_FIELDS = [
+    "text",
+    "filename",
+    "file_type",
+    "page_number",
+    "chunk_id",
+    "parent_chunk_id",
+    "root_chunk_id",
+    "chunk_level",
+    "chunk_idx",
+    "kb_scope",
+    "content_type",  # 文本或图片
+    "block_type",  # text/code/table（图片为空）
+    "code_language",  # 代码块语言
+    "image_path",  # 图片路径
+    "position_start",
+    "position_end",  # 文本位置
+    "image_position_x",
+    "image_position_y",
+    "image_width",
+    "image_height",  # 图片位置
+]
+
+
+def _format_hybrid_hits(results: object) -> list[dict]:
+    """hybrid_search 结果 → 统一文档字典（hit 为扁平字段结构；同步/异步共用）。"""
+    formatted: list[dict] = []
+    for hits in results:  # type: ignore[union-attr]
+        for hit in hits:
+            cl = hit.get("chunk_level", 0)
+            formatted.append(
+                {
+                    "id": hit.get("id"),
+                    "text": hit.get("text", ""),
+                    "filename": hit.get("filename", ""),
+                    "file_type": hit.get("file_type", ""),
+                    "page_number": hit.get("page_number", 0),
+                    "chunk_id": hit.get("chunk_id", ""),
+                    "parent_chunk_id": hit.get("parent_chunk_id", ""),
+                    "root_chunk_id": hit.get("root_chunk_id", ""),
+                    "chunk_level": hit.get("chunk_level", 0),
+                    "chunk_idx": hit.get("chunk_idx", 0),
+                    "kb_scope": hit.get("kb_scope", ""),
+                    "content_type": _normalize_content_type(hit.get("content_type"), cl),
+                    "block_type": normalize_block_type(
+                        hit.get("block_type"), _normalize_content_type(hit.get("content_type"), cl)
+                    ),
+                    "code_language": hit.get("code_language", "") or "",
+                    "image_path": hit.get("image_path", ""),
+                    "position_start": hit.get("position_start", 0),
+                    "position_end": hit.get("position_end", 0),
+                    "image_position_x": hit.get("image_position_x", 0),
+                    "image_position_y": hit.get("image_position_y", 0),
+                    "image_width": hit.get("image_width", 0),
+                    "image_height": hit.get("image_height", 0),
+                    "score": hit.get("distance", 0.0),
+                }
+            )
+    return formatted
+
+
+def _format_dense_hits(results: object) -> list[dict]:
+    """search 结果 → 统一文档字典（hit 含 entity 包装；同步/异步共用）。"""
+    formatted: list[dict] = []
+    for hits in results:  # type: ignore[union-attr]
+        for hit in hits:
+            ent = hit.get("entity", {}) or {}
+            cl = ent.get("chunk_level", 0)
+            formatted.append(
+                {
+                    "id": hit.get("id"),
+                    "text": ent.get("text", ""),
+                    "filename": ent.get("filename", ""),
+                    "file_type": ent.get("file_type", ""),
+                    "page_number": ent.get("page_number", 0),
+                    "chunk_id": ent.get("chunk_id", ""),
+                    "parent_chunk_id": ent.get("parent_chunk_id", ""),
+                    "root_chunk_id": ent.get("root_chunk_id", ""),
+                    "chunk_level": ent.get("chunk_level", 0),
+                    "chunk_idx": ent.get("chunk_idx", 0),
+                    "kb_scope": ent.get("kb_scope", ""),
+                    "content_type": _normalize_content_type(ent.get("content_type"), cl),
+                    "block_type": normalize_block_type(
+                        ent.get("block_type"), _normalize_content_type(ent.get("content_type"), cl)
+                    ),
+                    "code_language": ent.get("code_language", "") or "",
+                    "image_path": ent.get("image_path", ""),
+                    "position_start": ent.get("position_start", 0),
+                    "position_end": ent.get("position_end", 0),
+                    "image_position_x": ent.get("image_position_x", 0),
+                    "image_position_y": ent.get("image_position_y", 0),
+                    "image_width": ent.get("image_width", 0),
+                    "image_height": ent.get("image_height", 0),
+                    "score": hit.get("distance", 0.0),
+                }
+            )
+    return formatted
 
 
 class MilvusManager:
@@ -451,24 +553,7 @@ class MilvusManager:
         :param weighted_params: weighted 融合的两腿权重 [dense_w, sparse_w]，默认 [0.7, 0.3]
         :return: 数据列表
         """
-        output_fields = [
-            "text",
-            "filename",
-            "file_type",
-            "page_number",
-            "chunk_id",
-            "parent_chunk_id",
-            "root_chunk_id",
-            "chunk_level",
-            "chunk_idx",
-            "kb_scope",
-            "content_type",  # 文本或图片
-            "block_type",    # text/code/table（图片为空）
-            "code_language",  # 代码块语言
-            "image_path",    # 图片路径
-            "position_start", "position_end",  # 文本位置
-            "image_position_x", "image_position_y", "image_width", "image_height",  # 图片位置
-        ]
+        output_fields = _RETRIEVE_OUTPUT_FIELDS
         dense_search = AnnSearchRequest(
             data=[dense_embedding],
             anns_field="dense_embedding",
@@ -502,39 +587,7 @@ class MilvusManager:
             limit=top_k,
             output_fields=output_fields,
         )
-        formatted: list[dict] = []
-        for hits in results:
-            for hit in hits:
-                cl = hit.get("chunk_level", 0)
-                formatted.append(
-                    {
-                        "id": hit.get("id"),
-                        "text": hit.get("text", ""),
-                        "filename": hit.get("filename", ""),
-                        "file_type": hit.get("file_type", ""),
-                        "page_number": hit.get("page_number", 0),
-                        "chunk_id": hit.get("chunk_id", ""),
-                        "parent_chunk_id": hit.get("parent_chunk_id", ""),
-                        "root_chunk_id": hit.get("root_chunk_id", ""),
-                        "chunk_level": hit.get("chunk_level", 0),
-                        "chunk_idx": hit.get("chunk_idx", 0),
-                        "kb_scope": hit.get("kb_scope", ""),
-                        "content_type": _normalize_content_type(hit.get("content_type"), cl),
-                        "block_type": normalize_block_type(
-                            hit.get("block_type"), _normalize_content_type(hit.get("content_type"), cl)
-                        ),
-                        "code_language": hit.get("code_language", "") or "",
-                        "image_path": hit.get("image_path", ""),
-                        "position_start": hit.get("position_start", 0),
-                        "position_end": hit.get("position_end", 0),
-                        "image_position_x": hit.get("image_position_x", 0),
-                        "image_position_y": hit.get("image_position_y", 0),
-                        "image_width": hit.get("image_width", 0),
-                        "image_height": hit.get("image_height", 0),
-                        "score": hit.get("distance", 0.0),
-                    }
-                )
-        return formatted
+        return _format_hybrid_hits(results)
 
     def dense_retrieve(
         self,
@@ -555,60 +608,10 @@ class MilvusManager:
             anns_field="dense_embedding",
             search_params={"metric_type": "IP", "params": {"ef": 64}},
             limit=top_k,
-            output_fields=[
-                "text",
-                "filename",
-                "file_type",
-                "page_number",
-                "chunk_id",
-                "parent_chunk_id",
-                "root_chunk_id",
-                "chunk_level",
-                "chunk_idx",
-                "kb_scope",
-                "content_type",  # 文本或图片
-                "block_type",    # text/code/table（图片为空）
-                "code_language",  # 代码块语言
-                "image_path",    # 图片路径
-                "position_start", "position_end",  # 文本位置
-                "image_position_x", "image_position_y", "image_width", "image_height",  # 图片位置
-            ],
+            output_fields=_RETRIEVE_OUTPUT_FIELDS,
             filter=filter_expr,
         )
-        formatted: list[dict] = []
-        for hits in results:
-            for hit in hits:
-                ent = hit.get("entity", {}) or {}
-                cl = ent.get("chunk_level", 0)
-                formatted.append(
-                    {
-                        "id": hit.get("id"),
-                        "text": ent.get("text", ""),
-                        "filename": ent.get("filename", ""),
-                        "file_type": ent.get("file_type", ""),
-                        "page_number": ent.get("page_number", 0),
-                        "chunk_id": ent.get("chunk_id", ""),
-                        "parent_chunk_id": ent.get("parent_chunk_id", ""),
-                        "root_chunk_id": ent.get("root_chunk_id", ""),
-                        "chunk_level": ent.get("chunk_level", 0),
-                        "chunk_idx": ent.get("chunk_idx", 0),
-                        "kb_scope": ent.get("kb_scope", ""),
-                        "content_type": _normalize_content_type(ent.get("content_type"), cl),
-                        "block_type": normalize_block_type(
-                            ent.get("block_type"), _normalize_content_type(ent.get("content_type"), cl)
-                        ),
-                        "code_language": ent.get("code_language", "") or "",
-                        "image_path": ent.get("image_path", ""),
-                        "position_start": ent.get("position_start", 0),
-                        "position_end": ent.get("position_end", 0),
-                        "image_position_x": ent.get("image_position_x", 0),
-                        "image_position_y": ent.get("image_position_y", 0),
-                        "image_width": ent.get("image_width", 0),
-                        "image_height": ent.get("image_height", 0),
-                        "score": hit.get("distance", 0.0),
-                    }
-                )
-        return formatted
+        return _format_dense_hits(results)
 
     def sparse_retrieve(
         self,
@@ -700,3 +703,106 @@ class MilvusManager:
         """
         timeout = max(1.0, float(getattr(settings, "MILVUS_PROBE_TIMEOUT_SECONDS", 5.0) or 5.0))
         return self._get_client().has_collection(self.collection_name, timeout=timeout)
+
+
+class AsyncMilvusManager:
+    """
+    异步 Milvus 管理器（P0：检索链协程化专用）。
+
+    使用 pymilvus 原生 ``AsyncMilvusClient``（真协程 gRPC，等待期间不占用任何线程）。
+    仅覆盖对话检索所需方法（hybrid/dense 检索）；写入与低频管理操作继续使用同步
+    ``MilvusManager``（worker/启动预热路径）。
+    """
+
+    def __init__(self) -> None:
+        self.host = (settings.MILVUS_HOST or "127.0.0.1").strip()
+        self.port = (settings.MILVUS_PORT or "19530").strip()
+        self.collection_name = (settings.MILVUS_COLLECTION or "kura_ai_kb").strip()
+        self.uri = f"http://{self.host}:{self.port}"
+        self.aclient: AsyncMilvusClient | None = None
+        self._aclient_loop = None
+        self._lock = threading.Lock()
+
+    def _get_aclient(self) -> AsyncMilvusClient:
+        """异步客户端懒加载；跨事件循环（同步路径 asyncio.run 隔离 loop）自动重建。"""
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            if self.aclient is None or self._aclient_loop is not loop:
+                self.aclient = AsyncMilvusClient(**milvus_client_kwargs())
+                self._aclient_loop = loop
+            return self.aclient
+
+    async def a_hybrid_retrieve(
+        self,
+        dense_embedding: list[float],
+        query_text: str,
+        top_k: int,
+        filter_expr: str,
+        rrf_k: int = 60,
+        fusion: str = "rrf",
+        weighted_params: list[float] | None = None,
+    ) -> list[dict]:
+        """异步混合检索（dense + 服务端 BM25，RRF/加权融合）；结果格式与同步版一致。"""
+        dense_search = AnnSearchRequest(
+            data=[dense_embedding],
+            anns_field="dense_embedding",
+            param={"metric_type": "IP", "params": {"ef": 64}},
+            limit=top_k * 2,
+            expr=filter_expr,
+        )
+        sparse_search = AnnSearchRequest(
+            data=[query_text],
+            anns_field="bm25_sparse",
+            param={"metric_type": "BM25"},
+            limit=top_k * 2,
+            expr=filter_expr,
+        )
+        if str(fusion or "rrf").lower() == "weighted":
+            weights = list(weighted_params or [0.7, 0.3])
+            if len(weights) != 2:
+                weights = [0.7, 0.3]
+            reranker = WeightedRanker(weights[0], weights[1])
+        else:
+            reranker = RRFRanker(k=rrf_k)
+        results = await self._get_aclient().hybrid_search(
+            collection_name=self.collection_name,
+            reqs=[dense_search, sparse_search],
+            ranker=reranker,
+            limit=top_k,
+            output_fields=_RETRIEVE_OUTPUT_FIELDS,
+        )
+        return _format_hybrid_hits(results)
+
+    async def a_dense_retrieve(
+        self,
+        dense_embedding: list[float],
+        top_k: int,
+        filter_expr: str,
+    ) -> list[dict]:
+        """异步密集检索；结果格式与同步版一致。"""
+        results = await self._get_aclient().search(
+            collection_name=self.collection_name,
+            data=[dense_embedding],
+            anns_field="dense_embedding",
+            search_params={"metric_type": "IP", "params": {"ef": 64}},
+            limit=top_k,
+            output_fields=_RETRIEVE_OUTPUT_FIELDS,
+            filter=filter_expr,
+        )
+        return _format_dense_hits(results)
+
+
+_async_manager: "AsyncMilvusManager | None" = None
+_async_manager_loop = None
+_async_manager_lock = threading.Lock()
+
+
+def get_async_milvus_manager() -> AsyncMilvusManager:
+    """进程级异步 Milvus 单例（按事件循环重建；须在事件循环内调用）。"""
+    global _async_manager, _async_manager_loop
+    loop = asyncio.get_running_loop()
+    with _async_manager_lock:
+        if _async_manager is None or _async_manager_loop is not loop:
+            _async_manager = AsyncMilvusManager()
+            _async_manager_loop = loop
+        return _async_manager

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 import random
 import threading
@@ -12,7 +14,7 @@ import time
 from typing import Any, Callable
 
 import dashscope
-from dashscope import MultiModalEmbedding
+from dashscope import AioMultiModalEmbedding, MultiModalEmbedding
 from http import HTTPStatus
 from loguru import logger
 
@@ -344,6 +346,155 @@ class MultimodalEmbeddingService:
 
         except Exception as e:
             logger.error(f"Failed to generate image embeddings: {e}")
+            raise
+
+    # ---------------------------------------------------------------- 异步接口（P0：检索链协程化）
+
+    async def _acall_with_retry(self, fn: Callable[[], Any], describe: str) -> Any:
+        """
+        异步重试执行（与同步 ``_call_with_retry`` 语义一致）：
+        - 全局 QuotaGuard 异步获取（等待不占线程）；熔断/等待超时快速失败不重试；
+        - 限流类失败计入熔断器（record_failure）；退避上限取 min(KB 配置, UPSTREAM_RETRY_MAX_SECONDS)。
+        """
+        from app.utils.upstream_quota import embedding_quota
+
+        quota = embedding_quota()
+        max_retries = max(0, int(getattr(settings, "KB_UPLOAD_EMBEDDING_MAX_RETRIES", 3) or 0))
+        base = max(0.1, float(getattr(settings, "KB_UPLOAD_EMBEDDING_RETRY_BASE_SECONDS", 1.0) or 1.0))
+        kb_cap = max(base, float(getattr(settings, "KB_UPLOAD_EMBEDDING_RETRY_MAX_SECONDS", 8.0) or 8.0))
+        upstream_cap = max(base, float(getattr(settings, "UPSTREAM_RETRY_MAX_SECONDS", 1.5) or 1.5))
+        cap = min(kb_cap, upstream_cap)
+        attempt = 0
+        while True:
+            try:
+                async with quota.acquire():
+                    result = await fn()
+                quota.record_success()
+                return result
+            except (QuotaBreakerOpenError, QuotaTimeoutError):
+                # 配额保护触发：快速降级，不重试
+                raise
+            except Exception as e:  # noqa: BLE001
+                if isinstance(e, EmbeddingThrottledError) or is_throttle_error(None, str(e)):
+                    quota.record_failure()
+                if attempt >= max_retries or not _is_retryable(e):
+                    raise
+                attempt += 1
+                delay = min(cap, base * (2 ** (attempt - 1))) * (0.7 + random.random() * 0.6)
+                logger.warning("{} 第 {}/{} 次重试（{:.1f}s 后）: {}", describe, attempt, max_retries, delay, e)
+                await asyncio.sleep(delay)
+
+    async def aget_text_embeddings(
+        self, texts: list[str], request_timeout: int | None = None
+    ) -> list[list[float]]:
+        """异步文本嵌入（AioMultiModalEmbedding，aiohttp 真异步；供检索链使用）。"""
+        if not self.api_key:
+            raise ValueError("未配置 EMBEDDING_API_KEY")
+        if not texts:
+            return []
+
+        input_data = [{"text": text} for text in texts]
+        call_kwargs: dict[str, Any] = {}
+        if request_timeout is not None:
+            call_kwargs["request_timeout"] = int(request_timeout)
+
+        async def _call() -> list[list[float]]:
+            resp = await AioMultiModalEmbedding.call(
+                model=self.model,
+                input=input_data,
+                dimension=self.embedding_dim,
+                **call_kwargs,
+            )
+            if resp.status_code != HTTPStatus.OK:
+                if is_throttle_error(resp.code, resp.message, resp.status_code):
+                    raise EmbeddingThrottledError(f"DashScope 限流: {resp.code} - {resp.message}")
+                raise RuntimeError(f"DashScope API 调用失败: {resp.code} - {resp.message}")
+            embeddings: list[list[float]] = []
+            for item in resp.output.get("embeddings", []):
+                if "embedding" in item:
+                    embeddings.append(item["embedding"])
+            return embeddings
+
+        try:
+            embeddings = await self._acall_with_retry(_call, f"文本嵌入（{len(texts)} 条，异步）")
+            logger.info(f"Generated {len(embeddings)} text embeddings (async)")
+            return embeddings
+        except Exception as e:
+            logger.error(f"Failed to generate text embeddings (async): {e}")
+            raise
+
+    async def aget_image_embeddings(
+        self,
+        image_paths: list[str],
+        request_timeout: int | None = None,
+        tick_cb: Callable[[], Any] | None = None,
+    ) -> list[list[float]]:
+        """
+        异步图片嵌入：本地并发度由 asyncio.Semaphore 控制（EMBEDDING_IMAGE_PARALLELISM），
+        服务商侧总在途仍由全局 QuotaGuard 约束；gather 保序，异常语义与同步版一致。
+        """
+        if not self.api_key:
+            raise ValueError("未配置 EMBEDDING_API_KEY")
+        if not image_paths:
+            return []
+
+        parallelism = max(1, min(int(getattr(settings, "EMBEDDING_IMAGE_PARALLELISM", 2) or 2), len(image_paths)))
+        sem = asyncio.Semaphore(parallelism)
+        call_kwargs: dict[str, Any] = {}
+        if request_timeout is not None:
+            call_kwargs["request_timeout"] = int(request_timeout)
+
+        async def _embed_one(image_path: str) -> list[float]:
+            if tick_cb is not None:
+                res = tick_cb()
+                if inspect.isawaitable(res):
+                    await res
+            try:
+                # 准备输入数据；本地文件用 file:// 协议，URL 原样透传
+                if os.path.exists(image_path):
+                    input_data = [{"image": f"file://{os.path.abspath(image_path)}"}]
+                else:
+                    input_data = [{"image": image_path}]
+
+                async def _call() -> list[float]:
+                    async with sem:
+                        resp = await AioMultiModalEmbedding.call(
+                            model=self.model,
+                            input=input_data,
+                            dimension=self.embedding_dim,
+                            **call_kwargs,
+                        )
+                    if resp.status_code != HTTPStatus.OK:
+                        if is_throttle_error(resp.code, resp.message, resp.status_code):
+                            raise EmbeddingThrottledError(f"DashScope 限流: {resp.code} - {resp.message}")
+                        logger.warning(
+                            f"Failed to generate embedding for image {image_path}: {resp.code} - {resp.message}"
+                        )
+                        return [0.0] * self.embedding_dim
+                    items = resp.output.get("embeddings") or []
+                    if items:
+                        return items[0].get("embedding", [])
+                    logger.warning(f"No embedding returned for image {image_path}")
+                    return [0.0] * self.embedding_dim
+
+                embedding = await self._acall_with_retry(_call, f"图片嵌入 {os.path.basename(image_path)}（异步）")
+                return embedding
+
+            except (EmbeddingThrottledError, EmbeddingConcurrencyTimeoutError, QuotaBreakerOpenError, QuotaTimeoutError):
+                # 限流/配额熔断：向上抛出不污染索引
+                raise
+            except Exception as e:
+                logger.warning(f"Failed to generate embedding for image {image_path}: {e}")
+                return [0.0] * self.embedding_dim
+
+        tasks = [asyncio.create_task(_embed_one(p)) for p in image_paths]
+        try:
+            embeddings = list(await asyncio.gather(*tasks))
+            logger.info(f"Generated {len(embeddings)} image embeddings (async)")
+            return embeddings
+        except BaseException:
+            for t in tasks:
+                t.cancel()
             raise
 
     def get_multimodal_fusion_embeddings(

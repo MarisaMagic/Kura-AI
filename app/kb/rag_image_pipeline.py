@@ -175,3 +175,114 @@ def run_image_rag_graph(
         "error": out.get("error"),
         "meta": out.get("meta", {}),
     }
+
+
+# ================================================================
+# P0：异步以图检索管线（对话路径专用；拓扑与同步版一致，PG/MinIO/检索 IO 全异步）
+# 注意：与同步版保持行为一致；同步版修改需同步检查本区块。
+# ================================================================
+
+
+async def _anode_resolve_attachment(state: ImageRAGState) -> ImageRAGState:
+    import asyncio
+
+    aid = (state.get("attachment_id") or "").strip()
+    user_id = state["user_id"]
+    agent_id = state["agent_id"]
+    session_id = state["session_id"]
+    row = await asyncio.to_thread(
+        get_attachment_row, aid, user_id=user_id, agent_id=agent_id, session_id=session_id
+    )
+    if not row:
+        return {**state, "resolved_image_path": None, "error": "附件不存在或不属于当前会话。"}
+    kind = (getattr(row, "kind", None) or "") or classify_kind(row.original_filename or "")
+    if kind != "image":
+        return {**state, "resolved_image_path": None, "error": "该附件不是图片，无法用于以图检索。"}
+    # 附件本体在对象存储：下载为本地临时文件（DashScope embedding 走 file://），末节点负责清理
+    try:
+        raw = await asyncio.to_thread(obs.read_bytes, attachment_object_key(row.stored_relpath))
+    except obs.ObjectNotFoundError:
+        return {**state, "resolved_image_path": None, "error": f"图片文件已丢失或不可读: {row.stored_relpath}"}
+    suffix = Path(row.original_filename or "").suffix or ".png"
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    with os.fdopen(fd, "wb") as f:
+        f.write(raw)
+    emit_rag_step("📷", "以图知识库检索", f"已解析 attachment: {aid[:8]}…")
+    return {**state, "resolved_image_path": tmp_path, "error": None}
+
+
+async def _anode_retrieve(state: ImageRAGState) -> ImageRAGState:
+    if state.get("error") or not state.get("resolved_image_path"):
+        return {
+            **state,
+            "docs": [],
+            "meta": {
+                "retrieval_mode": "skipped",
+                "candidate_count": 0,
+            },
+        }
+    from app.kb.rag_utils import aretrieve_documents_by_image
+
+    path = state["resolved_image_path"]
+    kb_scope = state["kb_scope"]
+    top_k = int(state.get("top_k") or 5)
+    focus = (state.get("focus") or "mixed").lower()
+    if focus not in ("text", "image", "mixed"):
+        focus = "mixed"
+
+    emit_rag_step("🔍", "以图向量化 + Milvus 密集检索", f"focus={focus}, top_k={top_k}")
+    out = await aretrieve_documents_by_image(
+        path,
+        kb_scope,
+        top_k=top_k,
+        focus=focus,  # type: ignore[arg-type]
+    )
+    return {**state, "docs": out.get("docs", []), "meta": out.get("meta", {})}
+
+
+def build_image_rag_agraph():
+    """构建异步以图检索子图（拓扑与同步版一致；末节点为纯逻辑同步函数）。"""
+    graph = StateGraph(ImageRAGState)
+    graph.add_node("resolve_attachment", _anode_resolve_attachment)
+    graph.add_node("retrieve_by_image", _anode_retrieve)
+    graph.add_node("assemble_rag_trace", _node_assemble_rag_trace)
+    graph.set_entry_point("resolve_attachment")
+    graph.add_edge("resolve_attachment", "retrieve_by_image")
+    graph.add_edge("retrieve_by_image", "assemble_rag_trace")
+    graph.add_edge("assemble_rag_trace", END)
+    return graph.compile()
+
+
+image_rag_agraph = build_image_rag_agraph()
+
+
+async def run_image_rag_graph_async(
+    attachment_id: str,
+    user_id: int,
+    agent_id: int,
+    session_id: str,
+    kb_scope: str,
+    *,
+    focus: str = "mixed",
+    top_k: int = 5,
+) -> dict[str, Any]:
+    """异步运行以图检索子图（对话路径专用）。"""
+    out = await image_rag_agraph.ainvoke(
+        {
+            "attachment_id": attachment_id,
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "session_id": session_id,
+            "kb_scope": kb_scope,
+            "focus": focus,
+            "top_k": top_k,
+        }
+    )
+    if not isinstance(out, dict):
+        return {"docs": [], "rag_trace": None, "error": "image_rag_empty"}
+    return {
+        "docs": out.get("docs", []),
+        "rag_trace": out.get("rag_trace"),
+        "error": out.get("error"),
+        "meta": out.get("meta", {}),
+    }
