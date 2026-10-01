@@ -762,7 +762,7 @@ def _format_result_block(index: int, item: dict) -> str:
 # 搜索 endpoint 固定（博查 API / cn.bing.com），按 key+代理复用连接池，
 # 避免高并发下每请求新建客户端重复握手；同步路径继续每次新建（频率低）。
 # ================================================================
-_ASYNC_CLIENTS: dict[str, Any] = {}
+_ASYNC_CLIENTS: dict[tuple[Any, str, str], Any] = {}
 _ASYNC_CLIENTS_LOCK = threading.Lock()
 
 
@@ -776,12 +776,12 @@ def _shared_async_client(
     import httpx
 
     try:
-        # AsyncClient 与事件循环绑定：跨 loop 复用会报 "Event loop is closed"，
-        # key 须含 loop id（生产单 loop 无影响，兼容测试/脚本多 asyncio.run）
-        loop_id = id(asyncio.get_running_loop())
+        # AsyncClient 与事件循环绑定：以 loop 对象（身份）为键；
+        # 不能用 id(loop)——关闭后 id 会被新 loop 复用，导致跨 loop 误命中。
+        loop: Any = asyncio.get_running_loop()
     except RuntimeError:
-        loop_id = 0
-    cache_key = f"{loop_id}|{key}|{proxy or ''}"
+        loop = None
+    cache_key: tuple[Any, str, str] = (loop, key, proxy or "")
     with _ASYNC_CLIENTS_LOCK:
         cached = _ASYNC_CLIENTS.get(cache_key)
         if cached is not None:
