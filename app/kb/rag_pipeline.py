@@ -625,6 +625,12 @@ def build_rag_graph():
     # 用原始问题进行一次检索
     def _route_after_initial(state: RAGState) -> str:
         docs = state.get("docs") or []
+        trace = state.get("rag_trace") or {}
+        if str(trace.get("retrieval_mode") or "") == "degraded_quota":
+            # 嵌入配额受限（熔断/等待超时）：跳过查询扩展与二次 LLM 调用，快速结束，
+            # 由工具侧提示「知识库暂时繁忙」，避免低配额下连续失败拖慢对话
+            trace["degraded_quota"] = True
+            return "no_answer"
         return "rewrite_question" if len(docs) == 0 else "grade_documents"
 
     graph.add_conditional_edges(
@@ -635,6 +641,8 @@ def build_rag_graph():
             "rewrite_question": "rewrite_question",
             # 如果检索到的文档列表不为空，则评估文档相关性
             "grade_documents": "grade_documents",
+            # 嵌入配额受限：直接结束（非拒答，工具侧给出重试提示）
+            "no_answer": END,
         },
     )
     graph.add_conditional_edges(

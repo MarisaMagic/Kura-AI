@@ -60,3 +60,14 @@ class KbDeleteResponse(BaseModel):
     """
     display_filename: str
     message: str = "ok"
+
+
+class KbDocsDelete(BaseModel):
+    """
+    批量删除知识库文档（按前端当前筛选结果传文件名）
+    :param agent_id: 智能体ID
+    :param filenames: 展示文件名列表（单次上限 5000）
+    """
+
+    agent_id: int = Field(..., description="智能体ID")
+    filenames: List[str] = Field(..., min_length=1, max_length=5000, description="展示文件名列表")

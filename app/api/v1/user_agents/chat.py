@@ -48,16 +48,17 @@ from app.schemas.agent_chat import (
 )
 from app.schemas.base import Success
 from app.settings import settings
-from app.utils.rate_limit import check_user_rate_limit
+from app.utils.concurrency import LLMGateTimeout, llm_slot, run_sync
+from app.utils.rate_limit import acheck_user_rate_limit
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
-def _check_chat_rate_limit(user_id: int) -> None:
+async def _check_chat_rate_limit(user_id: int) -> None:
     """对话生成入口统一限流（按用户计，覆盖 /chat、/chat/stream、/chat/jobs）。"""
-    check_user_rate_limit(
+    await acheck_user_rate_limit(
         user_id,
         action="agent_chat",
         limit=int(getattr(settings, "CHAT_RATE_LIMIT_PER_MINUTE", 20)),
@@ -65,19 +66,22 @@ def _check_chat_rate_limit(user_id: int) -> None:
     )
 
 
-def _check_chat_quota(user_id: int, agent_id: int, session_id: str, *, reserve: int = 2) -> None:
+async def _check_chat_quota(user_id: int, agent_id: int, session_id: str, *, reserve: int = 2) -> None:
     """对话入口存储配额预检：会话数 / 每会话消息数超限时抛 429。
 
     :param reserve: 预计本轮新增消息行数（普通一轮 = 2，重新生成 = 1）
     """
     try:
-        storage.check_chat_quota(user_id, agent_id, session_id, reserve=reserve)
+        await run_sync(storage.check_chat_quota, user_id, agent_id, session_id, reserve=reserve, timeout=10.0)
     except ChatQuotaExceeded as e:
         raise HTTPException(status_code=429, detail=e.detail) from e
 
 
 def _cached_tools_tokens(agent_id: int) -> int:
-    """上次构建 agent 时缓存的工具 schema token 实测值（未缓存返回 0）。"""
+    """上次构建 agent 时缓存的工具 schema token 实测值（未缓存返回 0）。
+
+    同步版：调用方须已在线程池内（如 asyncio.to_thread 包裹的闭包）。
+    """
     from app.chat.cache import cache
 
     val = cache.get_json(f"chat_ctx_fixed:{int(agent_id)}")
@@ -87,6 +91,11 @@ def _cached_tools_tokens(agent_id: int) -> int:
         return int(val.get("tools_tokens") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+async def _acached_tools_tokens(agent_id: int) -> int:
+    """异步入口：把同步 Redis 读移出事件循环。"""
+    return await run_sync(_cached_tools_tokens, agent_id, timeout=5.0)
 
 
 @router.post("/chat/attachments/upload", summary="上传会话附件（先上传再发消息）", tags=["智能体模块"])
@@ -113,13 +122,15 @@ async def upload_chat_attachment(
     if not raw:
         raise HTTPException(status_code=400, detail="空文件")
     try:
-        # 保存上传文件, 返回附件ID、文件名、文件类型、文件大小
-        data = save_uploaded_file( 
+        # 保存上传文件（MinIO + PG 同步 IO）：on 线程池执行，避免阻塞事件循环
+        data = await run_sync(
+            save_uploaded_file,
             user_id=user_id,
             agent_id=agent_id,
             session_id=sid,
             original_filename=file.filename or "file",
             raw=raw,
+            timeout=120.0,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -144,10 +155,14 @@ async def preview_chat_attachment(
     aid = (attachment_id or "").strip()
     if not aid:
         raise HTTPException(status_code=400, detail="attachment_id 不能为空")
-    row = get_attachment_row(aid, user_id=user_id, agent_id=agent_id, session_id=sid)
+    row = await run_sync(
+        get_attachment_row, aid, user_id=user_id, agent_id=agent_id, session_id=sid, timeout=10.0
+    )
     if not row:
         raise HTTPException(status_code=404, detail="附件不存在")
-    raw = file_bytes_for_attachment(aid, user_id=user_id, agent_id=agent_id, session_id=sid)
+    raw = await run_sync(
+        file_bytes_for_attachment, aid, user_id=user_id, agent_id=agent_id, session_id=sid, timeout=60.0
+    )
     if not raw:
         raise HTTPException(status_code=404, detail="附件文件缺失或不可读")
     mime = (row.mime or "").strip() or "application/octet-stream"
@@ -193,30 +208,40 @@ def _upstream_http_exception(exc: Exception) -> HTTPException | None:
 @router.post("/chat", summary="智能体对话（非流式）", tags=["智能体模块"])
 async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(AuthControl.is_authed)):
     user_id = current_user.id
-    _check_chat_rate_limit(user_id)
+    await _check_chat_rate_limit(user_id)
     ua = await user_agent_controller.get_accessible(request.agent_id, user_id)
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     session_id = (request.session_id or "default_session").strip() or "default_session"
-    _check_chat_quota(user_id, request.agent_id, session_id, reserve=2)
+    await _check_chat_quota(user_id, request.agent_id, session_id, reserve=2)
+    # MCP 服务配置须在主事件循环内查询（Tortoise/asyncpg 连接不可跨事件循环）；
+    # 线程内的同步链路只做 MCP 网络调用与工具包装。
+    from app.mcp_client.service import get_agent_mcp_server_configs
+
+    mcp_server_configs = await get_agent_mcp_server_configs(request.agent_id)
     try:
-        # 放到线程池执行：chat_with_agent_sync 内部会用 asyncio.run 加载 MCP 工具，
-        # 需运行在无活动事件循环的线程中；同时避免同步 LLM 调用阻塞事件循环。
-        resp = await asyncio.to_thread(
-            chat_with_agent_sync,
-            ua,
-            request.message.strip(),
-            user_id,
-            request.agent_id,
-            session_id,
-            use_knowledge_retrieval=request.use_knowledge_retrieval,
-            use_web_search=request.use_web_search,
-            attachment_ids=request.attachment_ids or None,
-            mcp_approved_pending_id=request.mcp_approved_pending_id,
-        )
+        # LLM 并发闸门：与非流式/Job 路径统一限流，避免绕开并发保护
+        async with llm_slot():
+            # 放到线程池执行：chat_with_agent_sync 内部会用 asyncio.run 加载 MCP 工具，
+            # 需运行在无活动事件循环的线程中；同时避免同步 LLM 调用阻塞事件循环。
+            resp = await asyncio.to_thread(
+                chat_with_agent_sync,
+                ua,
+                request.message.strip(),
+                user_id,
+                request.agent_id,
+                session_id,
+                use_knowledge_retrieval=request.use_knowledge_retrieval,
+                use_web_search=request.use_web_search,
+                attachment_ids=request.attachment_ids or None,
+                mcp_approved_pending_id=request.mcp_approved_pending_id,
+                mcp_server_configs=mcp_server_configs,
+            )
         if not is_editor_preview_session(session_id):
             await touch_recent_agent(user_id, request.agent_id)
         return Success(data=ChatResponse(**resp).model_dump())
+    except LLMGateTimeout as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
     except ChatQuotaExceeded as e:
         raise HTTPException(status_code=429, detail=e.detail) from e
     except ValueError as e:
@@ -240,7 +265,7 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
     """
     # 获取当前用户ID
     user_id = current_user.id
-    _check_chat_rate_limit(user_id)
+    await _check_chat_rate_limit(user_id)
     # 获取用户配置的智能体信息
     ua = await user_agent_controller.get_accessible(request.agent_id, user_id)
     # 如果智能体不存在或无权限访问，则返回404错误
@@ -248,29 +273,34 @@ async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depend
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     # 获取会话ID
     session_id = (request.session_id or "default_session").strip() or "default_session"
-    _check_chat_quota(user_id, request.agent_id, session_id, reserve=1 if request.regenerate else 2)
+    await _check_chat_quota(user_id, request.agent_id, session_id, reserve=1 if request.regenerate else 2)
 
     # 定义事件生成器
     async def event_generator():
         try:
-            # 调用智能体异步对话函数，流式返回响应
-            async for chunk in chat_with_agent_stream(
-                ua,
-                request.message.strip(),
-                user_id,
-                request.agent_id,
-                session_id,
-                use_knowledge_retrieval=request.use_knowledge_retrieval,
-                use_web_search=request.use_web_search,
-                attachment_ids=request.attachment_ids or None,
-                regenerate=request.regenerate,
-                target_message_id=request.target_message_id,
-                mcp_approved_pending_id=request.mcp_approved_pending_id,
-            ):
-                yield chunk
+            # LLM 并发闸门：与 /chat、/chat/jobs 统一限流；客户端断开时由上下文管理释放
+            async with llm_slot():
+                # 调用智能体异步对话函数，流式返回响应
+                async for chunk in chat_with_agent_stream(
+                    ua,
+                    request.message.strip(),
+                    user_id,
+                    request.agent_id,
+                    session_id,
+                    use_knowledge_retrieval=request.use_knowledge_retrieval,
+                    use_web_search=request.use_web_search,
+                    attachment_ids=request.attachment_ids or None,
+                    regenerate=request.regenerate,
+                    target_message_id=request.target_message_id,
+                    mcp_approved_pending_id=request.mcp_approved_pending_id,
+                ):
+                    yield chunk
             # 更新最近使用智能体（编辑器试聊会话不置顶）
             if not is_editor_preview_session(session_id):
                 await touch_recent_agent(user_id, request.agent_id)
+        except LLMGateTimeout as e:
+            err = {"type": "error", "content": str(e)}
+            yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
         # 如果发生异常，则返回错误信息
         except Exception:
             logger.exception("chat_stream_endpoint failed")
@@ -299,7 +329,7 @@ async def create_chat_job_endpoint(request: ChatRequest, current_user: User = De
     """
     # 获取当前用户ID
     user_id = current_user.id
-    _check_chat_rate_limit(user_id)
+    await _check_chat_rate_limit(user_id)
     # 获取用户配置的智能体信息
     ua = await user_agent_controller.get_accessible(request.agent_id, user_id)
     # 如果智能体不存在或无权限访问，则返回404错误
@@ -307,7 +337,7 @@ async def create_chat_job_endpoint(request: ChatRequest, current_user: User = De
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     # 获取会话ID
     session_id = (request.session_id or "default_session").strip() or "default_session"
-    _check_chat_quota(user_id, request.agent_id, session_id, reserve=1 if request.regenerate else 2)
+    await _check_chat_quota(user_id, request.agent_id, session_id, reserve=1 if request.regenerate else 2)
     # 创建异步对话 Job
     job_id, is_dup = await create_chat_job(
         user_id=user_id,
@@ -343,7 +373,7 @@ async def get_chat_job_endpoint(job_id: str, current_user: User = Depends(AuthCo
     :return: Success
     """
     # 获取 Job 元数据
-    meta = get_job_meta(job_id)
+    meta = await get_job_meta(job_id)
     if not meta or int(meta.get("user_id", -1)) != int(current_user.id):
         raise HTTPException(status_code=404, detail="任务不存在或无权限")
     return Success(data=meta)
@@ -357,9 +387,9 @@ async def cancel_chat_job_endpoint(job_id: str, current_user: User = Depends(Aut
     :param current_user: 当前用户
     :return: Success
     """
-    if not verify_job_owner(job_id, current_user.id):
+    if not await verify_job_owner(job_id, current_user.id):
         raise HTTPException(status_code=404, detail="任务不存在或无权限")
-    meta = get_job_meta(job_id)
+    meta = await get_job_meta(job_id)
     if not meta:
         raise HTTPException(status_code=404, detail="任务不存在或无权限")
     if meta.get("status") != "running":
@@ -389,7 +419,7 @@ async def cancel_active_chat_job_endpoint(
 
 @router.post("/chat/mcp/confirm", summary="确认或拒绝高危 MCP 工具调用", tags=["智能体模块"])
 async def confirm_mcp_tool(request: McpConfirmRequest, current_user: User = Depends(AuthControl.is_authed)):
-    ok = approve_mcp_confirmation(request.pending_id, current_user.id, request.approve)
+    ok = await run_sync(approve_mcp_confirmation, request.pending_id, current_user.id, request.approve, timeout=5.0)
     if not ok:
         raise HTTPException(status_code=404, detail="确认任务不存在或已过期")
     return Success(data={"ok": True, "approved": bool(request.approve)})
@@ -413,7 +443,7 @@ async def chat_job_stream_endpoint(
     :return: StreamingResponse
     """
     # 验证 Job 是否属于用户
-    if not verify_job_owner(job_id, current_user.id):
+    if not await verify_job_owner(job_id, current_user.id):
         raise HTTPException(status_code=404, detail="任务不存在或无权限")
 
     # 定义事件生成器
@@ -514,8 +544,8 @@ async def list_chat_sessions(
 
     # 如果limit为None，则返回全量
     if limit is None:
-        # 获取会话列表, 通过 PostgreSQL 和 Redis 缓存获取
-        items = storage.list_session_infos(user_id, agent_id)
+        # 获取会话列表, 通过 PostgreSQL 和 Redis 缓存获取（同步 IO 移出事件循环）
+        items = await run_sync(storage.list_session_infos, user_id, agent_id, timeout=15.0)
         # 补全会话列表信息
         enriched = _enrich_session_rows(ua, items)
         # 按更新时间倒序
@@ -528,7 +558,9 @@ async def list_chat_sessions(
         return Success(data=body.model_dump())
 
     # 如果limit不为None，则分页返回会话列表。通过 PostgreSQL 和 Redis 缓存获取
-    items, total = storage.list_session_infos_paginated(user_id, agent_id, limit, offset)
+    items, total = await run_sync(
+        storage.list_session_infos_paginated, user_id, agent_id, limit, offset, timeout=15.0
+    )
     # 补全会话列表信息
     enriched = _enrich_session_rows(ua, items)
     # 是否有更多
@@ -562,8 +594,8 @@ async def list_chat_sessions_all(
     """
     # 获取当前用户ID
     user_id = current_user.id
-    # 获取会话列表, 通过 PostgreSQL 和 Redis 缓存获取
-    items, total = storage.list_session_infos_all_paginated(user_id, limit, offset)
+    # 获取会话列表, 通过 PostgreSQL 和 Redis 缓存获取（同步 IO 移出事件循环）
+    items, total = await run_sync(storage.list_session_infos_all_paginated, user_id, limit, offset, timeout=15.0)
     # 补全当前用户所有会话列表信息
     enriched = await _enrich_all_user_sessions(items)
     # 是否有更多
@@ -627,8 +659,8 @@ async def get_chat_session_messages(
     # 如果智能体不存在或无权限访问，则返回404错误
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
-    # 获取会话消息（当前路径），通过 PostgreSQL 和 Redis 缓存获取
-    raw = storage.get_session_messages(user_id, agent_id, session_id)
+    # 获取会话消息（当前路径），通过 PostgreSQL 和 Redis 缓存获取（同步 IO 移出事件循环）
+    raw = await run_sync(storage.get_session_messages, user_id, agent_id, session_id, timeout=15.0)
     return Success(data=SessionMessagesResponse(messages=_to_message_infos(raw)).model_dump())
 
 
@@ -657,9 +689,9 @@ async def select_chat_branch(
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     sid = (session_id or "").strip()
-    if get_running_session_job(user_id, agent_id, sid):
+    if await get_running_session_job(user_id, agent_id, sid):
         raise HTTPException(status_code=409, detail="该会话有进行中的生成任务，请等待完成或停止后再切换版本")
-    records = storage.select_branch(user_id, agent_id, sid, request.assistant_message_id)
+    records = await run_sync(storage.select_branch, user_id, agent_id, sid, request.assistant_message_id, timeout=15.0)
     if records is None:
         raise HTTPException(status_code=400, detail="目标回复不存在或不属于当前会话")
     return Success(data=SessionMessagesResponse(messages=_to_message_infos(records)).model_dump())
@@ -722,9 +754,9 @@ async def compact_chat_session(
     if not ua:
         raise HTTPException(status_code=404, detail="智能体不存在或无权限访问")
     sid = (session_id or "").strip()
-    if get_running_session_job(user_id, agent_id, sid):
+    if await get_running_session_job(user_id, agent_id, sid):
         raise HTTPException(status_code=409, detail="该会话有进行中的生成任务，请等待完成或停止后再压缩")
-    _check_chat_rate_limit(user_id)
+    await _check_chat_rate_limit(user_id)
 
     from app.chat.agent_prompt import _compose_system_prompt
     from app.chat.agent_service import _sub_llm_config_from_ua
@@ -757,7 +789,7 @@ async def compact_chat_session(
         context_window=getattr(ua, "context_window", None),
         system_prompt=system_prompt,
         system_chars=len(system_prompt),
-        tools_tokens=int(_cached_tools_tokens(agent_id) or 0),
+        tools_tokens=int(await _acached_tools_tokens(agent_id) or 0),
     )
     return Success(
         data={
@@ -790,8 +822,8 @@ async def delete_chat_session(
     :return: Success
     """
     user_id = current_user.id
-    # 只校验会话属于当前用户（智能体已删除时仍允许清掉侧栏残留）
-    deleted = storage.delete_session(user_id, agent_id, session_id)
+    # 只校验会话属于当前用户（智能体已删除时仍允许清掉侧栏残留）；同步 IO 移出事件循环
+    deleted = await run_sync(storage.delete_session, user_id, agent_id, session_id, timeout=15.0)
     if not deleted:
         raise HTTPException(status_code=404, detail="会话不存在")
     # 返回会话删除响应

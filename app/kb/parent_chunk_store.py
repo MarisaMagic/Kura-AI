@@ -37,24 +37,38 @@ class ParentChunkStore:
 
     def upsert_documents(self, docs: List[dict]) -> int:
         """
-        批量插入或更新知识库父级分块
+        批量插入或更新知识库父级分块。
+
+        优化（阶段 3）：一次 IN 查询定位已有行（替代逐条 SELECT）、pipeline 批量写缓存
+        （替代逐条 set_json）、单事务单 commit。
+
         :param docs: 知识库父级分块列表
         :return: 插入或更新的父块数量
         """
         if not docs:
             return 0
-        # 创建 PostgreSQL 会话
+        # 归一化并去重：同 chunk_id 后者覆盖前者（与逐条 upsert 的最终态一致）
+        normalized: dict[str, dict] = {}
+        for doc in docs:
+            chunk_id = (doc.get("chunk_id") or "").strip()
+            if not chunk_id:
+                continue
+            normalized[chunk_id] = doc
+        if not normalized:
+            return 0
+
         db = SessionLocal()
-        upserted = 0
         try:
-            for doc in docs:
-                chunk_id = (doc.get("chunk_id") or "").strip()
-                if not chunk_id:
-                    continue
+            existing = {
+                row.chunk_id: row
+                for row in db.query(KbParentChunk)
+                .filter(KbParentChunk.chunk_id.in_(list(normalized.keys())))
+                .all()
+            }
+            cache_items: dict[str, Any] = {}
+            upserted = 0
+            for chunk_id, doc in normalized.items():
                 kb_scope = (doc.get("kb_scope") or "").strip()
-                # 查询知识库父级分块是否存在
-                record = db.query(KbParentChunk).filter(KbParentChunk.chunk_id == chunk_id).first()
-                # 构建知识库父级分块的负载
                 payload = {
                     "kb_scope": kb_scope,
                     "text": doc.get("text", ""),
@@ -71,22 +85,22 @@ class ParentChunkStore:
                     "updated_at": datetime.utcnow(),
                 }
                 cache_payload = {**payload, "chunk_id": chunk_id}
-                # 如果知识库父级分块存在，则更新知识库父级分块
+                record = existing.get(chunk_id)
                 if record:
                     for k, v in payload.items():
                         setattr(record, k, v)
-                # 如果知识库父级分块不存在，则在 PostgreSQL 中创建知识库父级分块
                 else:
                     db.add(KbParentChunk(chunk_id=chunk_id, **payload))
-                # 缓存知识库父级分块
-                cache.set_json(self._cache_key(chunk_id), cache_payload)
-                # 更新插入数量
+                # 缓存晚于 commit 批量写（set_json_many 一次 pipeline 往返）
+                cache_payload.pop("updated_at", None)
+                cache_items[self._cache_key(chunk_id)] = cache_payload
                 upserted += 1
             # 提交事务
             db.commit()
+            cache.set_json_many(cache_items)
+            return upserted
         finally:
             db.close()
-        return upserted
 
     def get_documents_by_ids(self, chunk_ids: List[str]) -> List[dict]:
         """

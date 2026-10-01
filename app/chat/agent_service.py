@@ -5,6 +5,7 @@ LangChain Agent 对话（同步 invoke + 异步 SSE 流式）。
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -51,6 +52,7 @@ from app.mcp_client.service import load_agent_mcp_tools
 from app.models.user_agent import UserAgent
 from app.settings import settings
 from app.utils.api_key_crypto import decrypt_api_key_safe
+from app.utils.concurrency import run_sync
 
 
 from app.chat.agent_prompt import (
@@ -473,6 +475,7 @@ def chat_with_agent_sync(
     use_web_search: bool = False,
     attachment_ids: list[str] | None = None,
     mcp_approved_pending_id: str | None = None,
+    mcp_server_configs: list[dict] | None = None,
 ) -> dict:
     """
     同步对话
@@ -483,6 +486,8 @@ def chat_with_agent_sync(
     :param session_id: 会话 ID
     :param use_web_search: 是否启用联网搜索工具（与知识库检索互斥）
     :param attachment_ids: 本会话已上传附件 ID（顺序与引用一致）
+    :param mcp_server_configs: 由调用方在主事件循环预取的 MCP 服务配置（纯 dict）；
+        None 表示在线程内自行查询（仅限非 asyncpg 环境，不推荐）
     :return: 响应结果
     """
     attachment_ids = attachment_ids or []
@@ -511,11 +516,27 @@ def chat_with_agent_sync(
     # 加载该智能体已启用的 MCP 工具（本函数在无线事件循环的线程中运行，asyncio.run 安全）；
     # MCP 工具为 async-only，包装为同步调用；单服务失败仅记录到 rag_steps，不中断对话。
     # 共享（非属主）会话跳过加载，避免属主凭据被共享用户对话驱动。
+    # 注意：MCP 服务配置须由调用方在主事件循环预取（asyncpg 连接不可跨事件循环）；
+    # mcp_server_configs 为 None 时为兼容旧调用方的兜底（会在线程内查询 DB，仅限非 asyncpg 环境）。
     mcp_tools: list[Any] = []
     mcp_errors: list[dict] = []
     if _mcp_tools_allowed_for(ua, user_id):
         try:
-            raw_mcp_tools, mcp_errors = asyncio.run(load_agent_mcp_tools(agent_id, user_id=user_id, session_id=session_id))
+            if mcp_server_configs is not None:
+                from app.mcp_client.service import load_mcp_tools_from_configs
+
+                raw_mcp_tools, mcp_errors = asyncio.run(
+                    load_mcp_tools_from_configs(
+                        mcp_server_configs,
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                )
+            else:
+                raw_mcp_tools, mcp_errors = asyncio.run(
+                    load_agent_mcp_tools(agent_id, user_id=user_id, session_id=session_id)
+                )
             mcp_tools = [_wrap_async_tool_for_sync(t) for t in raw_mcp_tools]
         except RuntimeError:
             # 兜底：若意外处于运行中的事件循环（不应发生），跳过 MCP 不阻断对话
@@ -696,12 +717,15 @@ def chat_with_agent_sync(
 
 
 def _throttled_cancel_check(
-    cancel_check: Callable[[], bool] | None,
+    cancel_check: Callable[[], Any] | None,
 ) -> Callable[[], Any] | None:
     """
-    取消检查节流包装：流式循环按 chunk 频率调用本函数，但实际读 Redis（线程跳转）
+    取消检查节流包装：流式循环按 chunk 频率调用本函数，但实际读 Redis
     最多每 CHAT_CANCEL_CHECK_INTERVAL 秒一次，期间返回上次结果。
     一旦观察到取消则永久为真（取消不可逆）。
+
+    cancel_check 可为同步（worker/线程内）或异步（阶段 4 起 jobs 路径直接 await 异步
+    Redis，不再跳线程）——按返回值是否 awaitable 自动适配。
     """
     if cancel_check is None:
         return None
@@ -716,7 +740,10 @@ def _throttled_cancel_check(
             return False
         state["last_at"] = now
         try:
-            state["flag"] = bool(await asyncio.to_thread(cancel_check))
+            result = cancel_check()
+            if inspect.isawaitable(result):
+                result = await result
+            state["flag"] = bool(result)
         except Exception:
             state["flag"] = False
         return state["flag"]
@@ -771,7 +798,9 @@ async def iter_chat_stream_events(
         if target_message_id:
             regen_target_ai_id = int(target_message_id)
         else:
-            path_records = storage.get_session_messages(user_id, agent_id, session_id)
+            path_records = await run_sync(
+                storage.get_session_messages, user_id, agent_id, session_id, timeout=15.0
+            )
             target_rec = next((r for r in reversed(path_records) if r.get("type") == "ai"), None)
             if target_rec is not None:
                 regen_target_ai_id = int(target_rec.get("message_id") or 0) or None
@@ -780,7 +809,9 @@ async def iter_chat_stream_events(
             yield {"type": "error", "content": "没有可重新生成的对话"}
             yield {"type": "done", "cancelled": False}
             return
-        ctx = storage.get_regenerate_context(user_id, agent_id, session_id, regen_target_ai_id)
+        ctx = await run_sync(
+            storage.get_regenerate_context, user_id, agent_id, session_id, regen_target_ai_id, timeout=15.0
+        )
         if ctx is None:
             yield {"type": "error", "content": "无法重新生成：目标回复不存在或不属于当前会话"}
             yield {"type": "done", "cancelled": False}
@@ -795,14 +826,16 @@ async def iter_chat_stream_events(
             yield {"type": "done", "cancelled": False}
             return
     else:
-        messages = storage.load(user_id, agent_id, session_id)
+        messages = await run_sync(storage.load, user_id, agent_id, session_id, timeout=15.0)
 
     if regenerate:
         preselect_query = msg_content_to_str(messages[-1].content).strip()
     else:
         preselect_query = (user_text or "").strip()
 
-    session_attachment_hint = format_attachment_hint(user_id, agent_id, session_id)
+    session_attachment_hint = await run_sync(
+        format_attachment_hint, user_id, agent_id, session_id, timeout=10.0
+    )
 
     kb_preselect_meta: dict[str, Any] = {}
     retrieval_filter: list[str] | None = None
@@ -831,7 +864,9 @@ async def iter_chat_stream_events(
         mcp_tools, mcp_errors = [], []
 
     agent_metrics: dict[str, Any] = {}
-    agent, model = build_model_and_agent(
+    # 构建 agent 含同步 Redis（token 缓存）与首次建连 DNS 解析，移出事件循环
+    agent, model = await run_sync(
+        build_model_and_agent,
         ua,
         user_id,
         agent_id,
@@ -841,6 +876,7 @@ async def iter_chat_stream_events(
         use_knowledge_retrieval=use_knowledge_retrieval,
         use_web_search=use_web_search,
         metrics_out=agent_metrics,
+        timeout=60.0,
     )
 
     # 创建输出队列, 收集 RAG 步骤
@@ -866,25 +902,30 @@ async def iter_chat_stream_events(
         emit_rag_step("⚠️", f"MCP 服务「{err['name']}」不可用", err["error"][:120])
 
     if not regenerate:
-        human_content = build_storable_human_content(
+        # 构造落库内容会逐个附件查 PG，移出事件循环
+        human_content = await run_sync(
+            build_storable_human_content,
             user_text,
             attachment_ids,
             user_id=user_id,
             agent_id=agent_id,
             session_id=session_id,
             supports_vision=bool(getattr(ua, "supports_vision", False)),
+            timeout=15.0,
         )
         human_msg = HumanMessage(content=human_content)
         messages.append(human_msg)
 
         # 生成完成前即落库用户消息，刷新后仍可从历史会话看到提问（助手在结束时再写入）
-        await asyncio.to_thread(storage.append_messages, user_id, agent_id, session_id, [human_msg])
+        await run_sync(storage.append_messages, user_id, agent_id, session_id, [human_msg], timeout=30.0)
 
     # 当前上下文各消息对应的存储行 id（与 messages 等长对齐），供压缩/记忆按 turn_key 定位
     if regenerate:
         path_ids: list[int] | None = regen_path_ids
     else:
-        path_records = storage.get_session_messages(user_id, agent_id, session_id)
+        path_records = await run_sync(
+            storage.get_session_messages, user_id, agent_id, session_id, timeout=15.0
+        )
         path_ids = [int(r.get("message_id") or 0) for r in path_records]
         if len(path_ids) != len(messages):
             path_ids = None
@@ -954,6 +995,15 @@ async def iter_chat_stream_events(
                 yield _image_step_event("⚠️", "图片理解失败", "改为直接带图问答")
 
     budget_info: dict[str, Any] = {}
+    # MCP 确认备注查询走同步 Redis：先在线程池求值，再作为纯字符串传入 prep 线程
+    mcp_approval_note = await run_sync(
+        _mcp_approval_note,
+        mcp_approved_pending_id,
+        user_id=user_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        timeout=5.0,
+    )
     # 压缩（含 micro-compact 前置清理）在 _prepare 内同步执行，期间会 emit_rag_step
     # （如「正在进行上下文压缩」）。放进 task 边等边把队列事件实时 yield，
     # 避免压缩阻塞首 token 时前端白屏。
@@ -969,9 +1019,7 @@ async def iter_chat_stream_events(
             use_web_search=use_web_search,
             document_filter=retrieval_filter if use_knowledge_retrieval else None,
             session_attachment_hint=session_attachment_hint,
-            mcp_approval_note=_mcp_approval_note(
-                mcp_approved_pending_id, user_id=user_id, agent_id=agent_id, session_id=session_id
-            ),
+            mcp_approval_note=mcp_approval_note,
             path_ids=path_ids,
             image_caption=image_caption,
             tools_tokens=int(agent_metrics.get("tools_tokens") or 0),
@@ -1193,20 +1241,40 @@ async def iter_chat_stream_events(
         saved = False
         if regen_target_ai_id is not None:
             if mcp_approved_pending_id:
-                saved = storage.update_assistant_in_place(
-                    user_id, agent_id, session_id, regen_target_ai_id, ai_msg, extra=ai_extra
+                saved = await run_sync(
+                    storage.update_assistant_in_place,
+                    user_id,
+                    agent_id,
+                    session_id,
+                    regen_target_ai_id,
+                    ai_msg,
+                    extra=ai_extra,
+                    timeout=30.0,
                 )
             else:
-                saved = storage.insert_assistant_version(
-                    user_id, agent_id, session_id, regen_target_ai_id, ai_msg, extra=ai_extra
+                saved = await run_sync(
+                    storage.insert_assistant_version,
+                    user_id,
+                    agent_id,
+                    session_id,
+                    regen_target_ai_id,
+                    ai_msg,
+                    extra=ai_extra,
+                    timeout=30.0,
                 )
         if not saved:
             yield {"type": "error", "content": "重新生成失败：目标回复已被移除，请刷新后重试"}
             yield {"type": "done", "cancelled": False}
             return
     else:
-        storage.append_messages(
-            user_id, agent_id, session_id, [ai_msg], extra_message_data=[ai_extra]
+        await run_sync(
+            storage.append_messages,
+            user_id,
+            agent_id,
+            session_id,
+            [ai_msg],
+            extra_message_data=[ai_extra],
+            timeout=30.0,
         )
 
     # 落库后收尾：用真实 usage 同步校准 token 估算系数（长期记忆由摘要调用顺带写入）

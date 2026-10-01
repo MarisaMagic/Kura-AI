@@ -22,7 +22,7 @@ from app.chat.db_models import ExpQuestion, ExpRun, ExpRunResult
 from app.experiment import answer_eval
 from app.experiment.runner import needs_dense_embedding, run_config_for_question
 from app.experiment.service import RUN_KIND_QA, exp_kb_scope
-from app.kb.milvus_client import MilvusManager
+from app.kb.milvus_client import get_milvus_manager
 from app.kb.multimodal_embedding import get_multimodal_embedding_service
 from app.settings import settings
 
@@ -86,7 +86,7 @@ async def create_exp_run_job(run_id: int) -> str | None:
         "units_total": None,
         "error": None,
     }
-    written = await asyncio.to_thread(cache.set_json, _meta_key(run_id), meta, _ttl())
+    written = await cache.aset_json(_meta_key(run_id), meta, _ttl())
     if not written:
         logger.error("实验运行任务初始化失败（Redis 不可写）run_id={}", run_id)
         return None
@@ -112,7 +112,7 @@ def enrich_job_meta(meta: dict[str, Any] | None) -> dict[str, Any]:
 
 
 async def request_exp_run_cancel(run_id: int) -> None:
-    await asyncio.to_thread(cache.set_json, _cancel_key(run_id), {"v": 1}, _ttl())
+    await cache.aset_json(_cancel_key(run_id), {"v": 1}, _ttl())
 
 
 def is_cancel_requested(run_id: int) -> bool:
@@ -222,7 +222,7 @@ def _run_exp_thread(run_id: int) -> None:
         return
 
     total = len(questions)
-    milvus = MilvusManager()
+    milvus = get_milvus_manager()
     embedding_service = get_multimodal_embedding_service()
     need_dense = needs_dense_embedding(configs)
     if need_dense and not (settings.EMBEDDING_API_KEY or "").strip():

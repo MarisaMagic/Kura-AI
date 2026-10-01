@@ -31,17 +31,17 @@ async def _fake_done_stream(*_a, **_k):
 class GateTests(unittest.TestCase):
     def setUp(self):
         from app.chat import chat_job
+        from app.utils import concurrency
 
         self.fake = _FakeRedis()
         chat_job.cache._client = self.fake  # type: ignore[attr-defined]
-        chat_job._llm_inflight_sem = None
-        chat_job._llm_inflight_waiting = 0
+        chat_job.cache._aclient = self.fake  # type: ignore[attr-defined]
+        concurrency._reset_llm_gate_for_tests()
 
     def tearDown(self):
-        from app.chat import chat_job
+        from app.utils import concurrency
 
-        chat_job._llm_inflight_sem = None
-        chat_job._llm_inflight_waiting = 0
+        concurrency._reset_llm_gate_for_tests()
 
     def _patches(self, stream):
         from app.chat import chat_job
@@ -86,11 +86,12 @@ class GateTests(unittest.TestCase):
 
     def test_gate_full_emits_queued_then_completes(self):
         from app.chat import chat_job
+        from app.utils import concurrency
 
         async def _scenario():
             sem = asyncio.Semaphore(1)
             await sem.acquire()  # 占满唯一槽位
-            chat_job._llm_inflight_sem = sem
+            concurrency._reset_llm_gate_for_tests(sem)
 
             async def _release_soon():
                 await asyncio.sleep(0.05)
@@ -122,6 +123,7 @@ class GateTests(unittest.TestCase):
 
     def test_queue_timeout_fails_job_without_generation(self):
         from app.chat import chat_job
+        from app.utils import concurrency
 
         async def _blocked_stream(*_a, **_k):
             raise AssertionError("排队超时后不应进入生成流程")
@@ -130,10 +132,10 @@ class GateTests(unittest.TestCase):
         async def _scenario():
             sem = asyncio.Semaphore(1)
             await sem.acquire()  # 永不释放 → 必然排队超时
-            chat_job._llm_inflight_sem = sem
+            concurrency._reset_llm_gate_for_tests(sem)
 
             patches = self._patches(_blocked_stream)
-            patches.append(mock.patch.object(chat_job, "_queue_timeout", return_value=0.05))
+            patches.append(mock.patch.object(concurrency, "_queue_timeout", return_value=0.05))
             for p in patches:
                 p.start()
             try:

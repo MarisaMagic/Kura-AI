@@ -97,10 +97,17 @@ async def iter_image_caption_chunks(
     session_id: str,
 ) -> AsyncIterator[str]:
     """流式产出图片描述文本块；异常直接抛出，由调用方回退单阶段。"""
-    model = _build_caption_model(ua)
-    messages = _build_caption_messages(
-        human_msg, user_id=user_id, agent_id=agent_id, session_id=session_id
-    )
+    from app.utils.concurrency import run_sync
+
+    def _prepare() -> tuple[Any, list[BaseMessage]]:
+        # 展开 image_ref 会同步读对象存储并做 PIL 压图，须在线程池内执行
+        model = _build_caption_model(ua)
+        messages = _build_caption_messages(
+            human_msg, user_id=user_id, agent_id=agent_id, session_id=session_id
+        )
+        return model, messages
+
+    model, messages = await run_sync(_prepare, timeout=30.0)
     async for chunk in model.astream(messages):
         text = _chunk_text(getattr(chunk, "content", ""))
         if text:

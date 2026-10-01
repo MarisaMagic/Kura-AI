@@ -1,5 +1,7 @@
 FROM python:3.11-slim-bookworm
 
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+
 WORKDIR /app
 
 RUN apt-get update \
@@ -12,7 +14,8 @@ COPY requirements.txt deploy/filter_requirements.py /tmp/
 # pywin32 / win32_setctime 仅 Windows；并兼容 UTF-16 的 requirements.txt
 RUN python /tmp/filter_requirements.py \
     && pip install --no-cache-dir -r /tmp/requirements-linux.txt \
-        -i https://pypi.tuna.tsinghua.edu.cn/simple \
+        -i "${PIP_INDEX_URL}" \
+        --extra-index-url https://pypi.org/simple \
     && python -c "import uvicorn, fastapi" \
     && rm -f /tmp/requirements.txt /tmp/requirements-linux.txt /tmp/filter_requirements.py
 

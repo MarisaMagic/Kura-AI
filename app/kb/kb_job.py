@@ -33,6 +33,7 @@ from app.kb.kb_service import (
 )
 from app.kb.multimodal_embedding import EmbeddingConcurrencyTimeoutError, EmbeddingThrottledError
 from app.settings import settings
+from app.utils.upstream_quota import QuotaBreakerOpenError, QuotaTimeoutError
 
 TERMINAL_STATUSES = ("completed", "failed", "timeout", "cancelled")
 
@@ -149,8 +150,13 @@ def _remove_user_active(user_id: int, task_id: str) -> None:
 
 
 def enqueue_task(task_id: str) -> bool:
+    """入队上传任务：原子检查「排队 + 处理中」深度上限（多副本并发下不超卖）。
+
+    KB_UPLOAD_QUEUE_MAX<=0 时仅做普通入队；超限或 Redis 不可用返回 False。
+    """
     payload = {"kind": "kb_upload", "task_id": task_id}
-    return cache.rpush_json(_QUEUE_KEY, payload) > 0
+    queue_max = max(0, int(getattr(settings, "KB_UPLOAD_QUEUE_MAX", 0) or 0))
+    return cache.rpush_json_with_limit(_QUEUE_KEY, _PROCESSING_KEY, payload, queue_max)
 
 
 def dequeue_task(timeout: int = 5) -> dict[str, Any] | None:
@@ -160,67 +166,97 @@ def dequeue_task(timeout: int = 5) -> dict[str, Any] | None:
 
 
 def ack_task(payload: dict[str, Any]) -> None:
-    cache.lrem_json(_PROCESSING_KEY, payload)
+    """任务完成确认：仅移除自己消费的那一条（count=1）。
+
+    多副本下同一 payload 可能因崩溃恢复出现多条，count=0 会误删其它副本仍在处理的条目。
+    """
+    cache.lrem_json(_PROCESSING_KEY, payload, count=1)
 
 
 def requeue_task(payload: dict[str, Any]) -> None:
-    cache.lrem_json(_PROCESSING_KEY, payload)
+    cache.lrem_json(_PROCESSING_KEY, payload, count=1)
     cache.rpush_json(_QUEUE_KEY, payload)
+
+
+def _processing_lock_key(task_id: str) -> str:
+    """任务级处理锁：同一 task_id 在任一时刻只允许一个副本执行（重复投递幂等）。"""
+    return f"kb_upload_job:{task_id}:processing"
+
+
+def _acquire_processing_lock(task_id: str) -> bool:
+    ttl = max(600, int(getattr(settings, "KB_UPLOAD_TASK_TIMEOUT_SECONDS", 900) or 900) + 180)
+    return bool(cache.set_nx(_processing_lock_key(task_id), {"ts": time.time()}, ttl))
+
+
+def _release_processing_lock(task_id: str) -> None:
+    cache.delete(_processing_lock_key(task_id))
 
 
 def recover_stale_processing(stale_seconds: int) -> int:
     """
-    worker 启动时回收 processing 列表：
+    worker 启动时回收 processing 列表（多副本安全）：
+    - 分布式锁保证同一时刻仅一个副本执行回收；
+    - 每条目用 count=1 原子抢占（LREM 成功者才负责后续处理），避免重复回收/误删；
     - 任务已终态/ meta 丢失：直接清理；
     - 心跳超过 stale_seconds：重投一次（meta.recovered=True），再次超时则判失败，避免死循环。
     :return: 处理（清理/重投/判死）的条目数
     """
-    now = time.time()
-    recovered = 0
-    for raw in cache.lrange_str(_PROCESSING_KEY, 0, -1):
-        try:
-            payload = json.loads(raw)
-        except (TypeError, ValueError):
-            cache.lrem_raw(_PROCESSING_KEY, raw)
+    lock_key = f"{_QUEUE_KEY}:recover_lock"
+    if not cache.set_nx(lock_key, {"ts": time.time()}, 60):
+        logger.info("另一 worker 正在回收 stale 任务，跳过本次回收")
+        return 0
+    try:
+        now = time.time()
+        recovered = 0
+        for raw in cache.lrange_str(_PROCESSING_KEY, 0, -1):
+            try:
+                payload = json.loads(raw)
+            except (TypeError, ValueError):
+                if cache.lrem_raw(_PROCESSING_KEY, raw, count=1) > 0:
+                    recovered += 1
+                continue
+            task_id = str(payload.get("task_id") or "")
+            meta = cache.get_json(_meta_key(task_id)) if task_id else None
+            if not isinstance(meta, dict) or is_terminal_status(meta.get("status")):
+                if cache.lrem_raw(_PROCESSING_KEY, raw, count=1) > 0:
+                    recovered += 1
+                continue
+            updated_at = float(meta.get("updated_at") or meta.get("created_at") or 0)
+            if now - updated_at < stale_seconds:
+                continue
+            # 原子抢占：仅成功移除该条目的副本负责后续处理（其它副本 LREM 返回 0 跳过）
+            if cache.lrem_raw(_PROCESSING_KEY, raw, count=1) <= 0:
+                continue
+            identity = _identity_from_meta(meta)
+            if meta.get("recovered"):
+                _update_meta(
+                    task_id,
+                    identity,
+                    status="failed",
+                    error="处理进程中断且自动恢复已尝试，请重新上传",
+                    error_type="failed",
+                    updated_at=now,
+                )
+                _remove_user_active(int(meta.get("user_id") or 0), task_id)
+            else:
+                # 重投前清除旧处理锁：保证新执行者能获取锁（旧处理者已判定死亡）
+                _release_processing_lock(task_id)
+                _update_meta(
+                    task_id,
+                    identity,
+                    status="queued",
+                    stage="queued",
+                    percent=0,
+                    recovered=True,
+                    updated_at=now,
+                )
+                cache.rpush_json(_QUEUE_KEY, payload)
             recovered += 1
-            continue
-        task_id = str(payload.get("task_id") or "")
-        meta = cache.get_json(_meta_key(task_id)) if task_id else None
-        if not isinstance(meta, dict) or is_terminal_status(meta.get("status")):
-            cache.lrem_raw(_PROCESSING_KEY, raw)
-            recovered += 1
-            continue
-        updated_at = float(meta.get("updated_at") or meta.get("created_at") or 0)
-        if now - updated_at < stale_seconds:
-            continue
-        identity = _identity_from_meta(meta)
-        if meta.get("recovered"):
-            _update_meta(
-                task_id,
-                identity,
-                status="failed",
-                error="处理进程中断且自动恢复已尝试，请重新上传",
-                error_type="failed",
-                updated_at=now,
-            )
-            _remove_user_active(int(meta.get("user_id") or 0), task_id)
-            cache.lrem_raw(_PROCESSING_KEY, raw)
-        else:
-            _update_meta(
-                task_id,
-                identity,
-                status="queued",
-                stage="queued",
-                percent=0,
-                recovered=True,
-                updated_at=now,
-            )
-            cache.lrem_raw(_PROCESSING_KEY, raw)
-            cache.rpush_json(_QUEUE_KEY, payload)
-        recovered += 1
-    if recovered:
-        logger.info("知识库上传任务回收完成：{} 条", recovered)
-    return recovered
+        if recovered:
+            logger.info("知识库上传任务回收完成：{} 条", recovered)
+        return recovered
+    finally:
+        cache.delete(lock_key)
 
 
 # ---------------------------------------------------------------- 任务创建
@@ -277,7 +313,7 @@ async def create_kb_upload_job(
     }
     written = False
     for _attempt in range(2):
-        written = bool(await asyncio.to_thread(cache.set_json, _meta_key(tid), meta, _ttl()))
+        written = await cache.aset_json(_meta_key(tid), meta, _ttl())
         if written:
             break
         await asyncio.sleep(0.1)
@@ -299,7 +335,7 @@ async def create_kb_upload_job(
             _ttl(),
         )
         if not stored:
-            await asyncio.to_thread(cache.delete, _meta_key(tid))
+            await cache.adelete(_meta_key(tid))
             await asyncio.to_thread(_remove_user_active, user_id, tid)
             return None
 
@@ -307,7 +343,7 @@ async def create_kb_upload_job(
         enqueued = await asyncio.to_thread(enqueue_task, tid)
         if not enqueued:
             logger.error("知识库上传任务入队失败（Redis 不可用）task_id={}", tid)
-            await asyncio.to_thread(cache.delete, _meta_key(tid))
+            await cache.adelete(_meta_key(tid))
             await asyncio.to_thread(_remove_user_active, user_id, tid)
             return None
         return tid
@@ -357,7 +393,20 @@ def _run_upload_with_content(task_id: str, content: bytes | None) -> None:
 
 
 def run_upload_task_from_source(task_id: str) -> None:
-    """队列模式：从 pending 对象取回源文件（流式落临时文件）后执行。"""
+    """队列模式：从 pending 对象取回源文件（流式落临时文件）后执行。
+
+    任务级处理锁保证多副本下同一 task_id 的重复投递（崩溃恢复/队列重复）只被一个副本执行。
+    """
+    if not _acquire_processing_lock(task_id):
+        logger.warning("知识库上传任务已在其它 worker 处理中，跳过重复投递 task_id={}", task_id)
+        return
+    try:
+        _run_upload_task_from_source_locked(task_id)
+    finally:
+        _release_processing_lock(task_id)
+
+
+def _run_upload_task_from_source_locked(task_id: str) -> None:
     source = cache.get_json(_source_key(task_id))
     source_key = str((source or {}).get("key") or "")
     suffix = Path(str((source or {}).get("filename") or "")).suffix.lower() or ".bin"
@@ -415,9 +464,13 @@ def run_upload_task(task_id: str, source_path: str) -> None:
     )
 
     last_percent = 0
+    last_stage = ""
+    last_progress_at = 0.0
+    min_interval = max(0.0, float(getattr(settings, "KB_PROGRESS_MIN_INTERVAL_SECONDS", 0.5) or 0.0))
+    min_step = max(0, int(getattr(settings, "KB_PROGRESS_MIN_PERCENT_STEP", 2) or 0))
 
     def progress_cb(stage: str, done: int, total: int) -> None:
-        nonlocal last_percent
+        nonlocal last_percent, last_stage, last_progress_at
         lo, hi = _STAGE_BANDS.get(stage, (0, 100))
         if total and total > 0 and done >= 0:
             ratio = min(1.0, max(0.0, done / max(1, total)))
@@ -426,7 +479,19 @@ def run_upload_task(task_id: str, source_path: str) -> None:
             percent = lo
         # 进度只前进不回退
         percent = max(percent, last_percent)
+        # 写节流：阶段未变且时间/百分比增量均未达阈值时跳过本次 Redis 往返。
+        # （图片逐张 tick 与文本逐批回调会产生大量小幅写；终态写入不走本回调，不受影响）
+        now = time.monotonic()
+        if (
+            stage == last_stage
+            and percent < 100
+            and (now - last_progress_at) < min_interval
+            and percent < last_percent + min_step
+        ):
+            return
         last_percent = percent
+        last_stage = stage
+        last_progress_at = now
         _update_meta(
             task_id,
             identity,
@@ -501,6 +566,16 @@ def run_upload_task(task_id: str, source_path: str) -> None:
             error_type="throttled",
             updated_at=time.time(),
         )
+    except (QuotaBreakerOpenError, QuotaTimeoutError) as e:
+        # 配额保护触发（熔断/等待超时）：归类限流，提示稍后重传而非查找本地问题
+        _update_meta(
+            task_id,
+            identity,
+            status="failed",
+            error=f"嵌入服务配额受限（熔断中），请稍后重传：{e}",
+            error_type="throttled",
+            updated_at=time.time(),
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception("知识库上传任务失败 task_id=%s filename=%r", task_id, identity["display_filename"])
         _update_meta(
@@ -568,4 +643,4 @@ def is_job_cancel_requested(task_id: str) -> bool:
 
 async def request_kb_upload_cancel(task_id: str) -> None:
     """标记任务为「用户请求取消」，worker 在批处理边界协作式退出。"""
-    await asyncio.to_thread(cache.set_json, _cancel_key(task_id), {"v": 1}, _ttl())
+    await cache.aset_json(_cancel_key(task_id), {"v": 1}, _ttl())

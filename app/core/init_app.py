@@ -48,6 +48,9 @@ def make_middlewares():
                 "/api/v1/base/register",
                 "/api/v1/base/registration_enabled",
                 "/api/v1/base/health",
+                # 就绪/状态探针：高频只读，写审计会引发 PG 写放大
+                "/api/v1/base/ready",
+                "/api/v1/base/status",
                 "/api/v1/base/upload_avatar",
                 "/api/v1/base/update_password",
                 "/api/v1/user/reset_password",

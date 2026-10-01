@@ -8,8 +8,8 @@ include:
   - path: docker-compose.yml
 
 services:
+  # API 服务：无固定 container_name，可用 --scale backend=N 多副本（nginx 轮询负载均衡）
   backend:
-    container_name: kura-ai-backend
     build:
       context: .
       dockerfile: deploy/Dockerfile.backend
@@ -18,6 +18,8 @@ services:
     environment:
       # 覆盖本机开发用的 127.0.0.1 地址，改为 Docker 网络内主机名
       UVICORN_HOST: "0.0.0.0"
+      # 单容器内多 uvicorn 进程数；推荐「每容器 1 进程 + --scale backend=N」由 nginx 轮询扩展
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-langchain_app}
       ADMIN_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-langchain_app}
       REDIS_URL: redis://redis:6379/0
@@ -45,9 +47,9 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # 文档解析/向量化独立进程：与 API 隔离，队列消费 + 崩溃恢复 + 优雅退出
+  # 文档解析/向量化独立进程：与 API 隔离，队列消费 + 崩溃恢复 + 优雅退出。
+  # 无固定 container_name，可用 --scale kb-worker=N 横向扩展（队列与处理锁均跨副本安全）。
   kb-worker:
-    container_name: kura-ai-kb-worker
     build:
       context: .
       dockerfile: deploy/Dockerfile.backend
@@ -69,6 +71,9 @@ services:
       S3_ACCESS_KEY: ${MINIO_APP_ROOT_USER}
       S3_SECRET_KEY: ${MINIO_APP_ROOT_PASSWORD}
       KB_UPLOAD_MODE: "queue"
+    # worker 不监听 HTTP 端口，禁用镜像自带的 API healthcheck（否则容器恒为 unhealthy）
+    healthcheck:
+      disable: true
     depends_on:
       postgres:
         condition: service_healthy

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from collections import defaultdict
 from pathlib import Path
@@ -15,9 +16,9 @@ from loguru import logger
 from app.core import object_storage as obs
 from app.kb.multimodal_embedding import get_multimodal_embedding_service
 from app.kb.milvus_client import (
-    MilvusManager,
     _normalize_content_type,
     filename_in_filter_expr,
+    get_milvus_manager,
     milvus_escape,
 )
 from app.kb.parent_chunk_store import ParentChunkStore
@@ -25,7 +26,7 @@ from app.settings import settings
 from app.utils.egress import pinned_llm_client_kwargs
 
 _multimodal_embedding_service = get_multimodal_embedding_service()
-_milvus_manager = MilvusManager()
+_milvus_manager = get_milvus_manager()
 _parent_chunk_store = ParentChunkStore()
 
 # rerank 复用连接池的模块级 Session（替代每次一次性 requests.post）
@@ -37,6 +38,62 @@ KB_MAX_DOCUMENT_FILTER = 10
 AUTO_MERGE_ENABLED = bool(settings.AUTO_MERGE_ENABLED)
 AUTO_MERGE_THRESHOLD = int(settings.AUTO_MERGE_THRESHOLD or 2)
 LEAF_RETRIEVE_LEVEL = int(settings.LEAF_RETRIEVE_LEVEL or 3)
+
+
+def _retrieve_embedding_timeout() -> int:
+    """检索链路单次嵌入 HTTP 超时（秒）：SDK 默认可达数百秒，会长时间占死工具线程。"""
+    return max(5, int(getattr(settings, "EMBEDDING_RETRIEVE_TIMEOUT_SECONDS", 20) or 20))
+
+
+def _encode_query_embedding(vec: List[float]) -> str:
+    """向量 → base64(float32 字节)：比 JSON 浮点数组节省约 2/3 空间。"""
+    import array
+
+    return base64.b64encode(array.array("f", [float(x) for x in vec]).tobytes()).decode("ascii")
+
+
+def _decode_query_embedding(payload: Any) -> List[float] | None:
+    """base64(float32 字节) → 向量；格式不符返回 None。"""
+    import array
+
+    if not isinstance(payload, str) or not payload:
+        return None
+    try:
+        raw = base64.b64decode(payload.encode("ascii"), validate=True)
+        if len(raw) % 4 != 0:
+            return None
+        arr = array.array("f")
+        arr.frombytes(raw)
+        return list(arr)
+    except Exception:
+        return None
+
+
+def _cached_query_embedding(query: str) -> List[float]:
+    """
+    查询向量缓存：相同 query（与模型/维度绑定）命中 Redis 直接复用，缓解上游配额；
+    miss 时调用嵌入服务并回写（TTL 见 EMBEDDING_QUERY_CACHE_TTL_SECONDS）。
+    """
+    from app.chat.cache import cache
+
+    text = (query or "").strip()
+    model = (getattr(settings, "EMBEDDING_MODEL", "") or "").strip()
+    dim = int(getattr(settings, "EMBEDDING_DIM", 1536) or 1536)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    key = f"emb_query:{model}:{dim}:{digest}"
+    cached = _decode_query_embedding(cache.get_json(key))
+    if cached is not None:
+        return cached
+    embeddings = _multimodal_embedding_service.get_text_embeddings(
+        [text], request_timeout=_retrieve_embedding_timeout()
+    )
+    vec = embeddings[0]
+    try:
+        ttl = max(60, int(getattr(settings, "EMBEDDING_QUERY_CACHE_TTL_SECONDS", 604800) or 604800))
+        cache.set_json(key, _encode_query_embedding(vec), ttl)
+    except Exception:
+        pass
+    return vec
 
 
 def _rerank_endpoint() -> str:
@@ -411,12 +468,24 @@ def _rerank_documents(
     }
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {rk}"}
     timeout = max(5, int(getattr(settings, "RERANK_TIMEOUT_SECONDS", 15) or 15))
+    from app.utils.upstream_quota import (
+        QuotaBreakerOpenError,
+        QuotaTimeoutError,
+        rerank_quota,
+    )
+
+    quota = rerank_quota()
     try:
-        meta["rerank_applied"] = True
-        response = _rerank_session.post(meta["rerank_endpoint"], headers=headers, json=payload, timeout=timeout)
+        # 全局配额闸门：低配额账号下控制跨进程并发/QPS；等待超时或熔断则快速降级
+        with quota.hold_sync():
+            meta["rerank_applied"] = True
+            response = _rerank_session.post(meta["rerank_endpoint"], headers=headers, json=payload, timeout=timeout)
         if response.status_code >= 400:
+            if response.status_code == 429:
+                quota.record_failure()
             meta["rerank_error"] = f"HTTP {response.status_code}: {response.text[:500]}"
             return _fallback_by_vector_score()
+        quota.record_success()
         items = (response.json().get("output") or {}).get("results") or []
         reranked: List[dict] = []
         for item in items:
@@ -451,6 +520,11 @@ def _rerank_documents(
             final_docs = reranked + excluded_images
             return final_docs[:return_cap], meta
         meta["rerank_error"] = "empty_rerank_results"
+        return _fallback_by_vector_score()
+    except (QuotaBreakerOpenError, QuotaTimeoutError) as e:
+        # 配额保护触发（熔断/等待超时）：快速降级为向量分排序，不阻塞检索
+        meta["rerank_applied"] = False
+        meta["rerank_error"] = f"quota_limited: {e}"
         return _fallback_by_vector_score()
     except (requests.RequestException, json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
         meta["rerank_error"] = str(e)[:500]
@@ -687,8 +761,8 @@ def retrieve_documents(
     
     try:
         # 使用多模态嵌入服务生成查询的密集向量（BM25 稀疏向量由 Milvus 服务端 Function 基于文本计算）
-        dense_embeddings = _multimodal_embedding_service.get_text_embeddings([query])
-        dense_embedding = dense_embeddings[0]
+        # 命中 Redis 查询缓存则零上游调用；显式短超时避免 SDK 默认数百秒占死工具线程
+        dense_embedding = _cached_query_embedding(query)
 
         # 混合检索（dense + 服务端 BM25），检索 candidate_k 个相似文档
         retrieved = _milvus_manager.hybrid_retrieve(
@@ -711,11 +785,16 @@ def retrieve_documents(
         )
         rerank_meta["document_filenames_filter"] = document_filenames
         return {"docs": merged_docs, "meta": rerank_meta}
-    except Exception:
+    except Exception as primary_exc:
+        from app.utils.upstream_quota import QuotaBreakerOpenError, QuotaTimeoutError
+
+        if isinstance(primary_exc, (QuotaBreakerOpenError, QuotaTimeoutError)):
+            # 嵌入上游熔断/配额超时：快速降级，不再尝试 dense fallback（同样需要嵌入）
+            logger.warning("检索降级（嵌入配额受限）: {}", primary_exc)
+            return _degraded_quota_retrieval_result(include_images, candidate_k)
         try:
-            # 如果混合检索失败，则使用密集检索
-            dense_embeddings = _multimodal_embedding_service.get_text_embeddings([query])
-            dense_embedding = dense_embeddings[0]
+            # 如果混合检索失败，则使用密集检索（查询缓存同样生效）
+            dense_embedding = _cached_query_embedding(query)
             retrieved = _milvus_manager.dense_retrieve(
                 dense_embedding=dense_embedding,
                 top_k=candidate_k,
@@ -735,7 +814,10 @@ def retrieve_documents(
             )
             rerank_meta["document_filenames_filter"] = document_filenames
             return {"docs": merged_docs, "meta": rerank_meta}
-        except Exception:
+        except Exception as fallback_exc:
+            if isinstance(fallback_exc, (QuotaBreakerOpenError, QuotaTimeoutError)):
+                logger.warning("检索降级（嵌入配额受限）: {}", fallback_exc)
+                return _degraded_quota_retrieval_result(include_images, candidate_k)
             return {
                 "docs": [],
                 "meta": {
@@ -754,6 +836,28 @@ def retrieve_documents(
                     "candidate_count": 0,
                 },
             }
+
+
+def _degraded_quota_retrieval_result(include_images: bool, candidate_k: int) -> Dict[str, Any]:
+    """嵌入配额受限时的统一降级返回（供 RAG 图跳过扩展、工具侧提示「暂时繁忙」）。"""
+    return {
+        "docs": [],
+        "meta": {
+            "rerank_enabled": False,
+            "rerank_applied": False,
+            "rerank_error": "degraded_quota",
+            "retrieval_mode": "degraded_quota",
+            "candidate_k": candidate_k,
+            "leaf_retrieve_level": LEAF_RETRIEVE_LEVEL,
+            "include_images": include_images,
+            "auto_merge_enabled": AUTO_MERGE_ENABLED,
+            "auto_merge_applied": False,
+            "auto_merge_threshold": AUTO_MERGE_THRESHOLD,
+            "auto_merge_replaced_chunks": 0,
+            "auto_merge_steps": 0,
+            "candidate_count": 0,
+        },
+    }
 
 
 def retrieve_documents_by_image(
@@ -786,7 +890,9 @@ def retrieve_documents_by_image(
     expand_rel = bool(include_related_image_expansion) if include_img_finalize else False
 
     try:
-        dense_embeddings = _multimodal_embedding_service.get_image_embeddings([image_abs_path])
+        dense_embeddings = _multimodal_embedding_service.get_image_embeddings(
+            [image_abs_path], request_timeout=_retrieve_embedding_timeout()
+        )
         if not dense_embeddings or not dense_embeddings[0]:
             raise ValueError("empty_image_embedding")
         dense_embedding = dense_embeddings[0]

@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
-import redis
 from fastapi import HTTPException
 
+from app.chat.cache import get_redis_client
 from app.log import logger
 from app.settings import settings
+
+# 原子限流：INCR + 首次设置过期在同一 Lua 中完成，避免 INCR/EXPIRE 之间崩溃
+# 留下无 TTL 的 key 导致用户被永久限流。
+_RATE_LIMIT_LUA = """
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+"""
 
 
 def check_user_rate_limit(user_id: int, *, action: str, limit: int, window_seconds: int) -> None:
@@ -18,10 +28,25 @@ def check_user_rate_limit(user_id: int, *, action: str, limit: int, window_secon
         return
     key = f"{settings.REDIS_KEY_PREFIX}:user_rate:{action}:{int(user_id)}"
     try:
-        client = redis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
-        count = client.incr(key)
-        if count == 1:
-            client.expire(key, window_seconds)
+        client = get_redis_client()
+        count = int(client.eval(_RATE_LIMIT_LUA, 1, key, int(window_seconds)))
+        if count > limit:
+            raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("user rate limit skipped (redis unavailable): %s", exc)
+
+
+async def acheck_user_rate_limit(user_id: int, *, action: str, limit: int, window_seconds: int) -> None:
+    """限流的异步入口（阶段 4）：直接走异步 Redis 客户端，不再占用默认线程池。"""
+    if limit <= 0:
+        return
+    from app.chat.cache import cache
+
+    key = f"{settings.REDIS_KEY_PREFIX}:user_rate:{action}:{int(user_id)}"
+    try:
+        count = int(await cache.aeval(_RATE_LIMIT_LUA, 1, key, int(window_seconds)))
         if count > limit:
             raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试")
     except HTTPException:

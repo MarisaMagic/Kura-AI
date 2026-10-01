@@ -12,12 +12,14 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
+from pymilvus.exceptions import MilvusException
+
 from app.chat.cache import cache
 from app.chat.database import SessionLocal
 from app.chat.db_models import KbDocument, KbParentChunk
 from app.core import object_storage as obs
 from app.kb.image_store import get_image_store
-from app.kb.milvus_client import MilvusManager, milvus_escape
+from app.kb.milvus_client import MilvusManager, get_milvus_manager, milvus_escape
 from app.kb.multimodal_document_loader import MultimodalDocumentLoader, _filename_fingerprint
 from app.kb.multimodal_milvus_writer import MultimodalMilvusWriter
 from app.kb.parent_chunk_store import ParentChunkStore
@@ -30,7 +32,7 @@ from app.utils.document_types import (
 os.environ.setdefault("PGCLIENTENCODING", "UTF8")
 
 _multimodal_loader = MultimodalDocumentLoader()
-_milvus = MilvusManager()
+_milvus = get_milvus_manager()
 _parent = ParentChunkStore()
 _image_store = get_image_store()
 
@@ -186,6 +188,61 @@ def delete_kb_document(
             pass
     invalidate_kb_filename_cache(kb_scope)
     return True
+
+
+BATCH_DELETE_MAX = 5000
+
+
+def is_milvus_unavailable(exc: Exception) -> bool:
+    """
+    判断异常是否为 Milvus 连接不可用（连接失败/服务未就绪）。
+    :param exc: 待判断异常
+    :return: True 表示向量库暂时不可用
+    """
+    if not isinstance(exc, MilvusException):
+        return False
+    return int(getattr(exc, "code", 0) or 0) == 2
+
+
+def delete_kb_documents(
+    kb_scope: str,
+    user_id: int,
+    agent_id: int,
+    filenames: list[str],
+) -> dict:
+    """
+    批量删除知识库文档（按前端当前筛选结果传文件名）。
+    去重清洗文件名并按 BATCH_DELETE_MAX 限制单次数量，逐个删除后汇总失败项。
+    :param kb_scope: 知识库范围（用户ID + 智能体ID）
+    :param user_id: 用户ID
+    :param agent_id: 智能体ID
+    :param filenames: 展示文件名列表
+    :return: {"deleted": 成功数, "failed": 失败文件名列表, "requested": 去重后请求数}
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in filenames or []:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    if len(names) > BATCH_DELETE_MAX:
+        raise ValueError(f"单次最多删除 {BATCH_DELETE_MAX} 个文档，请缩小筛选范围")
+    deleted = 0
+    failed: list[str] = []
+    for name in names:
+        try:
+            if delete_kb_document(kb_scope, user_id, agent_id, name):
+                deleted += 1
+            else:
+                failed.append(name)
+        except Exception as exc:  # noqa: BLE001
+            # 连接不可用时不是单文件失败：直接抛出，由接口返回统一的友好提示
+            if is_milvus_unavailable(exc):
+                raise
+            failed.append(name)
+    return {"deleted": deleted, "failed": failed, "requested": len(names)}
 
 
 def fetch_kb_document_list(kb_scope: str) -> list[dict]:
@@ -419,9 +476,9 @@ def run_ingest_pipeline_sync(
         text_count = len(text_docs)
         image_count = len(image_docs)
 
-        # 生成全部向量（最易超时的阶段；任务线程使用专用 Milvus 实例，避免跨线程共用单例）
+        # 生成全部向量（最易超时的阶段；复用进程级 Milvus 单例，消除每任务连接建立开销）
         bs = max(1, int(settings.EMBEDDING_BATCH_SIZE or 10))
-        job_milvus = MilvusManager()
+        job_milvus = get_milvus_manager()
         job_milvus.init_collection()
         job_writer = MultimodalMilvusWriter(milvus_manager=job_milvus)
 
@@ -464,10 +521,19 @@ def run_ingest_pipeline_sync(
     lock_key = _swap_lock_key(kb_scope, display_filename)
     lock_ttl = max(60, int(settings.KB_UPLOAD_SWAP_LOCK_TTL_SECONDS or 600))
     lock_acquired = cache.set_nx(lock_key, {"agent_id": agent_id}, ttl=lock_ttl)
-    while not lock_acquired:
-        check.checkpoint()
-        time.sleep(0.2)
-        lock_acquired = cache.set_nx(lock_key, {"agent_id": agent_id}, ttl=lock_ttl)
+    if not lock_acquired:
+        # 指数退避等待（上限 KB_UPLOAD_SWAP_LOCK_WAIT_SECONDS）：固定 0.2s 自旋会持续占用
+        # worker 线程；超时直接失败并由用户稍后重试，避免无界等待。
+        wait_cap = max(1.0, float(getattr(settings, "KB_UPLOAD_SWAP_LOCK_WAIT_SECONDS", 3.0) or 3.0))
+        deadline = time.monotonic() + wait_cap
+        delay = 0.1
+        while not lock_acquired:
+            check.checkpoint()
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"同名文档「{display_filename}」正在被另一任务替换，请稍后重试")
+            time.sleep(delay)
+            delay = min(delay * 2, 1.0)
+            lock_acquired = cache.set_nx(lock_key, {"agent_id": agent_id}, ttl=lock_ttl)
 
     def write_progress(stage: str, done: int, total: int) -> None:
         check.checkpoint()

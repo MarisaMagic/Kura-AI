@@ -129,6 +129,19 @@ class PinnedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
             pool._network_backend = _PinnedAsyncNetworkBackend(upstream.ips)
 
 
+def _http_pool_limits() -> httpx.Limits:
+    """LLM/出站 HTTP 连接池上限（按副本内并发流估算，避免默认 100 连接被突发打满）。"""
+    from app.settings import settings
+
+    max_conn = max(8, int(getattr(settings, "LLM_HTTP_MAX_CONNECTIONS", 64) or 64))
+    max_keep = max(4, int(getattr(settings, "LLM_HTTP_MAX_KEEPALIVE", 16) or 16))
+    return httpx.Limits(
+        max_connections=max_conn,
+        max_keepalive_connections=min(max_keep, max_conn),
+        keepalive_expiry=30.0,
+    )
+
+
 def build_pinned_sync_client(
     url: str,
     *,
@@ -139,13 +152,17 @@ def build_pinned_sync_client(
     upstream = validate_public_http_url(url)
     from app.settings import settings
 
+    limits = _http_pool_limits()
     if not bool(getattr(settings, "EGRESS_PIN_DNS", True)):
-        return httpx.Client(timeout=timeout, verify=verify, trust_env=False, follow_redirects=False)
+        return httpx.Client(
+            timeout=timeout, verify=verify, trust_env=False, follow_redirects=False, limits=limits
+        )
     return httpx.Client(
         transport=PinnedHTTPTransport(upstream, verify=verify),
         timeout=timeout,
         trust_env=False,
         follow_redirects=False,
+        limits=limits,
     )
 
 
@@ -158,10 +175,15 @@ def build_pinned_clients(
     upstream = validate_public_http_url(url)
     from app.settings import settings
 
+    limits = _http_pool_limits()
     if not bool(getattr(settings, "EGRESS_PIN_DNS", True)):
         return (
-            httpx.Client(timeout=timeout, verify=verify, trust_env=False, follow_redirects=False),
-            httpx.AsyncClient(timeout=timeout, verify=verify, trust_env=False, follow_redirects=False),
+            httpx.Client(
+                timeout=timeout, verify=verify, trust_env=False, follow_redirects=False, limits=limits
+            ),
+            httpx.AsyncClient(
+                timeout=timeout, verify=verify, trust_env=False, follow_redirects=False, limits=limits
+            ),
         )
     sync_transport = PinnedHTTPTransport(upstream, verify=verify)
     async_transport = PinnedAsyncHTTPTransport(upstream, verify=verify)
@@ -170,12 +192,14 @@ def build_pinned_clients(
         timeout=timeout,
         trust_env=False,
         follow_redirects=False,
+        limits=limits,
     )
     async_client = httpx.AsyncClient(
         transport=async_transport,
         timeout=timeout,
         trust_env=False,
         follow_redirects=False,
+        limits=limits,
     )
     return sync_client, async_client
 
@@ -185,6 +209,7 @@ def build_mcp_httpx_client_factory(url: str):
     from app.settings import settings
 
     pin_enabled = bool(getattr(settings, "EGRESS_PIN_DNS", True))
+    limits = _http_pool_limits()
 
     def _factory(
         headers: dict[str, str] | None = None,
@@ -198,6 +223,7 @@ def build_mcp_httpx_client_factory(url: str):
             auth=auth,
             trust_env=False,
             follow_redirects=False,
+            limits=limits,
         )
 
     return _factory

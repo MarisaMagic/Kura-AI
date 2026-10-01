@@ -33,11 +33,28 @@ def _bootstrap() -> None:
     except Exception as e:  # noqa: BLE001
         logger.error("worker 对象存储初始化失败（上传处理将不可用）: {}", e)
     try:
-        from app.kb.milvus_client import MilvusManager
+        from app.kb.milvus_client import get_milvus_manager
 
-        MilvusManager().init_collection()
+        # 预热带硬超时（daemon 线程 + join timeout）：Milvus 半死/不可达时不得阻塞
+        # worker 进入消费循环；超时线程随进程退出回收，首次任务时自动重试。
+        _preheat_result: dict = {}
+
+        def _preheat() -> None:
+            try:
+                get_milvus_manager().init_collection()
+                _preheat_result["ok"] = True
+            except Exception as e:  # noqa: BLE001
+                _preheat_result["error"] = e
+
+        t = threading.Thread(target=_preheat, name="milvus-preheat", daemon=True)
+        t.start()
+        t.join(timeout=20)
+        if t.is_alive():
+            logger.warning("worker Milvus 预热超时（20s），跳过；首次任务时自动重试")
+        elif _preheat_result.get("error") is not None:
+            logger.warning("worker Milvus 预热失败（首次任务时自动重试）: {}", _preheat_result["error"])
     except Exception as e:  # noqa: BLE001
-        logger.warning("worker Milvus 预热失败（首次任务时自动重试）: {}", e)
+        logger.warning("worker Milvus 预热初始化异常: {}", e)
     try:
         from app.kb import kb_job
 

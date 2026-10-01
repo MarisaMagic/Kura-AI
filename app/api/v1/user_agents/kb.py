@@ -13,7 +13,7 @@ from app.kb import kb_job, kb_service
 from app.kb.kb_scope import kb_scope_for
 from app.models import User
 from app.schemas.base import Fail, Success
-from app.schemas.kb import KbDeleteResponse, KbDocumentListResponse, KbDocumentItem, KbUploadTaskResponse
+from app.schemas.kb import KbDeleteResponse, KbDocsDelete, KbDocumentListResponse, KbDocumentItem, KbUploadTaskResponse
 from app.settings import settings
 from app.utils.document_types import SUPPORTED_UPLOAD_HINT, reject_reason
 from app.utils.upload_accept import prepare_document_upload
@@ -138,5 +138,36 @@ async def kb_delete_document(
         # Milvus/对象存储/PG 均为同步阻塞调用，放线程执行避免卡住事件循环
         await asyncio.to_thread(kb_service.delete_kb_document, scope, user_id, agent_id, display)
     except Exception as e:  # noqa: BLE001
+        if kb_service.is_milvus_unavailable(e):
+            return Fail(code=503, msg="向量库暂不可用，请稍后重试")
         return Fail(code=500, msg=str(e))
     return Success(data=KbDeleteResponse(display_filename=display).model_dump(), msg="删除成功")
+
+
+@router.post("/kb/documents/batch-delete", summary="批量删除知识库文档（按当前筛选结果）", tags=["智能体模块"])
+async def kb_batch_delete_documents(
+    body: KbDocsDelete,
+    current_user: User = Depends(AuthControl.is_authed),
+):
+    user_id = current_user.id
+    ua = await user_agent_controller.get_owned(body.agent_id, user_id)
+    if not ua:
+        return Fail(code=404, msg="智能体不存在或无权限访问")
+    scope = kb_scope_for(user_id, body.agent_id)
+    try:
+        # Milvus/对象存储/PG 均为同步阻塞调用，放线程执行避免卡住事件循环
+        result = await asyncio.to_thread(
+            kb_service.delete_kb_documents, scope, user_id, body.agent_id, body.filenames
+        )
+    except ValueError as e:
+        return Fail(code=400, msg=str(e))
+    except Exception as e:  # noqa: BLE001
+        if kb_service.is_milvus_unavailable(e):
+            return Fail(code=503, msg="向量库暂不可用，请稍后重试")
+        return Fail(code=500, msg=str(e))
+    if result["failed"]:
+        return Success(
+            data=result,
+            msg=f"已删除 {result['deleted']} 个文档，{len(result['failed'])} 个删除失败",
+        )
+    return Success(data=result, msg=f"已删除 {result['deleted']} 个文档")

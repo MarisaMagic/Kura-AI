@@ -56,8 +56,24 @@ def _chunk_limits() -> tuple[int, int, int, bool]:
 
 
 def _read_text_file(file_path: str) -> str:
-    """文本/源码文件解码：BOM 去除，UTF-8 优先，charset-normalizer / GB18030 兜底。"""
-    raw = Path(file_path).read_bytes()
+    """文本/源码文件解码：BOM 去除，UTF-8 优先，charset-normalizer / GB18030 兜底。
+
+    阶段 3：限量读取（KB_TEXT_FILE_MAX_BYTES，默认 20MB），避免超大文本整份进内存
+    （上传上限 50MB，多 worker 并发时整份读取+解码峰值可达数百 MB）；超限截断并告警。
+    """
+    max_bytes = max(
+        1024 * 1024,
+        int(getattr(settings, "KB_TEXT_FILE_MAX_BYTES", 20 * 1024 * 1024) or 20 * 1024 * 1024),
+    )
+    with open(file_path, "rb") as f:
+        raw = f.read(max_bytes)
+        truncated = bool(f.read(1))
+    if truncated:
+        logger.warning(
+            "文本文件超过 {}MB，已截断解析（其余内容忽略）: {}",
+            max_bytes // (1024 * 1024),
+            file_path,
+        )
     if raw.startswith(b"\xef\xbb\xbf"):
         raw = raw[3:]
     try:

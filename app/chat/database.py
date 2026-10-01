@@ -33,9 +33,19 @@ def _sqlalchemy_database_url(raw: str) -> str:
 def _make_engine():
     """
     创建SQLAlchemy引擎, 用于连接聊天 postgres 数据库
+
+    连接池显式配置：默认 5+10 在高并发下会被 to_thread 的短查询迅速耗尽，
+    pool_timeout=10s 让线程快速失败而不是默认 30s 排队。
     """
     url = _sqlalchemy_database_url(settings.chat_database_url)
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=max(2, int(getattr(settings, "CHAT_DB_POOL_SIZE", 10) or 10)),
+        max_overflow=max(0, int(getattr(settings, "CHAT_DB_MAX_OVERFLOW", 10) or 10)),
+        pool_timeout=max(1.0, float(getattr(settings, "CHAT_DB_POOL_TIMEOUT", 10.0) or 10.0)),
+        pool_recycle=1800,
+    )
 
 
 engine = _make_engine()

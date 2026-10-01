@@ -206,6 +206,99 @@ def _guard_mcp_tool_output(tool: Any) -> Any:
     )
 
 
+async def get_agent_mcp_server_configs(agent_id: int) -> list[dict]:
+    """
+    查询智能体已启用 MCP 服务的纯数据配置（不携带 ORM 实例/连接）。
+
+    同步对话链路在线程与独立事件循环中运行，不能在其中访问 Tortoise（asyncpg 连接
+    绑定主事件循环）；须在主事件循环调用本函数，结果供 ``load_mcp_tools_from_configs``
+    跨线程使用。
+    """
+    from app.models.user_agent_mcp import UserAgentMcpServer
+
+    rows = await UserAgentMcpServer.filter(agent_id=agent_id, enabled=True).all()
+    return [
+        {
+            "id": row.id,
+            "name": row.name,
+            "transport": row.transport,
+            "url": row.url,
+            "headers": decrypt_headers(row.headers_ciphertext),
+            "confirm_policy": getattr(row, "confirm_policy", "auto") or "auto",
+        }
+        for row in rows
+    ]
+
+
+async def load_mcp_tools_from_configs(
+    configs: list[dict],
+    *,
+    agent_id: int,
+    user_id: int | None = None,
+    session_id: str | None = None,
+) -> tuple[list, list[dict]]:
+    """
+    从纯配置加载 MCP 工具（不访问数据库，可在任意事件循环执行）。
+
+    :param configs: ``get_agent_mcp_server_configs`` 的返回值
+    :return: (tools, errors)；errors 元素 {"name": 服务名, "error": 错误说明}
+    """
+    from app.chat.cache import cache
+
+    if not configs:
+        return [], []
+
+    all_tools: list = []
+    errors: list[dict] = []
+    seen_names: set[str] = set(_BUILTIN_TOOL_NAMES)
+
+    for cfg in configs:
+        server_id = int(cfg.get("id") or 0)
+        server_name = str(cfg.get("name") or "")
+        schema_key = mcp_tool_schema_cache_key(agent_id, server_id)
+        try:
+            tools = await _list_tools(
+                str(cfg.get("transport") or ""), str(cfg.get("url") or ""), cfg.get("headers") or None
+            )
+            # schema 快照写入（异步 Redis；仅用于连接失败时的 stub 回退）
+            await cache.aset_json(schema_key, _snapshot_mcp_tools(tools), MCP_TOOL_SCHEMA_TTL_SECONDS)
+        except Exception as e:
+            err_text = str(e)[:300]
+            errors.append({"name": server_name, "error": err_text})
+            cached = await cache.aget_json(schema_key)
+            if cached:
+                logger.warning(
+                    "MCP list_tools 失败，使用缓存 schema stub agent_id=%s server=%s: %s",
+                    agent_id,
+                    server_name,
+                    err_text,
+                )
+                tools = _stub_mcp_tools_from_snapshot(cached, server_name, err_text)
+            else:
+                continue
+        for t in tools:
+            tname = getattr(t, "name", "") or ""
+            if not tname or tname in seen_names:
+                errors.append(
+                    {"name": server_name, "error": f"工具名冲突或为空，已跳过：{tname or '(未命名)'}"}
+                )
+                continue
+            seen_names.add(tname)
+            guarded = _guard_mcp_tool_output(t)
+            all_tools.append(
+                wrap_mcp_tool_with_confirmation(
+                    guarded,
+                    server_name=server_name,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    session_id=session_id,
+                    confirm_policy=str(cfg.get("confirm_policy") or "auto"),
+                )
+            )
+    all_tools.sort(key=lambda t: str(getattr(t, "name", "") or ""))
+    return all_tools, errors
+
+
 async def load_agent_mcp_tools(
     agent_id: int,
     *,
@@ -217,54 +310,7 @@ async def load_agent_mcp_tools(
     单个服务连接失败仅记录错误、不中断对话；工具名与内置工具或彼此冲突时跳过。
     :return: (tools, errors)；errors 元素 {"name": 服务名, "error": 错误说明}
     """
-    from app.chat.cache import cache
-    from app.models.user_agent_mcp import UserAgentMcpServer
-
-    rows = await UserAgentMcpServer.filter(agent_id=agent_id, enabled=True).all()
-    if not rows:
-        return [], []
-
-    all_tools: list = []
-    errors: list[dict] = []
-    seen_names: set[str] = set(_BUILTIN_TOOL_NAMES)
-
-    for row in rows:
-        schema_key = mcp_tool_schema_cache_key(agent_id, row.id)
-        try:
-            tools = await _list_tools(row.transport, row.url, decrypt_headers(row.headers_ciphertext))
-            cache.set_json(schema_key, _snapshot_mcp_tools(tools), MCP_TOOL_SCHEMA_TTL_SECONDS)
-        except Exception as e:
-            err_text = str(e)[:300]
-            errors.append({"name": row.name, "error": err_text})
-            cached = cache.get_json(schema_key)
-            if cached:
-                logger.warning(
-                    "MCP list_tools 失败，使用缓存 schema stub agent_id=%s server=%s: %s",
-                    agent_id,
-                    row.name,
-                    err_text,
-                )
-                tools = _stub_mcp_tools_from_snapshot(cached, row.name, err_text)
-            else:
-                continue
-        for t in tools:
-            tname = getattr(t, "name", "") or ""
-            if not tname or tname in seen_names:
-                errors.append(
-                    {"name": row.name, "error": f"工具名冲突或为空，已跳过：{tname or '(未命名)'}"}
-                )
-                continue
-            seen_names.add(tname)
-            guarded = _guard_mcp_tool_output(t)
-            all_tools.append(
-                wrap_mcp_tool_with_confirmation(
-                    guarded,
-                    server_name=row.name,
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    session_id=session_id,
-                    confirm_policy=getattr(row, "confirm_policy", "auto") or "auto",
-                )
-            )
-    all_tools.sort(key=lambda t: str(getattr(t, "name", "") or ""))
-    return all_tools, errors
+    configs = await get_agent_mcp_server_configs(agent_id)
+    return await load_mcp_tools_from_configs(
+        configs, agent_id=agent_id, user_id=user_id, session_id=session_id
+    )

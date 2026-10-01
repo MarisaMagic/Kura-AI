@@ -142,8 +142,9 @@ def _public_pending(record: dict) -> dict:
     }
 
 
-def _load_approved_call(pending_id: str, *, user_id: int, agent_id: int, session_id: str, tool_name: str) -> dict | None:
-    record = cache.get_json(_approved_key(pending_id))
+async def _aload_approved_call(pending_id: str, *, user_id: int, agent_id: int, session_id: str, tool_name: str) -> dict | None:
+    """异步读取并校验已批准调用记录（阶段 4：走异步 Redis，不再线程跳转）。"""
+    record = await cache.aget_json(_approved_key(pending_id))
     if not isinstance(record, dict):
         return None
     if int(record.get("user_id") or -1) != int(user_id):
@@ -182,7 +183,8 @@ def wrap_mcp_tool_with_confirmation(tool: object, *, server_name: str, user_id: 
         payload = _call_payload(args, kwargs)
         approved_id = get_approved_mcp_pending_id(clear=False)
         if approved_id:
-            approved = _load_approved_call(
+            # 异步 Redis 读取（阶段 4）：不再线程跳转
+            approved = await _aload_approved_call(
                 approved_id,
                 user_id=user_id,
                 agent_id=agent_id,
@@ -191,7 +193,7 @@ def wrap_mcp_tool_with_confirmation(tool: object, *, server_name: str, user_id: 
             )
             if approved is not None:
                 get_approved_mcp_pending_id(clear=True)
-                cache.delete(_approved_key(approved_id))
+                await cache.adelete(_approved_key(approved_id))
                 return await _tool.ainvoke(_canonical_args(approved.get("args") or payload))
             get_approved_mcp_pending_id(clear=True)
 
@@ -209,18 +211,18 @@ def wrap_mcp_tool_with_confirmation(tool: object, *, server_name: str, user_id: 
             "args_preview": _args_preview(payload),
             "expires_at": time.time() + ttl,
         }
-        cache.set_json(_pending_key(pending_id), record, ttl)
+        await cache.aset_json(_pending_key(pending_id), record, ttl)
         gate = add_pending_mcp_confirmation(_public_pending(record))
         status = gate.get("status")
         if status == "duplicate":
-            cache.delete(_pending_key(pending_id))
+            await cache.adelete(_pending_key(pending_id))
             existing = gate.get("pending") or {}
             return (
                 "MCP_" + "CONFIRMATION_REQUIRED pending_id=" + str(existing.get("pending_id")) + f" server={server_name} tool={tool_name}."
                 " A confirmation for this exact call is already pending; stop and ask the user to confirm it."
             )
         if status == "capped":
-            cache.delete(_pending_key(pending_id))
+            await cache.adelete(_pending_key(pending_id))
             return (
                 "MCP_" + "CONFIRMATION_LIMIT_REACHED: too many high-risk MCP calls in this turn. "
                 "Do not call more MCP write tools; ask the user to narrow the request."

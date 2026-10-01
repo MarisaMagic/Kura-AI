@@ -1,5 +1,6 @@
 import os
 import typing
+from urllib.parse import unquote, urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -16,6 +17,20 @@ def _tortoise_pg_url(raw: str) -> str:
         if raw.startswith(prefix):
             return "postgres://" + raw[len(prefix) :]
     raise ValueError(f"无法识别的 PostgreSQL 连接串: {raw!r}")
+
+
+def _tortoise_pg_credentials(raw: str, *, minsize: int, maxsize: int) -> dict:
+    """解析连接串为 Tortoise/asyncpg credentials（含连接池上下限）。"""
+    parsed = urlparse(_tortoise_pg_url(raw))
+    return {
+        "host": parsed.hostname or "127.0.0.1",
+        "port": int(parsed.port or 5432),
+        "user": unquote(parsed.username or ""),
+        "password": unquote(parsed.password or ""),
+        "database": (parsed.path or "/").lstrip("/") or "postgres",
+        "minsize": max(1, int(minsize)),
+        "maxsize": max(2, int(maxsize)),
+    }
 
 
 class Settings(BaseSettings):
@@ -102,6 +117,15 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://127.0.0.1:6379/0"
     REDIS_KEY_PREFIX: str = "kura_ai"
     REDIS_CACHE_TTL_SECONDS: int = 300
+    # Redis 客户端连接池上限（cache 单例；限流/队列/缓存共用）
+    REDIS_MAX_CONNECTIONS: int = 64
+    # 聊天库 SQLAlchemy 连接池（每进程/副本独立，多副本时需按进程数核算 PG max_connections）
+    CHAT_DB_POOL_SIZE: int = 10
+    CHAT_DB_MAX_OVERFLOW: int = 10
+    CHAT_DB_POOL_TIMEOUT: float = 10.0
+    # 管理端 Tortoise/asyncpg 连接池（每进程独立）
+    TORTOISE_DB_POOL_MINSIZE: int = 2
+    TORTOISE_DB_POOL_MAXSIZE: int = 10
     # 智能体对话异步 Job（刷新后可重连 SSE）在 Redis 中的 TTL（秒）
     CHAT_JOB_TTL_SECONDS: int = 86400
     # Job 到达终态（完成/取消/失败）后的 TTL（秒）：只需覆盖断线重连与迟到追更，远小于 running 期
@@ -155,6 +179,11 @@ class Settings(BaseSettings):
     MILVUS_COLLECTION: str = "kura_ai_kb"
     # 云上 / 已开鉴权的实例填 token；本地 docker standalone 通常留空
     MILVUS_TOKEN: str = ""
+    # 连接建立超时（秒）：Milvus 不可达时若无超时会长时间挂起（gRPC 重试），
+    # 拖死 /ready 探活线程与启动预热，故显式限时
+    MILVUS_CONNECT_TIMEOUT_SECONDS: float = 5.0
+    # 探活/轻量查询 RPC 超时（秒）
+    MILVUS_PROBE_TIMEOUT_SECONDS: float = 5.0
     # 启用：按 token 预算压缩进上下文（替代「只留最近 N 轮」滑动窗口）+ 跨会话用户长期记忆
     CHAT_USE_SESSION_MEMORY: bool = True
     CHAT_MEMORY_WINDOW_TURNS: int = 10  # 仅当 CHAT_COMPACT_ENABLED=false 时作为滑动窗口轮数
@@ -231,8 +260,8 @@ class Settings(BaseSettings):
     KB_UPLOAD_MODE: str = "inline"
     # 独立 worker 的处理线程数（KB_UPLOAD_MODE=queue 时生效）
     KB_WORKER_THREADS: int = 4
-    # 全局排队 + 处理中任务数上限（0 表示不限制）；超过返回 429 让前端稍后重试
-    KB_UPLOAD_QUEUE_MAX: int = 500
+    # 全局排队 + 处理中任务数上限（0 表示不限制）；入队为原子检查（多副本不超卖），超限返回 429
+    KB_UPLOAD_QUEUE_MAX: int = 2000
     # 单用户活动任务（排队 + 处理中）上限（0 表示不限制）
     KB_UPLOAD_USER_MAX_ACTIVE: int = 600
     # 用户活动任务集合 TTL（秒）：worker 崩溃未清理的陈旧计数在此期限内自动过期
@@ -243,6 +272,13 @@ class Settings(BaseSettings):
     KB_UPLOAD_PENDING_PREFIX: str = "pending-uploads"
     # 同名文档「替换落库」阶段的 Redis 互斥锁 TTL（秒）
     KB_UPLOAD_SWAP_LOCK_TTL_SECONDS: int = 600
+    # 同名文档替换锁等待上限（秒）：超时直接失败提示稍后重试（替代无界自旋占用 worker 线程）
+    KB_UPLOAD_SWAP_LOCK_WAIT_SECONDS: float = 3.0
+    # 上传进度上报节流：距上次写入的最小间隔（秒）与最小百分比增量（二者同时不满足才跳过）
+    KB_PROGRESS_MIN_INTERVAL_SECONDS: float = 0.5
+    KB_PROGRESS_MIN_PERCENT_STEP: int = 2
+    # 文本/源码类文件解析的读取上限（字节）：超过则截断解析，避免超大文本整份进内存
+    KB_TEXT_FILE_MAX_BYTES: int = 20 * 1024 * 1024
     # 嵌入调用失败（429 限流 / 5xx / 网络抖动）的最大自动重试次数（指数退避 + 抖动）
     KB_UPLOAD_EMBEDDING_MAX_RETRIES: int = 3
     # 重试退避基数（秒）：第 n 次重试等待 base * 2**(n-1)，上限 KB_UPLOAD_EMBEDDING_RETRY_MAX_SECONDS
@@ -252,6 +288,28 @@ class Settings(BaseSettings):
     EMBEDDING_MAX_CONCURRENCY: int = 4
     # 等待嵌入并发额度的最长时间（秒），超时按调用失败处理
     EMBEDDING_CONCURRENCY_WAIT_SECONDS: int = 120
+
+    # ===== 上游配额保护（个人账号配额有限：跨 API 副本与 kb-worker 共享的 Redis 全局闸门）=====
+    # 嵌入/重排全局并发（跨进程）与 QPS 上限；0/负数按 1 处理。压测逐步调高，429 率 <1% 为准
+    EMBEDDING_GLOBAL_CONCURRENCY: int = 2
+    EMBEDDING_GLOBAL_QPS: int = 2
+    RERANK_GLOBAL_CONCURRENCY: int = 2
+    RERANK_GLOBAL_QPS: int = 2
+    # 配额闸门等待上限（秒）：快速降级模式下应远小于上游超时，避免请求卡死
+    UPSTREAM_QUOTA_WAIT_SECONDS: float = 8.0
+    # 熔断：连续失败达到阈值后短路该上游调用，冷却后再放行探测
+    UPSTREAM_BREAKER_FAILS: int = 3
+    UPSTREAM_BREAKER_OPEN_SECONDS: float = 60.0
+    # 通用上游重试退避上限（秒）：低配额场景缩短卡顿（嵌入/重排共用）
+    UPSTREAM_RETRY_MAX_SECONDS: float = 1.5
+    # 检索链路单次嵌入调用的 HTTP 超时（秒）；勿用 SDK 默认（可达 300s）
+    EMBEDDING_RETRIEVE_TIMEOUT_SECONDS: int = 20
+    # 图片逐张嵌入的本地并发度（服务商侧总并发仍由 EMBEDDING_GLOBAL_CONCURRENCY 全局桶约束）
+    EMBEDDING_IMAGE_PARALLELISM: int = 2
+    # 查询向量 Redis 缓存 TTL（秒）：相同 query 零调用，缓解配额
+    EMBEDDING_QUERY_CACHE_TTL_SECONDS: int = 604800
+    # 上传侧批量嵌入让路阈值（%）：全局配额使用率高于该值时 worker 自动降速，保证前台检索优先
+    KB_EMBEDDING_YIELD_PERCENT: int = 70
 
     # ===== 知识库结构感知分块（代码块 / 表格 / 源码 AST）=====
     # 总开关：关闭时全部文档回落到旧的递归字符切分
@@ -315,9 +373,16 @@ class Settings(BaseSettings):
     LLM_HTTP_READ_TIMEOUT: float = 120.0
     LLM_HTTP_WRITE_TIMEOUT: float = 30.0
     LLM_HTTP_POOL_TIMEOUT: float = 10.0
+    # 同一 base_url 的 LLM httpx 连接池上限（按副本内 在途流 × 2~3 估算；需与上游配额匹配）
+    LLM_HTTP_MAX_CONNECTIONS: int = 64
+    LLM_HTTP_MAX_KEEPALIVE: int = 16
     LLM_MAX_INFLIGHT: int = 8
     # 并发闸门排队等待上限（秒）：超时将任务置为 failed，避免前端无限静默等待
     LLM_QUEUE_TIMEOUT_SECONDS: float = 120.0
+    # 事件循环默认线程池大小：asyncio.to_thread 与 LangChain 同步工具共享
+    DEFAULT_EXECUTOR_MAX_WORKERS: int = 96
+    # 工具长任务并发闸门：防止 RAG/搜索等分钟级同步工具占满默认线程池
+    TOOL_MAX_INFLIGHT: int = 24
 
     # RAG：可选单独指定打分模型；未设置则与智能体对话模型相同
     RAG_GRADE_MODEL: typing.Optional[str] = None
@@ -456,7 +521,16 @@ class Settings(BaseSettings):
     @property
     def TORTOISE_ORM(self) -> dict:
         return {
-            "connections": {"default": _tortoise_pg_url(self.admin_database_url)},
+            "connections": {
+                "default": {
+                    "engine": "tortoise.backends.asyncpg",
+                    "credentials": _tortoise_pg_credentials(
+                        self.admin_database_url,
+                        minsize=int(getattr(self, "TORTOISE_DB_POOL_MINSIZE", 2) or 2),
+                        maxsize=int(getattr(self, "TORTOISE_DB_POOL_MAXSIZE", 10) or 10),
+                    ),
+                }
+            },
             "apps": {
                 "models": {
                     "models": ["app.models"],

@@ -17,6 +17,7 @@ from http import HTTPStatus
 from loguru import logger
 
 from app.settings import settings
+from app.utils.upstream_quota import QuotaBreakerOpenError, QuotaTimeoutError
 
 
 class EmbeddingThrottledError(RuntimeError):
@@ -47,16 +48,33 @@ def _concurrency_gate() -> threading.BoundedSemaphore:
 
 
 class _embedding_slot:
-    """上下文管理器：占用一个全局嵌入并发额度；超时未取得则抛 EmbeddingConcurrencyTimeoutError。"""
+    """上下文管理器：占用嵌入并发额度（进程内信号量 + 跨进程全局配额）。
+
+    进程内信号量先做本地限流（保护本进程线程），再申请 Redis 全局配额
+    （跨 API 副本与 kb-worker 共享，真正约束服务商账号侧并发/QPS）。
+    全局配额等待/熔断失败按「快速降级」处理：直接抛错，不长时间卡住。
+    """
 
     def __enter__(self) -> "_embedding_slot":
+        from app.utils.upstream_quota import embedding_quota
+
         wait = max(1, int(getattr(settings, "EMBEDDING_CONCURRENCY_WAIT_SECONDS", 120) or 120))
         if not _concurrency_gate().acquire(timeout=wait):
             raise EmbeddingConcurrencyTimeoutError(f"等待嵌入并发额度超过 {wait} 秒，服务商侧在途请求过多")
+        try:
+            embedding_quota().acquire_sync()
+        except BaseException:
+            _concurrency_gate().release()
+            raise
         return self
 
     def __exit__(self, *_exc: Any) -> bool:
-        _concurrency_gate().release()
+        from app.utils.upstream_quota import embedding_quota
+
+        try:
+            embedding_quota().release_sync()
+        finally:
+            _concurrency_gate().release()
         return False
 
 
@@ -126,19 +144,39 @@ def _is_retryable(exc: Exception) -> bool:
 def _call_with_retry(fn: Callable[[], Any], describe: str) -> Any:
     """
     带指数退避 + 抖动的重试执行（仅对限流/网络抖动类异常重试）。
+
+    差异于旧实现：
+    - 配额闸门超时/熔断（QuotaTimeoutError/QuotaBreakerOpenError）**不重试**，快速降级；
+    - 限流类失败计入全局熔断器（record_failure），连续失败后短路；
+    - 退避上限取 min(KB 配置, UPSTREAM_RETRY_MAX_SECONDS) 以缩短低配额下的卡顿。
     :param fn: 实际调用（内部已含并发额度占用与状态码校验）
     :param describe: 日志描述
     :return: fn 的返回值
     """
+    from app.utils.upstream_quota import (
+        QuotaBreakerOpenError,
+        QuotaTimeoutError,
+        embedding_quota,
+    )
+
     max_retries = max(0, int(getattr(settings, "KB_UPLOAD_EMBEDDING_MAX_RETRIES", 3) or 0))
     base = max(0.1, float(getattr(settings, "KB_UPLOAD_EMBEDDING_RETRY_BASE_SECONDS", 1.0) or 1.0))
-    cap = max(base, float(getattr(settings, "KB_UPLOAD_EMBEDDING_RETRY_MAX_SECONDS", 8.0) or 8.0))
+    kb_cap = max(base, float(getattr(settings, "KB_UPLOAD_EMBEDDING_RETRY_MAX_SECONDS", 8.0) or 8.0))
+    upstream_cap = max(base, float(getattr(settings, "UPSTREAM_RETRY_MAX_SECONDS", 1.5) or 1.5))
+    cap = min(kb_cap, upstream_cap)
     attempt = 0
     while True:
         try:
             with _embedding_slot():
-                return fn()
+                result = fn()
+            embedding_quota().record_success()
+            return result
+        except (QuotaBreakerOpenError, QuotaTimeoutError):
+            # 配额保护触发：快速降级，不重试
+            raise
         except Exception as e:  # noqa: BLE001
+            if isinstance(e, EmbeddingThrottledError) or is_throttle_error(None, str(e)):
+                embedding_quota().record_failure()
             if attempt >= max_retries or not _is_retryable(e):
                 raise
             attempt += 1
@@ -221,7 +259,10 @@ class MultimodalEmbeddingService:
         tick_cb: Callable[[], None] | None = None,
     ) -> list[list[float]]:
         """
-        获取图片的密集向量（DashScope 一次只能处理一张图片，逐张串行）
+        获取图片的密集向量（DashScope 一次只能处理一张图片）。
+
+        阶段 3：受控并发（EMBEDDING_IMAGE_PARALLELISM，默认 2）——服务商侧总在途数仍由
+        全局 QuotaGuard 约束，本地并发仅减少逐张排队延迟；保持逐张 tick 取消语义与保序返回。
         :param image_paths: 图片路径列表（支持本地路径或URL）
         :param request_timeout: 单次 HTTP 调用超时（秒，None 用 SDK 默认）；SDK 经 request_timeout kwarg 透传到 requests
         :param tick_cb: 每张图片处理前调用（用于协作式取消/超时检查，抛异常即中止）
@@ -232,55 +273,72 @@ class MultimodalEmbeddingService:
         
         if not image_paths:
             return []
-        
-        embeddings = []
-        
-        try:
-            # 为每张图片生成向量（DashScope 一次只能处理一张图片）
-            for image_path in image_paths:
-                if tick_cb is not None:
-                    tick_cb()
-                try:
-                    # 准备输入数据；本地文件用 file:// 协议，URL 原样透传
-                    if os.path.exists(image_path):
-                        input_data = [{"image": f"file://{os.path.abspath(image_path)}"}]
-                    else:
-                        input_data = [{"image": image_path}]
 
-                    call_kwargs: dict[str, Any] = {}
-                    if request_timeout is not None:
-                        call_kwargs["request_timeout"] = int(request_timeout)
+        parallelism = max(1, int(getattr(settings, "EMBEDDING_IMAGE_PARALLELISM", 2) or 2))
+        parallelism = min(parallelism, len(image_paths))
 
-                    def _call() -> list[float]:
-                        resp = MultiModalEmbedding.call(
-                            model=self.model,
-                            input=input_data,
-                            dimension=self.embedding_dim,
-                            **call_kwargs,
-                        )
-                        if resp.status_code != HTTPStatus.OK:
-                            if is_throttle_error(resp.code, resp.message, resp.status_code):
-                                raise EmbeddingThrottledError(f"DashScope 限流: {resp.code} - {resp.message}")
-                            logger.warning(f"Failed to generate embedding for image {image_path}: {resp.code} - {resp.message}")
-                            return [0.0] * self.embedding_dim
-                        items = resp.output.get("embeddings") or []
-                        if items:
-                            return items[0].get("embedding", [])
-                        logger.warning(f"No embedding returned for image {image_path}")
+        def _embed_one(image_path: str) -> list[float]:
+            """单张图片嵌入（含限流重试/零向量兜底），异常语义与既有串行实现一致。"""
+            if tick_cb is not None:
+                tick_cb()
+            try:
+                # 准备输入数据；本地文件用 file:// 协议，URL 原样透传
+                if os.path.exists(image_path):
+                    input_data = [{"image": f"file://{os.path.abspath(image_path)}"}]
+                else:
+                    input_data = [{"image": image_path}]
+
+                call_kwargs: dict[str, Any] = {}
+                if request_timeout is not None:
+                    call_kwargs["request_timeout"] = int(request_timeout)
+
+                def _call() -> list[float]:
+                    resp = MultiModalEmbedding.call(
+                        model=self.model,
+                        input=input_data,
+                        dimension=self.embedding_dim,
+                        **call_kwargs,
+                    )
+                    if resp.status_code != HTTPStatus.OK:
+                        if is_throttle_error(resp.code, resp.message, resp.status_code):
+                            raise EmbeddingThrottledError(f"DashScope 限流: {resp.code} - {resp.message}")
+                        logger.warning(f"Failed to generate embedding for image {image_path}: {resp.code} - {resp.message}")
                         return [0.0] * self.embedding_dim
+                    items = resp.output.get("embeddings") or []
+                    if items:
+                        return items[0].get("embedding", [])
+                    logger.warning(f"No embedding returned for image {image_path}")
+                    return [0.0] * self.embedding_dim
 
-                    embedding = _call_with_retry(_call, f"图片嵌入 {os.path.basename(image_path)}")
-                    embeddings.append(embedding)
-                    logger.debug(f"Generated embedding for image {image_path}")
+                embedding = _call_with_retry(_call, f"图片嵌入 {os.path.basename(image_path)}")
+                logger.debug(f"Generated embedding for image {image_path}")
+                return embedding
 
-                except (EmbeddingThrottledError, EmbeddingConcurrencyTimeoutError):
-                    # 限流重试耗尽：向上抛出，避免用零向量污染检索索引（旧文档保持原样，用户可重传）
-                    raise
-                except Exception as e:
-                    logger.warning(f"Failed to generate embedding for image {image_path}: {e}")
-                    # 其它失败（如单图格式异常）沿用零向量兜底，保证整篇文档其余内容可入库
-                    embeddings.append([0.0] * self.embedding_dim)
+            except (EmbeddingThrottledError, EmbeddingConcurrencyTimeoutError, QuotaBreakerOpenError, QuotaTimeoutError):
+                # 限流重试耗尽 / 配额熔断：向上抛出，避免用零向量污染检索索引（旧文档保持原样，用户可重传）
+                raise
+            except Exception as e:
+                logger.warning(f"Failed to generate embedding for image {image_path}: {e}")
+                # 其它失败（如单图格式异常）沿用零向量兜底，保证整篇文档其余内容可入库
+                return [0.0] * self.embedding_dim
 
+        try:
+            if parallelism <= 1:
+                embeddings = [_embed_one(p) for p in image_paths]
+            else:
+                from concurrent.futures import ThreadPoolExecutor
+
+                with ThreadPoolExecutor(max_workers=parallelism, thread_name_prefix="kb-img-embed") as pool:
+                    futures = [pool.submit(_embed_one, p) for p in image_paths]
+                    embeddings = []
+                    try:
+                        for fut in futures:
+                            embeddings.append(fut.result())
+                    except BaseException:
+                        # 限流/配额异常：取消未开始任务后向上抛出（维持快速失败语义）
+                        for fut in futures:
+                            fut.cancel()
+                        raise
             logger.info(f"Generated {len(embeddings)} image embeddings")
             return embeddings
 

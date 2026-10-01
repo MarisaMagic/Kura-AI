@@ -60,6 +60,7 @@ class JobLockTests(unittest.TestCase):
 
         fake = _FakeRedis()
         chat_job.cache._client = fake  # type: ignore[attr-defined]
+        chat_job.cache._aclient = fake  # type: ignore[attr-defined]
 
         async def _run():
             with mock.patch.object(chat_job.asyncio, "create_task", lambda coro: coro.close() or mock.Mock()):

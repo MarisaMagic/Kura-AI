@@ -7,17 +7,40 @@
 
 from __future__ import annotations
 
+import time
 from typing import Callable, List, Tuple
 
 from loguru import logger
 
 from app.kb.image_store import get_image_store
 from app.kb.multimodal_embedding import get_multimodal_embedding_service
-from app.kb.milvus_client import MilvusManager
+from app.kb.milvus_client import MilvusManager, get_milvus_manager
 from app.settings import settings
 
 # 进度回调：progress_cb(stage, done, total)；stage 见各方法 docstring
 ProgressCallback = Callable[[str, int, int], None]
+
+
+def _yield_to_foreground_if_busy(tick_cb: Callable[[], None] | None = None) -> None:
+    """
+    上传侧让路：全局嵌入配额使用率达到阈值时短暂等待，优先保障前台检索配额；
+    同时执行 tick_cb（协作式取消/任务超时检查）。
+    """
+    if tick_cb is not None:
+        tick_cb()
+    try:
+        from app.utils.upstream_quota import embedding_quota
+
+        threshold = max(1, min(100, int(getattr(settings, "KB_EMBEDDING_YIELD_PERCENT", 70) or 70)))
+        usage = embedding_quota().usage()
+        inflight = usage.get("inflight")
+        limit = int(usage.get("max_concurrency") or 1)
+        if isinstance(inflight, int) and limit > 0 and inflight * 100 >= limit * threshold:
+            logger.info("嵌入配额使用率 {}/{} 达到让路阈值，上传任务暂停 1s", inflight, limit)
+            time.sleep(1.0)
+    except Exception:
+        # 让路是优化项，失败不影响上传主流程
+        pass
 
 
 def _batch_size() -> int:
@@ -55,7 +78,7 @@ class MultimodalMilvusWriter:
         :return: None
         """
         self.embedding_service = embedding_service or get_multimodal_embedding_service()
-        self.milvus_manager = milvus_manager or MilvusManager()
+        self.milvus_manager = milvus_manager or get_milvus_manager()
         self.image_store = get_image_store()
 
     def embed_documents(
@@ -90,6 +113,7 @@ class MultimodalMilvusWriter:
             total = len(text_chunks)
             done = 0
             for i in range(0, total, bs):
+                _yield_to_foreground_if_busy(tick_cb)
                 batch = text_chunks[i : i + bs]
                 # embed_text 携带标题路径/文件头上下文，仅用于嵌入；入库 text 保持纯净正文
                 texts = [doc.get("embed_text") or doc.get("text") or "" for doc in batch]
@@ -108,6 +132,7 @@ class MultimodalMilvusWriter:
 
         # 2. 图片块嵌入（逐张串行，短 HTTP 超时 + 逐图检查点）
         if image_chunks:
+            _yield_to_foreground_if_busy(tick_cb)
             total = len(image_chunks)
             batch_paths = [doc.get("image_path", "") for doc in image_chunks]
             dense = self.embedding_service.get_image_embeddings(

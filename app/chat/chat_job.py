@@ -1,6 +1,9 @@
 """
 智能体流式对话异步 Job：后台执行生成，事件写入 Redis，支持断线后按 seq 重连 SSE。
 用于将对话任务放在后台执行，不会被用户的其它请求打断。
+
+阶段 4：全异步 Redis（``cache.a*``）——事件追加/元数据读写/锁操作直接 await 异步客户端，
+不再占用默认线程池（jobs 热路径每轮含 N 次事件写 + 高频状态轮询）。
 """
 
 from __future__ import annotations
@@ -15,23 +18,11 @@ from app.chat.cache import cache
 from app.chat.preview_session import is_editor_preview_session
 from app.controllers.user_agent import user_agent_controller
 from app.settings import settings
+from app.utils.concurrency import LLMGateTimeout, get_llm_gate_stats, llm_slot
 
-_llm_inflight_sem: asyncio.Semaphore | None = None
-# 正在等待并发闸门的 Job 数（仅用于排队提示，不参与调度）
-_llm_inflight_waiting: int = 0
-
-
-def _llm_inflight() -> asyncio.Semaphore:
-    global _llm_inflight_sem
-    if _llm_inflight_sem is None:
-        n = max(1, int(getattr(settings, "LLM_MAX_INFLIGHT", 8) or 8))
-        _llm_inflight_sem = asyncio.Semaphore(n)
-    return _llm_inflight_sem
-
-
-def _queue_timeout() -> float:
-    """并发闸门排队等待上限（秒），超时置任务失败而非无限静默排队。"""
-    return max(1.0, float(getattr(settings, "LLM_QUEUE_TIMEOUT_SECONDS", 120) or 120))
+# 持有运行中的 Job Task 强引用：任务生命周期不依赖事件循环的弱引用，
+# 避免调度间隙被 GC 回收导致 Job 静默消失。
+_JOB_TASKS: set[asyncio.Task] = set()
 
 
 def _meta_key(job_id: str) -> str:
@@ -60,29 +51,29 @@ def _cancel_key(job_id: str) -> str:
     return f"chat_job:{job_id}:cancel"
 
 
-def is_job_cancel_requested(job_id: str) -> bool:
-    """是否已请求取消该 Job（同步读缓存，供 iter 内 to_thread 调用）。"""
-    raw = cache.get_json(_cancel_key(job_id))
+async def is_job_cancel_requested(job_id: str) -> bool:
+    """是否已请求取消该 Job（异步读缓存）。"""
+    raw = await cache.aget_json(_cancel_key(job_id))
     return bool(raw)
 
 
-def get_running_session_job(user_id: int, agent_id: int, session_id: str) -> dict | None:
+async def get_running_session_job(user_id: int, agent_id: int, session_id: str) -> dict | None:
     """返回该会话当前 running 的 Job 元数据；无则 None（用于切分支前的冲突检查）。"""
-    existing = cache.get_json(_active_key(user_id, agent_id, session_id))
+    existing = await cache.aget_json(_active_key(user_id, agent_id, session_id))
     if not isinstance(existing, dict) or not existing.get("job_id"):
         return None
-    meta = get_job_meta(str(existing["job_id"]))
+    meta = await get_job_meta(str(existing["job_id"]))
     if meta and meta.get("status") == "running":
         return meta
     return None
 
 
-def _release_active_key(user_id: int, agent_id: int, session_id: str, job_id: str) -> None:
+async def _release_active_key(user_id: int, agent_id: int, session_id: str, job_id: str) -> None:
     """
     释放会话占用锁：仅当锁仍指向该 job 时才删除，
     避免旧任务退出时误删新任务的占用锁。
     """
-    cache.delete_if_job_matches(_active_key(user_id, agent_id, session_id), job_id)
+    await cache.adelete_if_job_matches(_active_key(user_id, agent_id, session_id), job_id)
 
 async def request_chat_job_cancel(job_id: str) -> None:
     """
@@ -91,15 +82,14 @@ async def request_chat_job_cancel(job_id: str) -> None:
     2. 若任务仍 running，立即置为 cancelled 并释放会话占用锁，
        使用户停止后可立刻发起新任务，不必等待旧任务完全退出。
     """
-    await asyncio.to_thread(cache.set_json, _cancel_key(job_id), {"v": 1}, _ttl())
-    meta = await asyncio.to_thread(cache.get_json, _meta_key(job_id))
+    await cache.aset_json(_cancel_key(job_id), {"v": 1}, _ttl())
+    meta = await cache.aget_json(_meta_key(job_id))
     if not isinstance(meta, dict) or meta.get("status") != "running":
         return
     meta["status"] = "cancelled"
     meta["error"] = None
-    await asyncio.to_thread(cache.set_json, _meta_key(job_id), meta, _ttl())
-    await asyncio.to_thread(
-        _release_active_key,
+    await cache.aset_json(_meta_key(job_id), meta, _ttl())
+    await _release_active_key(
         int(meta.get("user_id", 0)),
         int(meta.get("agent_id", 0)),
         str(meta.get("session_id", "")),
@@ -111,11 +101,11 @@ async def cancel_active_session_job(user_id: int, agent_id: int, session_id: str
     按会话取消当前活动任务（前端停止时 job_id 未知的兜底，如创建请求在途被中断）。
     :return: 是否实际取消了任务
     """
-    existing = await asyncio.to_thread(cache.get_json, _active_key(user_id, agent_id, session_id))
+    existing = await cache.aget_json(_active_key(user_id, agent_id, session_id))
     if not isinstance(existing, dict) or not existing.get("job_id"):
         return False
     job_id = str(existing["job_id"])
-    meta = await asyncio.to_thread(cache.get_json, _meta_key(job_id))
+    meta = await cache.aget_json(_meta_key(job_id))
     if not meta or int(meta.get("user_id", -1)) != int(user_id):
         return False
     if meta.get("status") != "running":
@@ -138,11 +128,10 @@ def _done_ttl() -> int:
 
 async def _append_event(job_id: str, seq: int, data: dict[str, Any]) -> None:
     """
-    追加 Job 事件：RPUSH + meta/events 双 EXPIRE 经单次 Lua 往返完成。
+    追加 Job 事件：RPUSH + meta/events 双 EXPIRE 经单次 Lua 往返完成（异步客户端）。
     """
     wrapped = json.dumps({"seq": seq, "data": data}, ensure_ascii=False)
-    await asyncio.to_thread(
-        cache.append_event_atomic,
+    await cache.aappend_event_atomic(
         _events_key(job_id),
         _meta_key(job_id),
         wrapped,
@@ -171,20 +160,20 @@ async def create_chat_job(
     # 如果已有 running 任务，则返回 (existing_job_id, True)
     # 否则返回 (new_job_id, False)
     ak = _active_key(user_id, agent_id, session_id)
-    existing = await asyncio.to_thread(cache.get_json, ak)
+    existing = await cache.aget_json(ak)
     if isinstance(existing, dict) and existing.get("job_id"):
         ej = str(existing["job_id"])
-        meta = await asyncio.to_thread(cache.get_json, _meta_key(ej))
+        meta = await cache.aget_json(_meta_key(ej))
         if meta and meta.get("status") == "running":
-            if await asyncio.to_thread(is_job_cancel_requested, ej):
-                await asyncio.to_thread(_release_active_key, user_id, agent_id, session_id, ej)
+            if await is_job_cancel_requested(ej):
+                await _release_active_key(user_id, agent_id, session_id, ej)
             else:
                 return ej, True
 
     job_id = uuid.uuid4().hex
-    lock_ok = await asyncio.to_thread(cache.set_nx, ak, {"job_id": job_id}, _ttl())
+    lock_ok = await cache.aset_nx(ak, {"job_id": job_id}, _ttl())
     if not lock_ok:
-        raced = await asyncio.to_thread(cache.get_json, ak)
+        raced = await cache.aget_json(ak)
         if isinstance(raced, dict) and raced.get("job_id"):
             return str(raced["job_id"]), True
         raise RuntimeError("无法创建对话任务：会话锁不可用")
@@ -199,11 +188,11 @@ async def create_chat_job(
         "regenerate": bool(regenerate),
         "target_message_id": target_message_id,
     }
-    await asyncio.to_thread(cache.set_json, _meta_key(job_id), meta, _ttl())
+    await cache.aset_json(_meta_key(job_id), meta, _ttl())
 
-    # 创建异步任务执行对话
+    # 创建异步任务执行对话；持有强引用防止被 GC 回收（任务生命周期不依赖事件循环弱引用）
     aids = attachment_ids or []
-    asyncio.create_task(
+    task = asyncio.create_task(
         _run_chat_job(
             job_id=job_id,
             user_id=user_id,
@@ -218,6 +207,8 @@ async def create_chat_job(
             mcp_approved_pending_id=mcp_approved_pending_id,
         )
     )
+    _JOB_TASKS.add(task)
+    task.add_done_callback(_JOB_TASKS.discard)
     return job_id, False
 
 
@@ -249,45 +240,36 @@ async def _run_chat_job(
             return
 
         user_cancelled = False
-        gate = _llm_inflight()
-        global _llm_inflight_waiting
-        # 闸门已满时先给前端一条排队事件（含等待人数），避免 running 状态下长时间零反馈
-        if gate.locked():
-            await _append_event(job_id, seq, {"type": "queued", "waiting": _llm_inflight_waiting + 1})
+        # 闸门已满/已有排队时先给前端一条排队事件（含等待人数），避免 running 状态下长时间零反馈
+        gate_stats = get_llm_gate_stats()
+        if gate_stats["waiting"] > 0 or gate_stats["inflight"] >= gate_stats["limit"]:
+            await _append_event(job_id, seq, {"type": "queued", "waiting": gate_stats["waiting"] + 1})
             seq += 1
-        _llm_inflight_waiting += 1
-        acquired = False
         try:
-            try:
-                await asyncio.wait_for(gate.acquire(), timeout=_queue_timeout())
-                acquired = True
-            except asyncio.TimeoutError:
-                await _append_event(job_id, seq, {"type": "error", "content": "服务繁忙，排队等待超时，请稍后重试"})
-                seq += 1
-                await _finish_meta(job_id, status="failed", error="排队等待超时")
-                return
-            async for ev in iter_chat_stream_events(
-                ua,
-                message,
-                user_id,
-                agent_id,
-                session_id,
-                use_knowledge_retrieval=use_knowledge_retrieval,
-                use_web_search=use_web_search,
-                attachment_ids=attachment_ids or [],
-                regenerate=regenerate,
-                target_message_id=target_message_id,
-                cancel_check=lambda jid=job_id: is_job_cancel_requested(jid),
-                mcp_approved_pending_id=mcp_approved_pending_id,
-            ):
-                await _append_event(job_id, seq, ev)
-                seq += 1
-                if ev.get("type") == "done" and ev.get("cancelled"):
-                    user_cancelled = True
-        finally:
-            _llm_inflight_waiting -= 1
-            if acquired:
-                gate.release()
+            async with llm_slot():
+                async for ev in iter_chat_stream_events(
+                    ua,
+                    message,
+                    user_id,
+                    agent_id,
+                    session_id,
+                    use_knowledge_retrieval=use_knowledge_retrieval,
+                    use_web_search=use_web_search,
+                    attachment_ids=attachment_ids or [],
+                    regenerate=regenerate,
+                    target_message_id=target_message_id,
+                    cancel_check=lambda jid=job_id: is_job_cancel_requested(jid),
+                    mcp_approved_pending_id=mcp_approved_pending_id,
+                ):
+                    await _append_event(job_id, seq, ev)
+                    seq += 1
+                    if ev.get("type") == "done" and ev.get("cancelled"):
+                        user_cancelled = True
+        except LLMGateTimeout:
+            await _append_event(job_id, seq, {"type": "error", "content": "服务繁忙，排队等待超时，请稍后重试"})
+            seq += 1
+            await _finish_meta(job_id, status="failed", error="排队等待超时")
+            return
 
         if user_cancelled:
             await _finish_meta(job_id, status="cancelled", error=None)
@@ -304,29 +286,29 @@ async def _run_chat_job(
         await _finish_meta(job_id, status="failed", error=str(e))
     finally:
         # 仅当占用锁仍指向本 job 时释放：取消即时终结后可能已有新任务持有该锁
-        await asyncio.to_thread(_release_active_key, user_id, agent_id, session_id, job_id)
+        await _release_active_key(user_id, agent_id, session_id, job_id)
 
 
 async def _finish_meta(job_id: str, *, status: str, error: str | None) -> None:
     """
     完成任务：终态后改用较短的 done TTL，避免事件列表在 Redis 中留存 24h。
     """
-    meta = await asyncio.to_thread(cache.get_json, _meta_key(job_id))
+    meta = await cache.aget_json(_meta_key(job_id))
     if not isinstance(meta, dict):
         meta = {"job_id": job_id}
     meta["status"] = status
     meta["error"] = error
     ttl = _done_ttl()
-    await asyncio.to_thread(cache.set_json, _meta_key(job_id), meta, ttl)
-    await asyncio.to_thread(cache.expire, _events_key(job_id), ttl)
-    await asyncio.to_thread(cache.delete, _cancel_key(job_id))
+    await cache.aset_json(_meta_key(job_id), meta, ttl)
+    await cache.aexpire(_events_key(job_id), ttl)
+    await cache.adelete(_cancel_key(job_id))
 
 
-def get_job_meta(job_id: str) -> dict[str, Any] | None:
+async def get_job_meta(job_id: str) -> dict[str, Any] | None:
     """
-    获取 Job 元数据
+    获取 Job 元数据（异步）
     """
-    raw = cache.get_json(_meta_key(job_id))
+    raw = await cache.aget_json(_meta_key(job_id))
     return raw if isinstance(raw, dict) else None
 
 
@@ -346,7 +328,7 @@ async def iter_job_sse_events(
     # 循环直到任务结束
     while True:
         # 批量取事件（下标即 seq，since_seq 续传语义不变）
-        chunk = await asyncio.to_thread(cache.lrange_str, _events_key(job_id), next_idx, next_idx + 63)
+        chunk = await cache.alrange_str(_events_key(job_id), next_idx, next_idx + 63)
         if chunk:
             idle_delay = 0.04
             for raw in chunk:
@@ -359,7 +341,7 @@ async def iter_job_sse_events(
                 next_idx += 1
             continue
 
-        meta = await asyncio.to_thread(cache.get_json, _meta_key(job_id))
+        meta = await cache.aget_json(_meta_key(job_id))
         if not meta:
             break
         st = meta.get("status")
@@ -372,12 +354,12 @@ async def iter_job_sse_events(
     yield "data: [DONE]\n\n"
 
 
-def verify_job_owner(job_id: str, user_id: int) -> bool:
+async def verify_job_owner(job_id: str, user_id: int) -> bool:
     """
-    验证 Job 是否属于用户
+    验证 Job 是否属于用户（异步）
     """
     # 获取 Job 元数据
-    meta = get_job_meta(job_id)
+    meta = await get_job_meta(job_id)
     # 如果 Job 元数据不存在，则返回 False
     if not meta:
         return False

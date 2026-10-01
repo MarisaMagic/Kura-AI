@@ -121,44 +121,66 @@ class ImageStore:
         image_chunks: List[dict],
     ) -> int:
         """
-        批量保存图片元数据
+        批量保存图片元数据（单事务单 commit，替代逐条 commit+refresh 的写放大）。
+
         :param image_chunks: 图片块列表
         :return: 保存的数量
         """
-        saved_count = 0
+        records: List[KbImage] = []
         for chunk in image_chunks:
             if chunk.get("content_type") != "image":
                 continue
-            
-            # 获取图片元数据
-            image_metadata = chunk.get("image_metadata", {})
-            
             try:
-                self.save_image(
-                    kb_scope=chunk.get("kb_scope", ""),
-                    user_id=chunk.get("user_id", 0),
-                    agent_id=chunk.get("agent_id", 0),
-                    filename=chunk.get("filename", ""),
-                    image_path=chunk.get("image_path", ""),
-                    page_number=chunk.get("page_number", 0),
-                    chunk_id=chunk.get("chunk_id", ""),
-                    parent_chunk_id=chunk.get("parent_chunk_id", ""),
-                    root_chunk_id=chunk.get("root_chunk_id", ""),
-                    position_x=chunk.get("image_position_x", 0),
-                    position_y=chunk.get("image_position_y", 0),
-                    position_width=chunk.get("image_width", 0),
-                    position_height=chunk.get("image_height", 0),
-                    image_width=image_metadata.get("width", 0),
-                    image_height=image_metadata.get("height", 0),
-                    image_format=image_metadata.get("format", "png"),
-                    related_text_ids=chunk.get("related_text_ids", []),
-                    file_size=int(image_metadata.get("size_bytes", 0) or 0),
+                # 获取图片元数据
+                image_metadata = chunk.get("image_metadata", {})
+                image_path = chunk.get("image_path", "")
+                # image_path 即相对 IMAGES 前缀的 relpath（归一为正斜杠）
+                stored_relpath = (image_path or "").replace("\\", "/").lstrip("/")
+                records.append(
+                    KbImage(
+                        id=uuid.uuid4().hex,
+                        kb_scope=chunk.get("kb_scope", ""),
+                        filename=chunk.get("filename", ""),
+                        display_filename=Path(image_path).name,
+                        stored_relpath=stored_relpath,
+                        file_size=int(image_metadata.get("size_bytes", 0) or 0),
+                        mime_type=self._get_mime_type(image_path),
+                        width=image_metadata.get("width", 0),
+                        height=image_metadata.get("height", 0),
+                        format=image_metadata.get("format", "png"),
+                        caption="",
+                        embedding_model=settings.EMBEDDING_MODEL,
+                        source_document=chunk.get("filename", ""),
+                        page_number=chunk.get("page_number", 0),
+                        position_x=chunk.get("image_position_x", 0),
+                        position_y=chunk.get("image_position_y", 0),
+                        position_width=chunk.get("image_width", 0),
+                        position_height=chunk.get("image_height", 0),
+                        chunk_id=chunk.get("chunk_id", ""),
+                        parent_chunk_id=chunk.get("parent_chunk_id", ""),
+                        root_chunk_id=chunk.get("root_chunk_id", ""),
+                        related_text_ids=chunk.get("related_text_ids", []),
+                        created_at=datetime.utcnow(),
+                        updated_at=datetime.utcnow(),
+                    )
                 )
-                saved_count += 1
             except Exception as e:
-                logger.error(f"Failed to save image chunk: {e}")
-        
-        return saved_count
+                # 单条构造失败仅记录，不影响整篇文档其余图片入库（与旧逐条语义一致）
+                logger.error(f"Failed to build image record: {e}")
+        if not records:
+            return 0
+        db = SessionLocal()
+        try:
+            db.add_all(records)
+            db.commit()
+            logger.info(f"Saved {len(records)} image metadata records (batch)")
+            return len(records)
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to save image metadata batch: {e}")
+            raise
+        finally:
+            db.close()
 
     def get_images_by_kb_scope(self, kb_scope: str) -> List[KbImage]:
         """

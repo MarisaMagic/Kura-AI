@@ -13,7 +13,7 @@ from app.schemas.base import Fail, Success
 from app.schemas.login import *
 from app.schemas.users import UpdatePassword
 from app.settings import settings
-from app.utils.auth_rate_limit import check_auth_rate_limit
+from app.utils.auth_rate_limit import acheck_auth_rate_limit
 from app.utils.avatar import ALLOWED_AVATAR_EXTENSIONS, avatar_url_from_filename, enrich_user_avatar, safe_avatar_extension
 from app.utils.jwt_utils import create_access_token
 from app.utils.password import get_password_hash, validate_password_strength, verify_password
@@ -54,6 +54,82 @@ async def health():
     return {"status": "ok"}
 
 
+@router.get("/ready", summary="就绪检查（依赖项探活）", tags=["基础模块"])
+async def ready():
+    """依赖就绪探活：PostgreSQL / Redis / Milvus；任一不可用返回 503。"""
+    from fastapi.responses import JSONResponse
+
+    from app.utils.concurrency import run_sync
+
+    checks: dict[str, object] = {}
+
+    try:
+        from tortoise import connections
+
+        conn = connections.get("default")
+        await conn.execute_query("SELECT 1")
+        checks["postgres"] = True
+    except Exception as e:  # noqa: BLE001
+        checks["postgres"] = False
+        checks["postgres_error"] = str(e)[:200]
+
+    try:
+        from app.chat.cache import get_redis_client
+
+        await run_sync(lambda: get_redis_client().ping(), timeout=3.0)
+        checks["redis"] = True
+    except Exception as e:  # noqa: BLE001
+        checks["redis"] = False
+        checks["redis_error"] = str(e)[:200]
+
+    try:
+        from app.kb.milvus_client import get_milvus_manager
+
+        await run_sync(lambda: get_milvus_manager().has_collection(), timeout=5.0)
+        checks["milvus"] = True
+    except Exception as e:  # noqa: BLE001
+        checks["milvus"] = False
+        checks["milvus_error"] = str(e)[:200]
+
+    ok = all(v for k, v in checks.items() if not str(k).endswith("_error"))
+    if not ok:
+        return JSONResponse(status_code=503, content={"status": "degraded", "checks": checks})
+    return {"status": "ready", "checks": checks}
+
+
+@router.get("/status", summary="运行时并发状态（压测/排障）", tags=["基础模块"])
+async def runtime_status():
+    """汇总事件循环延迟、并发闸门、KB 队列深度与上游配额用量，供压测与排障观测。"""
+    from app.core.loop_monitor import get_loop_lag_stats
+    from app.utils.concurrency import default_executor, get_llm_gate_stats, get_tool_gate_stats, run_sync
+    from app.utils.upstream_quota import all_quota_usage
+
+    result: dict[str, object] = {
+        "loop_lag": get_loop_lag_stats(),
+        "llm_gate": get_llm_gate_stats(),
+        "tool_gate": get_tool_gate_stats(),
+        "quota": all_quota_usage(),
+    }
+
+    executor = default_executor()
+    result["executor"] = {"max_workers": getattr(executor, "_max_workers", None) if executor else None}
+
+    try:
+        from app.kb import kb_job
+
+        depth = await run_sync(kb_job.queue_depth, timeout=5.0)
+        result["kb_queue"] = {
+            "depth": depth,
+            "queue_max": int(getattr(settings, "KB_UPLOAD_QUEUE_MAX", 0) or 0),
+            "worker_threads": int(getattr(settings, "KB_WORKER_THREADS", 0) or 0),
+            "mode": str(getattr(settings, "KB_UPLOAD_MODE", "inline")),
+        }
+    except Exception as e:  # noqa: BLE001
+        result["kb_queue"] = {"error": str(e) or "probe timeout (redis unavailable)"}
+
+    return {"status": "ok", "data": result}
+
+
 @router.get("/registration_enabled", summary="是否开放自助注册", tags=["基础模块"])
 async def registration_enabled():
     return Success(data={"enabled": settings.ALLOW_PUBLIC_REGISTRATION})
@@ -63,7 +139,7 @@ async def registration_enabled():
 async def register_user(body: RegisterSchema, request: Request):
     if not settings.ALLOW_PUBLIC_REGISTRATION:
         return Fail(code=403, msg="当前未开放注册")
-    check_auth_rate_limit(
+    await acheck_auth_rate_limit(
         request,
         action="register",
         limit=settings.AUTH_REGISTER_RATE_LIMIT,
@@ -75,7 +151,7 @@ async def register_user(body: RegisterSchema, request: Request):
 
 @router.post("/access_token", summary="获取token", tags=["基础模块"])
 async def login_access_token(credentials: CredentialsSchema, request: Request):
-    check_auth_rate_limit(
+    await acheck_auth_rate_limit(
         request,
         action="login",
         limit=settings.AUTH_LOGIN_RATE_LIMIT,

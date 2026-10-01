@@ -19,7 +19,13 @@ except ImportError:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from app.core.loop_monitor import start_loop_monitor, stop_loop_monitor
     from app.log import logger
+    from app.utils.concurrency import setup_default_executor
+
+    # 并发基础设施须最先就绪：默认线程池承载 to_thread 与 LangChain 同步工具
+    setup_default_executor()
+    start_loop_monitor()
 
     await init_data()
     try:
@@ -36,10 +42,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("PostgreSQL 聊天库初始化失败（智能体对话将不可用）: %s", e)
     try:
-        from app.kb.milvus_client import MilvusManager
+        from app.kb.milvus_client import get_milvus_manager
 
-        # 预热知识库 Milvus 集合：首次连接较慢，提前到启动期避免首个上传任务等待
-        await asyncio.to_thread(MilvusManager().init_collection)
+        # 预热知识库 Milvus 集合：首次连接较慢，提前到启动期避免首个上传任务等待。
+        # 硬超时保护：Milvus 半死/不可达时不得阻塞服务启动（超时线程由进程退出回收）。
+        await asyncio.wait_for(asyncio.to_thread(get_milvus_manager().init_collection), timeout=20)
+    except asyncio.TimeoutError:
+        logger.warning("Milvus 预热超时（20s），跳过；首次上传时自动重试")
     except Exception as e:
         logger.warning("Milvus 集合预热失败（首次上传时自动重试）: %s", e)
     if settings.DEBUG:
@@ -47,6 +56,7 @@ async def lifespan(app: FastAPI):
             "DEBUG=true：Header token=dev 可跳过 JWT，仅限本机调试，公网务必关闭"
         )
     yield
+    stop_loop_monitor()
     try:
         from app.utils.egress import close_pinned_llm_clients
 

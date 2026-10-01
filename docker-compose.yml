@@ -4,6 +4,8 @@ services:
   postgres:
     container_name: kura-ai-postgres
     image: postgres:17
+    # 多副本/多进程时连接池按进程倍增；默认 100 不够（4 副本 × 20 SQLAlchemy + 4 worker × 10 等）
+    command: ["postgres", "-c", "max_connections=240"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-langchain_app}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
@@ -108,7 +110,10 @@ services:
       - "127.0.0.1:19530:19530"
       - "127.0.0.1:9091:9091"
     depends_on:
-      - "etcd"
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
   attu:
     container_name: kura-ai-milvus-attu
     image: zilliz/attu:v2.6.5  

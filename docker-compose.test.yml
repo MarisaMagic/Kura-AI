@@ -1,0 +1,32 @@
+# 本地并发压测专用覆盖（不用于生产）：
+#   docker compose -f docker-compose.prod.yml -f docker-compose.test.yml \
+#     up -d --scale backend=4 --scale kb-worker=2 backend kb-worker mock-llm
+# 说明：
+# - mock-llm：零依赖 Mock OpenAI 兼容服务（挂载 tests/load/mock_llm_server.py），
+#   智能体 base_url 填 http://mock-llm:8000/v1 即可零上游配额压测；
+# - ALLOW_PRIVATE_UPSTREAM_URLS 放行容器内私网上游；限流/会话配额放宽仅限压测。
+services:
+  mock-llm:
+    image: python:3.11-slim-bookworm
+    command: ["python", "/mock/mock_llm_server.py"]
+    environment:
+      MOCK_LLM_DELAY_MS: "300"
+      MOCK_LLM_CHUNKS: "16"
+      MOCK_LLM_CHUNK_INTERVAL_MS: "60"
+    volumes:
+      - ./tests/load/mock_llm_server.py:/mock/mock_llm_server.py:ro
+    restart: unless-stopped
+
+  backend:
+    environment:
+      ALLOW_PRIVATE_UPSTREAM_URLS: "true"
+      CHAT_RATE_LIMIT_PER_MINUTE: "5000"
+      CHAT_MAX_SESSIONS_PER_USER_AGENT: "5000"
+      LLM_MAX_INFLIGHT: "25"
+
+  kb-worker:
+    environment:
+      ALLOW_PRIVATE_UPSTREAM_URLS: "true"
+      LLM_MAX_INFLIGHT: "25"
+      # 诊断：SIGUSR1 栈 dump 写文件（绕开容器日志通道排查用）
+      WORKER_FAULT_FILE: /app/app/logs/worker_fault.log

@@ -74,6 +74,7 @@ class AppendEventAtomicTests(unittest.TestCase):
 
         fake = _FakeRedis()
         chat_job.cache._client = fake  # type: ignore[attr-defined]
+        chat_job.cache._aclient = fake  # type: ignore[attr-defined]
         running_ttl = chat_job._ttl()
 
         asyncio.run(chat_job._append_event("j1", 0, {"type": "delta"}))
@@ -99,6 +100,7 @@ class IterEventsTests(unittest.TestCase):
 
         fake = _FakeRedis()
         chat_job.cache._client = fake  # type: ignore[attr-defined]
+        chat_job.cache._aclient = fake  # type: ignore[attr-defined]
         self._seed(
             fake,
             "j2",
@@ -119,6 +121,7 @@ class IterEventsTests(unittest.TestCase):
 
         fake = _FakeRedis()
         chat_job.cache._client = fake  # type: ignore[attr-defined]
+        chat_job.cache._aclient = fake  # type: ignore[attr-defined]
 
         async def _collect():
             return [line async for line in chat_job.iter_job_sse_events("ghost", since_seq=0)]
@@ -132,6 +135,7 @@ class IterEventsTests(unittest.TestCase):
 
         fake = _FakeRedis()
         chat_job.cache._client = fake  # type: ignore[attr-defined]
+        chat_job.cache._aclient = fake  # type: ignore[attr-defined]
         self._seed(fake, "j3", [{"type": "done"}], status="completed")
 
         async def _collect():
@@ -149,6 +153,7 @@ class FinishMetaTtlTests(unittest.TestCase):
 
         fake = _FakeRedis()
         chat_job.cache._client = fake  # type: ignore[attr-defined]
+        chat_job.cache._aclient = fake  # type: ignore[attr-defined]
         events_key = f"kura_ai:{chat_job._events_key('j9')}"
         fake.lists.setdefault(events_key, []).append("x")
 

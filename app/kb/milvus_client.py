@@ -5,6 +5,8 @@ Milvus：密集 + 稀疏混合检索，按 kb_scope 隔离。
 
 from __future__ import annotations
 
+import threading
+
 from pymilvus import (
     AnnSearchRequest,
     DataType,
@@ -25,11 +27,32 @@ def milvus_client_kwargs() -> dict:
     """MilvusClient 连接参数。已开鉴权的实例可设 MILVUS_TOKEN。"""
     host = (settings.MILVUS_HOST or "127.0.0.1").strip()
     port = (settings.MILVUS_PORT or "19530").strip()
-    kw: dict = {"uri": f"http://{host}:{port}"}
+    kw: dict = {
+        "uri": f"http://{host}:{port}",
+        # 连接超时：Milvus 不可达时避免无限挂起（/ready 探活、启动预热、工具线程）
+        "timeout": max(1.0, float(getattr(settings, "MILVUS_CONNECT_TIMEOUT_SECONDS", 5.0) or 5.0)),
+    }
     token = (getattr(settings, "MILVUS_TOKEN", None) or "").strip()
     if token:
         kw["token"] = token
     return kw
+
+
+_default_manager: "MilvusManager | None" = None
+_default_manager_lock = threading.Lock()
+
+
+def get_milvus_manager() -> "MilvusManager":
+    """进程级默认 Milvus 管理器单例（复用 gRPC 连接，pymilvus client 线程安全）。
+
+    替代各调用点每任务/每请求 new MilvusManager() 的连接建立开销（数百 ms/次）。
+    """
+    global _default_manager
+    if _default_manager is None:
+        with _default_manager_lock:
+            if _default_manager is None:
+                _default_manager = MilvusManager()
+    return _default_manager
 
 
 def _milvus_query_row_to_dict(row: object) -> dict:
@@ -123,6 +146,8 @@ class MilvusManager:
         self.collection_name = (settings.MILVUS_COLLECTION or "kura_ai_kb").strip()
         self.uri = f"http://{self.host}:{self.port}"
         self.client: MilvusClient | None = None
+        # 集合初始化互斥：多线程（上传任务/预热）并发首次 init 时防止重复建集合竞态
+        self._init_lock = threading.Lock()
 
     def _get_client(self) -> MilvusClient:
         """
@@ -175,11 +200,17 @@ class MilvusManager:
         :param collection_name: 目标集合名，缺省用 self.collection_name（供迁移脚本创建临时集合）
         :return: None
         """
+        # 多线程（上传任务/启动预热）并发首次初始化时互斥，防止重复建集合竞态
+        with self._init_lock:
+            self._init_collection_locked(dense_dim, collection_name=collection_name)
+
+    def _init_collection_locked(self, dense_dim: int | None, *, collection_name: str | None) -> None:
         if dense_dim is None:
             dense_dim = _dense_dim()
         name = collection_name or self.collection_name
         client = self._get_client()
-        if client.has_collection(name):
+        rpc_timeout = max(1.0, float(getattr(settings, "MILVUS_PROBE_TIMEOUT_SECONDS", 5.0) or 5.0))
+        if client.has_collection(name, timeout=rpc_timeout):
             return
         schema = client.create_schema(auto_id=True, enable_dynamic_field=True)
         schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
@@ -252,11 +283,12 @@ class MilvusManager:
             metric_type="BM25",
         )
 
-        # 创建集合
+        # 创建集合（RPC 限时：Milvus 异常时不无限等待）
         client.create_collection(
             collection_name=name,
             schema=schema,
             index_params=index_params,
+            timeout=max(15.0, rpc_timeout),
         )
 
     def insert(self, data: list[dict]) -> None:
@@ -663,7 +695,8 @@ class MilvusManager:
 
     def has_collection(self) -> bool:
         """
-        判断集合是否存在
+        判断集合是否存在（RPC 带短超时：探活/预热场景不可长时间挂起）
         :return: 是否存在
         """
-        return self._get_client().has_collection(self.collection_name)
+        timeout = max(1.0, float(getattr(settings, "MILVUS_PROBE_TIMEOUT_SECONDS", 5.0) or 5.0))
+        return self._get_client().has_collection(self.collection_name, timeout=timeout)

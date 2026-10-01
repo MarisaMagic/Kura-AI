@@ -84,6 +84,17 @@ def make_search_knowledge_tool(
         rag_trace = rag_result.get("rag_trace", {}) if isinstance(rag_result, dict) else {}
         no_answer = bool(rag_result.get("no_answer")) if isinstance(rag_result, dict) else False
 
+        if str(rag_trace.get("retrieval_mode") or "") == "degraded_quota":
+            # 嵌入上游配额受限（熔断/等待超时）：快速降级提示，不当作「无相关资料」拒答
+            busy_msg = (
+                "KNOWLEDGE_BASE_BUSY: 知识库检索服务暂时繁忙（上游配额受限），"
+                "请如实告知用户稍后重试；不要编造知识库内容，也不要引用任何检索片段。"
+            )
+            emit_rag_step("⚠️", "知识库暂时繁忙", "上游配额受限，请稍后重试")
+            log_kb_tool_return_to_terminal(busy_msg, tool_label="search_knowledge_base")
+            _set_last_rag_context({"rag_trace": rag_trace, "image_references": [], "kb_sources": []})
+            return busy_msg
+
         if no_answer:
             # 二次门控判定知识库无相关资料：返回拒答指令，禁止模型在低质量上下文上硬编
             refuse_msg = (

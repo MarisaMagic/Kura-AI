@@ -172,9 +172,6 @@
               <h2 class="agent-kb-h2 agent-kb-overview-title">
                 {{ $t('views.agents.kb_list_title') }}
               </h2>
-              <span v-if="list.length" class="agent-kb-list-count">
-                {{ $t('views.agents.kb_list_total', { count: list.length }) }}
-              </span>
             </div>
             <div v-if="list.length" class="agent-kb-stats">
               <div class="agent-kb-stat">
@@ -206,19 +203,47 @@
                 :placeholder="$t('views.agents.kb_search_placeholder')"
                 clearable
                 class="agent-kb-search"
-              />
+                @update:value="page = 1"
+              >
+                <template #prefix>
+                  <TheIcon icon="mdi:magnify" :size="16" />
+                </template>
+              </n-input>
               <n-select
                 v-model:value="typeFilter"
                 :options="typeOptions"
                 class="agent-kb-type-filter"
+                @update:value="page = 1"
               />
+              <div class="agent-kb-toolbar-right">
+                <n-popconfirm @positive-click="batchDeleteDocuments">
+                  <template #trigger>
+                    <n-button size="small" quaternary type="error" :loading="deletingDocs">
+                      <template #icon>
+                        <TheIcon icon="mdi:delete-sweep-outline" :size="16" />
+                      </template>
+                      {{
+                        hasFilter
+                          ? $t('views.agents.kb_delete_filtered', { n: filteredList.length })
+                          : $t('views.agents.kb_clear_all', { n: list.length })
+                      }}
+                    </n-button>
+                  </template>
+                  <template v-if="hasFilter">
+                    {{ $t('views.agents.kb_confirm_batch_filtered', { n: filteredList.length }) }}
+                  </template>
+                  <template v-else>
+                    {{ $t('views.agents.kb_confirm_batch_all', { n: list.length }) }}
+                  </template>
+                </n-popconfirm>
+              </div>
             </div>
             <n-data-table
               v-if="list.length"
               :columns="columns"
               :data="filteredList"
               :loading="tableLoading"
-              :pagination="false"
+              :pagination="pagination"
               :bordered="true"
               size="small"
             />
@@ -439,16 +464,21 @@ const {
 
 const keyword = ref('')
 const typeFilter = ref('all')
+const page = ref(1)
+const pageSize = ref(20)
+const deletingDocs = ref(false)
 
 const agentAvatar = computed(() => agent.value?.avatar_url || DEFAULT_AVATAR)
 
-const typeOptions = computed(() => [
-  { label: t('views.agents.kb_filter_type_all'), value: 'all' },
-  { label: 'PDF', value: 'PDF' },
-  { label: 'Word', value: 'Word' },
-  { label: 'Excel', value: 'Excel' },
-  { label: 'Text', value: 'Text' },
-])
+const hasFilter = computed(() => keyword.value.trim() !== '' || typeFilter.value !== 'all')
+
+const typeOptions = computed(() => {
+  const types = [...new Set(list.value.map((doc) => doc.file_type).filter(Boolean))].sort()
+  return [
+    { label: t('views.agents.kb_filter_type_all'), value: 'all' },
+    ...types.map((type) => ({ label: type, value: type })),
+  ]
+})
 
 const filteredList = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
@@ -458,6 +488,22 @@ const filteredList = computed(() => {
     return true
   })
 })
+
+const pagination = computed(() => ({
+  page: page.value,
+  pageSize: pageSize.value,
+  showSizePicker: true,
+  pageSizes: [20, 50, 100],
+  itemCount: filteredList.value.length,
+  prefix: ({ itemCount }) => t('views.agents.kb_list_total', { count: itemCount }),
+  onChange: (p) => {
+    page.value = p
+  },
+  onUpdatePageSize: (s) => {
+    pageSize.value = s
+    page.value = 1
+  },
+}))
 
 const kbStats = computed(() => {
   const docs = list.value
@@ -516,7 +562,7 @@ const columns = [
   {
     title: () => t('views.agents.kb_col_type'),
     key: 'file_type',
-    width: 110,
+    width: 100,
     render(row) {
       return h(
         NTag,
@@ -532,10 +578,8 @@ const columns = [
   {
     title: () => t('views.agents.kb_col_chunks'),
     key: 'chunk_count',
-    width: 110,
-    render(row) {
-      return t('views.agents.kb_chunks_value', { n: row.chunk_count ?? 0 })
-    },
+    width: 90,
+    align: 'center',
   },
   {
     title: () => t('views.agents.kb_col_updated'),
@@ -546,9 +590,10 @@ const columns = [
     },
   },
   {
-    title: '',
+    title: () => t('views.agents.kb_col_actions'),
     key: 'actions',
-    width: 100,
+    width: 90,
+    align: 'center',
     render(row) {
       return h(
         NPopconfirm,
@@ -560,9 +605,9 @@ const columns = [
             h(
               NButton,
               { size: 'small', quaternary: true, type: 'error' },
-              { default: () => t('common.buttons.delete') }
+              { icon: () => h(TheIcon, { icon: 'mdi:trash-can-outline', size: 16 }) }
             ),
-          default: () => t('views.agents.kb_confirm_delete'),
+          default: () => t('views.agents.kb_confirm_delete', { filename: row.display_filename }),
         }
       )
     },
@@ -595,6 +640,27 @@ async function handleDelete(displayFilename) {
     await fetchList()
   } catch (e) {
     message.error(e?.response?.data?.msg || e?.message || 'delete failed')
+  }
+}
+
+async function batchDeleteDocuments() {
+  const names = filteredList.value.map((doc) => doc.display_filename)
+  if (!names.length) return
+  deletingDocs.value = true
+  try {
+    const res = await api.batchDeleteKbDocuments({ agent_id: agentId.value, filenames: names })
+    const deleted = res?.data?.deleted ?? names.length
+    const failed = res?.data?.failed?.length || 0
+    if (failed) {
+      message.warning(t('views.agents.kb_batch_delete_partial', { n: deleted, failed }))
+    } else {
+      message.success(t('views.agents.kb_batch_delete_ok', { n: deleted }))
+    }
+    await fetchList()
+  } catch (e) {
+    message.error(e?.response?.data?.msg || e?.message || 'delete failed')
+  } finally {
+    deletingDocs.value = false
   }
 }
 
@@ -858,10 +924,6 @@ html.dark .agent-kb-tasks::-webkit-scrollbar-thumb {
   gap: 12px;
   margin-bottom: 8px;
 }
-.agent-kb-list-count {
-  font-size: 13px;
-  color: var(--n-text-color-3);
-}
 .agent-kb-stats {
   display: flex;
   flex-wrap: wrap;
@@ -899,7 +961,9 @@ html.dark .agent-kb-tasks::-webkit-scrollbar-thumb {
 }
 .agent-kb-list-toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
+  align-items: center;
   margin-bottom: 12px;
 }
 .agent-kb-search {
@@ -909,6 +973,11 @@ html.dark .agent-kb-tasks::-webkit-scrollbar-thumb {
 .agent-kb-type-filter {
   width: 140px;
   flex: none;
+}
+.agent-kb-toolbar-right {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
 }
 .agent-kb-batch-summary {
   margin: 0 0 12px;

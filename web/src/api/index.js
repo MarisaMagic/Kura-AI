@@ -160,6 +160,9 @@ export default {
     request.post('/user-agent/kb/upload/cancel', null, { params, timeout: 30000, ...config }),
   deleteKbDocument: ({ agent_id, filename }) =>
     request.delete('/user-agent/kb/document', { params: { agent_id, filename } }),
+  /** 批量删除知识库文档（按当前筛选结果传文件名） */
+  batchDeleteKbDocuments: (data = {}) =>
+    request.post('/user-agent/kb/documents/batch-delete', data, { timeout: 120000 }),
   /** MCP 服务配置（DependAuth，仅智能体属主） */
   getAgentMcpServers: (params = {}) => request.get('/user-agent/mcp/servers', { params }),
   createAgentMcpServer: (agentId, data = {}) =>

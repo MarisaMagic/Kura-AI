@@ -1,5 +1,9 @@
+import hashlib
 import json
 import re
+import threading
+import time
+from collections import OrderedDict
 from datetime import datetime
 from typing import Any, AsyncGenerator
 
@@ -11,9 +15,45 @@ from starlette.requests import Request
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.core.dependency import AuthControl
-from app.models.admin import AuditLog, User
+from app.models.admin import AuditLog
 
 from .bgtask import BgTasks
+
+# 审计专用用户信息缓存（token 哈希 → (时间, user_id, username)，短 TTL + LRU 上限）：
+# 审计记录只需展示 user_id/username，不参与鉴权；避免每个受审计请求重复查一次 User 表。
+_AUDIT_USER_TTL_SECONDS = 60.0
+_AUDIT_USER_CACHE_MAX = 4096
+_audit_user_cache: "OrderedDict[str, tuple[float, int, str]]" = OrderedDict()
+_audit_user_lock = threading.Lock()
+
+
+class _CachedAuditUser:
+    """审计缓存命中时返回的轻量用户视图（仅含审计所需字段）。"""
+
+    __slots__ = ("id", "username")
+
+    def __init__(self, user_id: int, username: str) -> None:
+        self.id = user_id
+        self.username = username
+
+
+async def _audit_user_for_token(token: str) -> Any:
+    """获取审计用用户信息：命中进程内缓存则零查询；未命中走完整校验后回填。"""
+    key = hashlib.sha256(token.encode("utf-8", errors="ignore")).hexdigest()
+    now = time.monotonic()
+    with _audit_user_lock:
+        hit = _audit_user_cache.get(key)
+        if hit and now - hit[0] < _AUDIT_USER_TTL_SECONDS:
+            _audit_user_cache.move_to_end(key)
+            return _CachedAuditUser(hit[1], hit[2])
+    user = await AuthControl.is_authed(token)
+    if user is not None:
+        with _audit_user_lock:
+            _audit_user_cache[key] = (now, int(user.id), user.username or "")
+            _audit_user_cache.move_to_end(key)
+            while len(_audit_user_cache) > _AUDIT_USER_CACHE_MAX:
+                _audit_user_cache.popitem(last=False)
+    return user
 
 _SENSITIVE_KEYS = frozenset(
     {
@@ -213,12 +253,12 @@ class HttpAuditLogMiddleware(BaseHTTPMiddleware):
             ):
                 data["module"] = ",".join(route.tags)
                 data["summary"] = route.summary
-        # 获取用户信息
+        # 获取用户信息（进程内短 TTL 缓存；未命中时才查 User 表）
         try:
             token = request.headers.get("token")
             user_obj = None
             if token:
-                user_obj: User = await AuthControl.is_authed(token)
+                user_obj = await _audit_user_for_token(token)
             data["user_id"] = user_obj.id if user_obj else 0
             data["username"] = user_obj.username if user_obj else ""
         except Exception:
