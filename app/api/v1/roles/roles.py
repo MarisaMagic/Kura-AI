@@ -26,14 +26,6 @@ async def list_role(
     return SuccessExtra(data=data, total=total, page=page, page_size=page_size)
 
 
-@router.get("/get", summary="查看角色")
-async def get_role(
-    role_id: int = Query(..., description="角色ID"),
-):
-    role_obj = await role_controller.get(id=role_id)
-    return Success(data=await role_obj.to_dict())
-
-
 @router.post("/create", summary="创建角色")
 async def create_role(role_in: RoleCreate):
     if await role_controller.is_exist(name=role_in.name):

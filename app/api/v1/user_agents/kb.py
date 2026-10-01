@@ -79,17 +79,6 @@ async def kb_upload(
     )
 
 
-@router.get("/kb/upload/status", summary="查询知识库上传任务进度", tags=["智能体模块"])
-async def kb_upload_status(
-    task_id: str = Query(..., description="上传任务 ID"),
-    current_user: User = Depends(AuthControl.is_authed),
-):
-    meta = await asyncio.to_thread(kb_job.get_kb_upload_job_meta, task_id)
-    if not meta or int(meta.get("user_id") or -1) != int(current_user.id):
-        return Fail(code=404, msg="上传任务不存在或已过期")
-    return Success(data=meta)
-
-
 @router.get("/kb/upload/status/batch", summary="批量查询知识库上传任务进度", tags=["智能体模块"])
 async def kb_upload_status_batch(
     task_ids: str = Query(..., description="上传任务 ID，逗号分隔（<=200 个）"),

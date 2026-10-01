@@ -33,11 +33,6 @@
       "message_register_success": "Registration successful, please sign in",
       "message_registration_closed": "Registration is currently disabled"
     },
-    "workbench": {
-      "label_workbench": "Workbench",
-      "text_hello": "hello, {username}",
-      "text_welcome": "Today is another day full of energy!"
-    },
     "agents": {
       "label_avatar": "Avatar",
       "label_agent_avatar": "Agent avatar",

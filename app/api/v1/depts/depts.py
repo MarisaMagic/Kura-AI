@@ -15,15 +15,6 @@ async def list_dept(
     return Success(data=dept_tree)
 
 
-@router.get("/get", summary="查看部门")
-async def get_dept(
-    id: int = Query(..., description="部门ID"),
-):
-    dept_obj = await dept_controller.get(id=id)
-    data = await dept_obj.to_dict()
-    return Success(data=data)
-
-
 @router.post("/create", summary="创建部门")
 async def create_dept(
     dept_in: DeptCreate,

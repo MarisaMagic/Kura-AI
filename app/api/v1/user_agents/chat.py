@@ -207,6 +207,7 @@ def _upstream_http_exception(exc: Exception) -> HTTPException | None:
         return HTTPException(status_code=code, detail="Upstream model service authentication or permission failed")
     return HTTPException(status_code=502, detail="Upstream model service unavailable")
 
+# 前端未使用（前端统一走 /chat/jobs + SSE 事件流）；作为同步链路入口与 README 三入口叙事保留。
 @router.post("/chat", summary="智能体对话（非流式）", tags=["智能体模块"])
 async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(AuthControl.is_authed)):
     user_id = current_user.id
@@ -256,6 +257,7 @@ async def chat_sync_endpoint(request: ChatRequest, current_user: User = Depends(
         raise HTTPException(status_code=500, detail="对话生成失败，请稍后重试") from e
 
 
+# 前端未直接调用（前端走 /chat/jobs/{id}/stream）；为 tests/load/load_test.py --mode stream 压测入口，保留。
 @router.post("/chat/stream", summary="智能体对话（SSE 流式）", tags=["智能体模块"])
 async def chat_stream_endpoint(request: ChatRequest, current_user: User = Depends(AuthControl.is_authed)):
     """
@@ -697,6 +699,7 @@ async def select_chat_branch(
     return Success(data=SessionMessagesResponse(messages=_to_message_infos(records)).model_dump())
 
 
+# 功能已实现且被面试文档承诺；前端 UI 未接线（api/index.js 中方法为预留），保留后端能力。
 @router.get(
     "/chat/sessions/{session_id}/context_usage",
     summary="查询会话上下文占用（压缩状态）",
@@ -730,6 +733,7 @@ async def get_session_context_usage(
     return Success(data=ContextUsageResponse(**snap).model_dump())
 
 
+# 功能已实现且被面试文档承诺；前端 UI 未接线（api/index.js 中方法为预留），保留后端能力。
 @router.post(
     "/chat/sessions/{session_id}/compact",
     summary="手动压缩会话上下文",

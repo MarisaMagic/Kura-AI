@@ -28,15 +28,6 @@ async def list_api(
     return SuccessExtra(data=data, total=total, page=page, page_size=page_size)
 
 
-@router.get("/get", summary="查看Api")
-async def get_api(
-    id: int = Query(..., description="Api"),
-):
-    api_obj = await api_controller.get(id=id)
-    data = await api_obj.to_dict()
-    return Success(data=data)
-
-
 @router.post("/create", summary="创建Api")
 async def create_api(
     api_in: ApiCreate,

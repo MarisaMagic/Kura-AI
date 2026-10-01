@@ -12,7 +12,6 @@ export default {
   uploadAvatar: (data) => request.post('/base/upload_avatar', data),
   // users
   getUserList: (params = {}) => request.get('/user/list', { params }),
-  getUserById: (params = {}) => request.get('/user/get', { params }),
   createUser: (data = {}) => request.post('/user/create', data),
   updateUser: (data = {}) => request.post('/user/update', data),
   setSuperuser: (data = {}) => request.post('/user/set_superuser', data),
@@ -77,12 +76,12 @@ export default {
       { assistant_message_id: assistantMessageId },
       { params: { agent_id: agentId } }
     ),
-  /** 会话上下文占用快照（token 预算 / 估算用量 / 分段摘要 / 压缩历史） */
+  /** 预留（当前无 UI 接线）：会话上下文占用快照（token 预算 / 估算用量 / 分段摘要 / 压缩历史） */
   getAgentChatContextUsage: (agentId, sessionId) =>
     request.get(`/user-agent/chat/sessions/${encodeURIComponent(sessionId)}/context_usage`, {
       params: { agent_id: agentId },
     }),
-  /** 手动压缩会话上下文（对齐 Claude Code 的 /compact），instructions 可选 */
+  /** 预留（当前无 UI 接线）：手动压缩会话上下文（对齐 Claude Code 的 /compact），instructions 可选 */
   compactAgentChatSession: (agentId, sessionId, instructions = '') =>
     request.post(
       `/user-agent/chat/sessions/${encodeURIComponent(sessionId)}/compact`,
@@ -134,7 +133,7 @@ export default {
   getKbDocuments: (params = {}) =>
     request.get('/user-agent/kb/documents', { params, timeout: 30000 }),
   /**
-   * 上传知识库文档：立即返回 data.task_id（后台线程处理），进度用 getKbUploadStatus 轮询。
+   * 上传知识库文档：立即返回 data.task_id（后台线程处理），进度用 getKbUploadStatusBatch 轮询。
    * timeout: 0 关闭 12s 全局超时（大文件传输不受限）；onUploadProgress 用于上传传输进度。
    */
   uploadKbDocument: (agentId, data, onUploadProgress, config = {}) =>
@@ -144,9 +143,6 @@ export default {
       onUploadProgress,
       ...config,
     }),
-  /** 查询知识库上传任务进度 */
-  getKbUploadStatus: (params = {}, config = {}) =>
-    request.get('/user-agent/kb/upload/status', { params, timeout: 30000, ...config }),
   /** 批量查询知识库上传任务进度：一次传 <=200 个 task_id（逗号分隔），大批量上传时替代逐任务轮询 */
   getKbUploadStatusBatch: (taskIds, config = {}) =>
     request.get('/user-agent/kb/upload/status/batch', {
@@ -187,13 +183,6 @@ export default {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 0,
       onUploadProgress,
-      ...config,
-    }),
-  getExpUploadStatus: (params = {}, config = {}) =>
-    request.get('/experiment/documents/upload/status', {
-      params,
-      timeout: 30000,
-      noErrorMessage: true,
       ...config,
     }),
   /**

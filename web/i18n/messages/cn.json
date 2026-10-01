@@ -33,11 +33,6 @@
       "message_register_success": "注册成功，请登录",
       "message_registration_closed": "当前未开放注册"
     },
-    "workbench": {
-      "label_workbench": "工作台",
-      "text_hello": "hello, {username}",
-      "text_welcome": "今天又是元气满满的一天!"
-    },
     "agents": {
       "label_avatar": "头像",
       "label_agent_avatar": "智能体头像",

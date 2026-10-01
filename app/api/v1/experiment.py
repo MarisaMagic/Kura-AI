@@ -155,19 +155,6 @@ def _exp_task_meta(task_id: str) -> dict | None:
     return meta
 
 
-@router.get("/documents/upload/status", summary="查询实验文档上传任务进度", tags=[TAG])
-async def exp_upload_status(
-    task_id: str = Query(..., description="上传任务 ID"),
-    current_user: User = Depends(SuperuserControl.is_superuser),
-):
-    # Redis 为同步客户端，统一放线程执行，避免大批量轮询阻塞事件循环
-    meta = await asyncio.to_thread(_exp_task_meta, task_id)
-    if not meta:
-        return Fail(code=404, msg="上传任务不存在或已过期")
-    # 数据集计数已由上传 worker 在任务终态时增量刷新（kb_job._on_task_finished），此处不再 COUNT
-    return Success(data=meta)
-
-
 @router.get("/documents/upload/status/batch", summary="批量查询实验文档上传任务进度", tags=[TAG])
 async def exp_upload_status_batch(
     task_ids: str = Query(..., description="上传任务 ID，逗号分隔（<=200 个）"),

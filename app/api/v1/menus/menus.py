@@ -28,14 +28,6 @@ async def list_menu(
     return SuccessExtra(data=res_menu, total=len(res_menu), page=page, page_size=page_size)
 
 
-@router.get("/get", summary="查看菜单")
-async def get_menu(
-    menu_id: int = Query(..., description="菜单id"),
-):
-    result = await menu_controller.get(id=menu_id)
-    return Success(data=result)
-
-
 @router.post("/create", summary="创建菜单")
 async def create_menu(
     menu_in: MenuCreate,

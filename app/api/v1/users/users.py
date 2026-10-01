@@ -41,16 +41,6 @@ async def list_user(
     return SuccessExtra(data=data, total=total, page=page, page_size=page_size)
 
 
-@router.get("/get", summary="查看用户")
-async def get_user(
-    user_id: int = Query(..., description="用户ID"),
-):
-    user_obj = await user_controller.get(id=user_id)
-    user_dict = await user_obj.to_dict(exclude_fields=["password"])
-    enrich_user_avatar(user_dict)
-    return Success(data=user_dict)
-
-
 @router.post("/create", summary="创建用户")
 async def create_user(
     user_in: UserCreate,

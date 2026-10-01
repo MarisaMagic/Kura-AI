@@ -54,6 +54,7 @@ async def health():
     return {"status": "ok"}
 
 
+# 基础设施探针惯例保留；当前仓库无消费方（Docker 健康检查实际探 /health，压测探 /status）。
 @router.get("/ready", summary="就绪检查（依赖项探活）", tags=["基础模块"])
 async def ready():
     """依赖就绪探活：PostgreSQL / Redis / Milvus；任一不可用返回 503。"""
