@@ -11,10 +11,12 @@ Provider：
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 
@@ -287,6 +289,72 @@ def _search_bocha_with_freshness_fallback(
     return results, "noLimit"
 
 
+async def _asearch_with_bocha(
+    query: str,
+    max_results: int,
+    timeout: int,
+    freshness: str = "noLimit",
+    include: str = "",
+) -> list[dict]:
+    """异步版 _search_with_bocha（共享 AsyncClient 连接池）。"""
+    key = _bocha_api_key()
+    if not key:
+        raise RuntimeError("未配置 WEB_SEARCH_BOCHA_API_KEY")
+    endpoint = (
+        (getattr(settings, "WEB_SEARCH_BOCHA_ENDPOINT", "") or "").strip()
+        or _DEFAULT_BOCHA_ENDPOINT
+    )
+    count = max(1, min(50, int(max_results)))
+    used_freshness = _normalize_freshness(freshness) or "noLimit"
+    body: dict = {
+        "query": query,
+        "count": count,
+        "summary": True,
+        "freshness": used_freshness,
+    }
+    if include:
+        body["include"] = include
+    client = _shared_async_client(f"bocha:{endpoint}", proxy=_web_search_proxy())
+    resp = await client.post(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+        json=body,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    if isinstance(payload, dict):
+        code = payload.get("code")
+        if code not in (None, 200, 0, "200", "0"):
+            msg = payload.get("msg") or payload.get("message") or ""
+            raise RuntimeError(f"博查搜索失败 code={code} {msg}".strip())
+    return _parse_bocha_pages(payload)
+
+
+async def _asearch_bocha_with_freshness_fallback(
+    query: str,
+    max_results: int,
+    timeout: int,
+    freshness: str,
+    include: str = "",
+) -> tuple[list[dict], str]:
+    """异步版 _search_bocha_with_freshness_fallback（语义逐行对齐）。"""
+    used = _normalize_freshness(freshness) or "noLimit"
+    results = _prepare_candidates(
+        await _asearch_with_bocha(query, max_results, timeout, used, include=include)
+    )
+    if results or used == "noLimit":
+        return results, used
+    logger.info("博查 freshness=%s 无结果，回退 noLimit", used)
+    results = _prepare_candidates(
+        await _asearch_with_bocha(query, max_results, timeout, "noLimit", include=include)
+    )
+    return results, "noLimit"
+
+
 def _search_with_ddgs(query: str, max_results: int, timeout: int) -> list[dict]:
     """ddgs 搜索；返回 [{title, url, snippet}]，失败抛异常。"""
     from ddgs import DDGS
@@ -320,10 +388,45 @@ def _search_with_ddgs(query: str, max_results: int, timeout: int) -> list[dict]:
     ]
 
 
+async def _asearch_with_ddgs(query: str, max_results: int, timeout: int) -> list[dict]:
+    """异步版 ddgs：库无异步接口，整体放到线程中执行（不阻塞事件循环）。"""
+    return await asyncio.to_thread(_search_with_ddgs, query, max_results, timeout)
+
+
+def _parse_bing_html(html: str, fetch_n: int) -> list[dict]:
+    """解析 Bing 搜索结果 HTML（同步/异步共用；纯 CPU 轻量）。"""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    out: list[dict] = []
+    for li in soup.select("li.b_algo"):
+        a = li.select_one("h2 a")
+        if not a:
+            continue
+        url = (a.get("href") or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        title = a.get_text(strip=True)
+        if _is_dictionary_junk(title):
+            continue
+        cap = li.select_one(".b_caption p")
+        out.append(
+            {
+                "title": title,
+                "url": url,
+                "snippet": cap.get_text(strip=True) if cap else "",
+                "siteName": "",
+                "datePublished": "",
+            }
+        )
+        if len(out) >= fetch_n:
+            break
+    return out
+
+
 def _search_with_bing(query: str, max_results: int, timeout: int) -> list[dict]:
     """Bing 国内版 HTML 搜索解析（cn.bing.com）；返回 [{title, url, snippet}]，失败抛异常。"""
     import httpx
-    from bs4 import BeautifulSoup
 
     proxy = _web_search_proxy()
     client_kwargs: dict = {
@@ -353,31 +456,44 @@ def _search_with_bing(query: str, max_results: int, timeout: int) -> list[dict]:
         resp.raise_for_status()
         html = resp.text
 
-    soup = BeautifulSoup(html, "html.parser")
-    out: list[dict] = []
-    for li in soup.select("li.b_algo"):
-        a = li.select_one("h2 a")
-        if not a:
-            continue
-        url = (a.get("href") or "").strip()
-        if not url.lower().startswith(("http://", "https://")):
-            continue
-        title = a.get_text(strip=True)
-        if _is_dictionary_junk(title):
-            continue
-        cap = li.select_one(".b_caption p")
-        out.append(
-            {
-                "title": title,
-                "url": url,
-                "snippet": cap.get_text(strip=True) if cap else "",
-                "siteName": "",
-                "datePublished": "",
-            }
-        )
-        if len(out) >= fetch_n:
-            break
-    return out
+    return _parse_bing_html(html, fetch_n)
+
+
+async def _asearch_with_bing(query: str, max_results: int, timeout: int) -> list[dict]:
+    """异步版 Bing 国内版 HTML 搜索（共享 AsyncClient；HTML 解析在线程中执行）。"""
+    proxy = _web_search_proxy()
+    fetch_n = max(1, min(50, int(max_results)))
+    client = _shared_async_client("bing_html", proxy=proxy, headers=_BING_HEADERS)
+    try:
+        await client.get(_BING_HOME_URL, timeout=timeout)
+    except Exception:
+        logger.debug("Bing 首页 cookie 预热失败", exc_info=True)
+    resp = await client.get(
+        _BING_SEARCH_URL,
+        params={
+            "q": query,
+            "mkt": "zh-CN",
+            "setlang": "zh-hans",
+            "cc": "CN",
+            "ensearch": "0",
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return await asyncio.to_thread(_parse_bing_html, resp.text, fetch_n)
+
+
+def _unique_queries(queries: list[str], limit: int = 2) -> list[str]:
+    """去重（忽略大小写）后截断（同步/异步共用）。"""
+    qs = [q.strip() for q in queries if (q or "").strip()]
+    seen_q: set[str] = set()
+    uniq: list[str] = []
+    for q in qs:
+        key = q.casefold()
+        if key not in seen_q:
+            seen_q.add(key)
+            uniq.append(q)
+    return uniq[:limit]
 
 
 def _run_search(query: str, freshness: str, site: str = "") -> tuple[list[dict], str, str]:
@@ -479,15 +595,7 @@ def _run_searches(
     site: str = "",
 ) -> tuple[list[dict], str, str]:
     """最多两路并行召回，URL 去重后截到 50；一路失败不拖垮另一路。"""
-    qs = [q.strip() for q in queries if (q or "").strip()]
-    seen_q: set[str] = set()
-    uniq: list[str] = []
-    for q in qs:
-        key = q.casefold()
-        if key not in seen_q:
-            seen_q.add(key)
-            uniq.append(q)
-    uniq = uniq[:2]
+    uniq = _unique_queries(queries)
     if not uniq:
         return [], "", freshness
     if len(uniq) == 1:
@@ -511,6 +619,125 @@ def _run_searches(
     return _dedupe_by_url(merged)[:50], provider or "none", used_fresh
 
 
+async def _arun_search(query: str, freshness: str, site: str = "") -> tuple[list[dict], str, str]:
+    """异步版 _run_search（provider 优先级与同步版逐行对齐；检索 + 解析零线程阻塞）。"""
+    provider = (getattr(settings, "WEB_SEARCH_PROVIDER", "auto") or "auto").strip().lower()
+    candidate_n = _candidate_count()
+    timeout = int(settings.WEB_SEARCH_TIMEOUT_SECONDS)
+    q_site = _query_with_site(query, site)
+
+    async def _try_ddgs() -> tuple[list[dict], str, str] | None:
+        try:
+            results = _prepare_candidates(await _asearch_with_ddgs(q_site, candidate_n, timeout))
+            if results:
+                return results, "ddgs", freshness
+            logger.info("ddgs 结果经 junk/去重后为空")
+        except Exception as e:
+            logger.warning("ddgs 搜索失败 backend=%s: %s", _resolve_ddgs_backend(), e)
+        return None
+
+    async def _try_bocha() -> tuple[list[dict], str, str] | None:
+        if not _bocha_api_key():
+            return None
+        try:
+            results, used = await _asearch_bocha_with_freshness_fallback(
+                query, candidate_n, timeout, freshness, include=site
+            )
+            if results:
+                return results, "bocha", used
+            logger.info("博查结果经 junk/去重后为空")
+        except Exception as e:
+            logger.warning("博查搜索失败: %s", e)
+        return None
+
+    if provider == "bing_html":
+        return (
+            _prepare_candidates(await _asearch_with_bing(q_site, candidate_n, timeout)),
+            "bing_html",
+            freshness,
+        )
+    if provider == "ddgs":
+        return (
+            _prepare_candidates(await _asearch_with_ddgs(q_site, candidate_n, timeout)),
+            "ddgs",
+            freshness,
+        )
+    if provider == "bocha":
+        results, used = await _asearch_bocha_with_freshness_fallback(
+            query, candidate_n, timeout, freshness, include=site
+        )
+        return results, "bocha", used
+
+    has_proxy = bool(_web_search_proxy())
+    has_bocha = bool(_bocha_api_key())
+
+    if has_proxy:
+        hit = await _try_ddgs()
+        if hit:
+            return hit
+        hit = await _try_bocha()
+        if hit:
+            return hit
+        return (
+            _prepare_candidates(await _asearch_with_bing(q_site, candidate_n, timeout)),
+            "bing_html",
+            freshness,
+        )
+
+    if has_bocha:
+        hit = await _try_bocha()
+        if hit:
+            return hit
+        return (
+            _prepare_candidates(await _asearch_with_bing(q_site, candidate_n, timeout)),
+            "bing_html",
+            freshness,
+        )
+
+    logger.warning(
+        "未配置 WEB_SEARCH_BOCHA_API_KEY，无代理时回退 ddgs bing + bing_html；"
+        "申请 Key: https://open.bochaai.com/"
+    )
+    hit = await _try_ddgs()
+    if hit:
+        return hit
+    return (
+        _prepare_candidates(await _asearch_with_bing(q_site, candidate_n, timeout)),
+        "bing_html",
+        freshness,
+    )
+
+
+async def _arun_searches(
+    queries: list[str],
+    freshness: str,
+    site: str = "",
+) -> tuple[list[dict], str, str]:
+    """异步版 _run_searches：两路 asyncio.gather 并行，URL 去重后截到 50；一路失败不拖垮另一路。"""
+    uniq = _unique_queries(queries)
+    if not uniq:
+        return [], "", freshness
+    if len(uniq) == 1:
+        return await _arun_search(uniq[0], freshness, site)
+
+    merged: list[dict] = []
+    provider = ""
+    used_fresh = freshness
+    outcomes = await asyncio.gather(
+        *(_arun_search(q, freshness, site) for q in uniq), return_exceptions=True
+    )
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException):
+            logger.warning("一路联网搜索失败: %s", outcome)
+            continue
+        results, prov, fr = outcome
+        if results:
+            merged.extend(results)
+            provider = provider or prov
+            used_fresh = fr
+    return _dedupe_by_url(merged)[:50], provider or "none", used_fresh
+
+
 def _format_result_block(index: int, item: dict) -> str:
     title = (item.get("title") or "").strip() or "(无标题)"
     url = (item.get("url") or "").strip()
@@ -528,5 +755,61 @@ def _format_result_block(index: int, item: dict) -> str:
     if page_text:
         lines.append(f"正文摘录: {page_text}")
     return "\n".join(lines)
+
+
+# ================================================================
+# P2：联网搜索出站 AsyncClient 共享池（异步路径专用）
+# 搜索 endpoint 固定（博查 API / cn.bing.com），按 key+代理复用连接池，
+# 避免高并发下每请求新建客户端重复握手；同步路径继续每次新建（频率低）。
+# ================================================================
+_ASYNC_CLIENTS: dict[str, Any] = {}
+_ASYNC_CLIENTS_LOCK = threading.Lock()
+
+
+def _shared_async_client(
+    key: str,
+    *,
+    proxy: str | None,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    """按 key+代理复用出站 AsyncClient（timeout 由调用方按请求覆盖）。"""
+    import httpx
+
+    try:
+        # AsyncClient 与事件循环绑定：跨 loop 复用会报 "Event loop is closed"，
+        # key 须含 loop id（生产单 loop 无影响，兼容测试/脚本多 asyncio.run）
+        loop_id = id(asyncio.get_running_loop())
+    except RuntimeError:
+        loop_id = 0
+    cache_key = f"{loop_id}|{key}|{proxy or ''}"
+    with _ASYNC_CLIENTS_LOCK:
+        cached = _ASYNC_CLIENTS.get(cache_key)
+        if cached is not None:
+            return cached
+    client = httpx.AsyncClient(
+        timeout=30.0,
+        follow_redirects=True,
+        proxy=proxy,
+        trust_env=False,
+        headers=headers,
+    )
+    with _ASYNC_CLIENTS_LOCK:
+        cached = _ASYNC_CLIENTS.get(cache_key)
+        if cached is not None:
+            return cached
+        _ASYNC_CLIENTS[cache_key] = client
+    return client
+
+
+async def close_async_search_clients() -> None:
+    """关停时统一 aclose 联网搜索出站客户端（挂到 lifespan 收尾）。"""
+    with _ASYNC_CLIENTS_LOCK:
+        items = list(_ASYNC_CLIENTS.values())
+        _ASYNC_CLIENTS.clear()
+    for client in items:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
 
 

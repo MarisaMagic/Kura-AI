@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import re
 import uuid
@@ -464,12 +465,17 @@ def extract_attachment_plaintext(
 
     # PDF/DOCX/表格解析库要求本地路径：下载到临时文件后解析，退出自动清理
     try:
-        with obs.download_temp(key, suffix=suf) as path:
-            return _extract_plaintext_from_local(path, suf)
+        return _extract_from_obs_key(key, suf)
     except obs.ObjectNotFoundError:
         return None, "错误：附件文件已丢失。"
     except Exception as e:
         return None, f"读取附件失败：{e}"
+
+
+def _extract_from_obs_key(key: str, suf: str) -> tuple[AttachmentPlaintextExtract | None, str | None]:
+    """下载对象存储临时文件并解析（同步/异步共用；pdf/docx/csv/xlsx）。"""
+    with obs.download_temp(key, suffix=suf) as path:
+        return _extract_plaintext_from_local(path, suf)
 
 
 def _extract_plaintext_from_local(
@@ -674,3 +680,71 @@ async def abuild_storable_human_content(
                 }
             )
     return blocks
+
+
+# ================================================================
+# P2：附件正文抽取/读取的异步入口（对话异步 Agent 专用）
+# 行查询走 AsyncSession；对象存储/解析库为同步 SDK → to_thread。
+# 注意：同步版修改需同步检查本区块。
+# ================================================================
+
+
+@sync_fallback_fn(extract_attachment_plaintext)
+async def aextract_attachment_plaintext(
+    attachment_id: str,
+    *,
+    user_id: int,
+    agent_id: int,
+    session_id: str,
+) -> tuple[AttachmentPlaintextExtract | None, str | None]:
+    """异步版 extract_attachment_plaintext（行为与同步版逐行对齐）。"""
+    row = await aget_attachment_row(attachment_id, user_id=user_id, agent_id=agent_id, session_id=session_id)
+    if not row:
+        return None, "错误：附件不存在或无权访问。"
+
+    kind = row.kind
+    suf = Path(row.original_filename).suffix.lower()
+    key = attachment_object_key(row.stored_relpath)
+
+    if kind == "image":
+        return None, (
+            "该附件为图片；若已启用多模态视觉，模型可直接理解。否则无法以文本工具读取图片内容。"
+        )
+
+    try:
+        if suf in (".txt", ".md"):
+            raw = await asyncio.to_thread(obs.read_bytes, key)
+            text = raw.decode("utf-8", errors="replace")
+            return AttachmentPlaintextExtract(text=text, page_starts=()), None
+    except obs.ObjectNotFoundError:
+        return None, "错误：附件文件已丢失。"
+    except Exception as e:
+        return None, f"读取附件失败：{e}"
+
+    # PDF/DOCX/表格：下载 + 解析整块放入线程（CPU 段不阻塞事件循环）
+    try:
+        return await asyncio.to_thread(_extract_from_obs_key, key, suf)
+    except obs.ObjectNotFoundError:
+        return None, "错误：附件文件已丢失。"
+    except Exception as e:
+        return None, f"读取附件失败：{e}"
+
+
+@sync_fallback_fn(read_attachment_text)
+async def aread_attachment_text(
+    attachment_id: str,
+    *,
+    user_id: int,
+    agent_id: int,
+    session_id: str,
+    max_chars: int = 12000,
+) -> str:
+    """异步版 read_attachment_text（抽取文本并按 max_chars 截断）。"""
+    ext, err = await aextract_attachment_plaintext(
+        attachment_id, user_id=user_id, agent_id=agent_id, session_id=session_id
+    )
+    if err:
+        return err
+    assert ext is not None
+    text = ext.text
+    return text[:max_chars] + ("…\n（已截断）" if len(text) > max_chars else "")

@@ -7,6 +7,9 @@ Provider：
 - auto（默认）：无代理且已配 Key 时 bocha → bing_html；有代理时 ddgs → bocha → bing_html
 
 召回后可选走博查 Semantic Reranker、通用权威度软加权，以及对 top 结果读页抽主文。
+
+P2：`prefer_async=True` 时注册 coroutine 版（对话异步 Agent；召回/重排/读页全异步、零线程占用），
+同步路径（/chat）沿用同步实现；两条路径共享同一套后处理（结果格式化/来源登记/非可信内容隔离）。
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ from app.chat.tools import (
     web_search_disabled_this_turn_msg,
 )
 from app.chat.web_search_authority import apply_authority_ranking, authority_score, registrable_domain
-from app.chat.web_search_reader import fetch_page, read_top_pages
+from app.chat.web_search_reader import afetch_page, aread_top_pages, fetch_page, read_top_pages
 from app.settings import settings
 from app.utils.content_guard import guard_untrusted_content
 from app.utils.ssrf import is_safe_http_page_url, is_safe_https_image_url
@@ -132,6 +135,7 @@ from app.chat.web_search_providers import (  # noqa: E402
     _search_with_bing,
     _run_search,
     _run_searches,
+    _arun_searches,
     _format_result_block,
 )
 from app.chat.web_search_rerank import (  # noqa: E402
@@ -139,10 +143,15 @@ from app.chat.web_search_rerank import (  # noqa: E402
     _build_rerank_document,
     _parse_rerank_results,
     _rerank_web_results,
+    _arerank_web_results,
 )
 
-def make_web_search_tool() -> StructuredTool:
-    """构建 web_search 工具：返回编号化的标题/URL/摘要列表，并收集来源供前端展示。"""
+
+def make_web_search_tool(*, prefer_async: bool = False) -> StructuredTool:
+    """构建 web_search 工具：返回编号化的标题/URL/摘要列表，并收集来源供前端展示。
+
+    :param prefer_async: True 时注册 coroutine 版（对话异步 Agent 专用）
+    """
 
     class _WebSearchArgs(BaseModel):
         query: str = Field(
@@ -180,12 +189,7 @@ def make_web_search_tool() -> StructuredTool:
                 return None
             return _normalize_freshness(str(v))
 
-    def _web_search(
-        query: str,
-        freshness: str | None = None,
-        site: str | None = None,
-        extra_query: str | None = None,
-    ) -> str:
+    def _guard_turn() -> str | None:
         if not is_web_search_allowed_this_turn():
             limit_msg = web_search_disabled_this_turn_msg()
             log_kb_tool_return_to_terminal(limit_msg, tool_label="web_search")
@@ -198,10 +202,17 @@ def make_web_search_tool() -> StructuredTool:
             )
             log_kb_tool_return_to_terminal(limit_msg, tool_label="web_search")
             return limit_msg
+        return None
 
+    def _resolve_args(
+        query: str,
+        freshness: str | None,
+        site: str | None,
+        extra_query: str | None,
+    ) -> tuple[str | None, str, str, str, str, str]:
         q = (query or "").strip()
         if not q:
-            return "错误：query 为空。"
+            return "错误：query 为空。", "", "", "", "", ""
 
         resolved_freshness = _resolve_freshness(q, freshness)
         site_host = _normalize_site(site)
@@ -212,39 +223,9 @@ def make_web_search_tool() -> StructuredTool:
         if extra:
             detail += "，双查询"
         detail += "）"
-        emit_rag_step("🌐", "联网搜索", detail)
-        try:
-            results, provider_used, freshness_used = _run_searches(
-                [q, extra], resolved_freshness, site_host
-            )
-        except Exception as e:
-            logger.warning("联网搜索失败: %s", e)
-            emit_rag_step("⚠️", "联网搜索失败", "")
-            _set_last_rag_context({"web_sources": []})
-            err_msg = (
-                "WEB_SEARCH_FAILED: 本次联网搜索失败，可稍后重试。"
-                "请如实告知用户；不得编造任何搜索结果或来源链接。"
-            )
-            log_kb_tool_return_to_terminal(err_msg, tool_label="web_search")
-            return err_msg
+        return None, q, resolved_freshness, site_host, extra, detail
 
-        emit_rag_step(
-            "🔍",
-            "联网搜索召回",
-            f"{len(results)} 条（{provider_used}，freshness={freshness_used}）",
-        )
-
-        if not results:
-            emit_rag_step("🔍", "联网搜索无结果", q)
-            _set_last_rag_context({"web_sources": []})
-            empty_msg = (
-                "WEB_SEARCH_NO_RESULTS: 本次联网搜索未找到相关结果。"
-                "请如实告知用户未搜到相关内容（可建议换个关键词重试），不得编造搜索结果或来源链接。"
-            )
-            log_kb_tool_return_to_terminal(empty_msg, tool_label="web_search")
-            return empty_msg
-
-        results, rerank_meta = _rerank_web_results(q, results)
+    def _emit_rerank(rerank_meta: dict, results: list[dict], provider_used: str) -> None:
         if rerank_meta.get("fallback"):
             emit_rag_step(
                 "⚠️",
@@ -256,37 +237,27 @@ def make_web_search_tool() -> StructuredTool:
         else:
             emit_rag_step("📑", "联网搜索完成", f"命中 {len(results)} 条结果（{provider_used}）")
 
-        if not results:
-            emit_rag_step("🔍", "联网搜索无结果", "重排后无高于阈值的结果")
-            _set_last_rag_context({"web_sources": []})
-            empty_msg = (
-                "WEB_SEARCH_NO_RESULTS: 本次联网搜索未找到相关结果。"
-                "请如实告知用户未搜到相关内容（可建议换个关键词重试），不得编造搜索结果或来源链接。"
-            )
-            log_kb_tool_return_to_terminal(empty_msg, tool_label="web_search")
-            return empty_msg
+    def _empty_msg(detail: str) -> str:
+        emit_rag_step("🔍", "联网搜索无结果", detail)
+        _set_last_rag_context({"web_sources": []})
+        empty_msg = (
+            "WEB_SEARCH_NO_RESULTS: 本次联网搜索未找到相关结果。"
+            "请如实告知用户未搜到相关内容（可建议换个关键词重试），不得编造搜索结果或来源链接。"
+        )
+        log_kb_tool_return_to_terminal(empty_msg, tool_label="web_search")
+        return empty_msg
 
-        results = apply_authority_ranking(q, results, freshness=freshness_used)
-        emit_rag_step("⚖️", "权威度重排完成", f"保留 {len(results)} 条")
+    def _fail_msg() -> str:
+        emit_rag_step("⚠️", "联网搜索失败", "")
+        _set_last_rag_context({"web_sources": []})
+        err_msg = (
+            "WEB_SEARCH_FAILED: 本次联网搜索失败，可稍后重试。"
+            "请如实告知用户；不得编造任何搜索结果或来源链接。"
+        )
+        log_kb_tool_return_to_terminal(err_msg, tool_label="web_search")
+        return err_msg
 
-        results, read_meta = read_top_pages(results)
-        if read_meta.get("enabled"):
-            emit_rag_step(
-                "📖",
-                "读页",
-                f"成功 {read_meta.get('ok', 0)}/{read_meta.get('attempted', 0)}",
-            )
-
-        if not results:
-            emit_rag_step("🔍", "联网搜索无结果", q)
-            _set_last_rag_context({"web_sources": []})
-            empty_msg = (
-                "WEB_SEARCH_NO_RESULTS: 本次联网搜索未找到相关结果。"
-                "请如实告知用户未搜到相关内容（可建议换个关键词重试），不得编造搜索结果或来源链接。"
-            )
-            log_kb_tool_return_to_terminal(empty_msg, tool_label="web_search")
-            return empty_msg
-
+    def _finalize(results: list[dict]) -> str:
         web_sources: list[dict] = []
         blocks: list[str] = []
         for i, item in enumerate(results, start=1):
@@ -319,9 +290,121 @@ def make_web_search_tool() -> StructuredTool:
         _set_last_rag_context({"web_sources": web_sources})
         return out
 
-    return StructuredTool.from_function(
-        name="web_search",
-        description=(
+    def _web_search(
+        query: str,
+        freshness: str | None = None,
+        site: str | None = None,
+        extra_query: str | None = None,
+    ) -> str:
+        early = _guard_turn()
+        if early is not None:
+            return early
+
+        early, q, resolved_freshness, site_host, extra, detail = _resolve_args(
+            query, freshness, site, extra_query
+        )
+        if early is not None:
+            return early
+
+        emit_rag_step("🌐", "联网搜索", detail)
+        try:
+            results, provider_used, freshness_used = _run_searches(
+                [q, extra], resolved_freshness, site_host
+            )
+        except Exception as e:
+            logger.warning("联网搜索失败: %s", e)
+            return _fail_msg()
+
+        emit_rag_step(
+            "🔍",
+            "联网搜索召回",
+            f"{len(results)} 条（{provider_used}，freshness={freshness_used}）",
+        )
+
+        if not results:
+            return _empty_msg(q)
+
+        results, rerank_meta = _rerank_web_results(q, results)
+        _emit_rerank(rerank_meta, results, provider_used)
+
+        if not results:
+            return _empty_msg("重排后无高于阈值的结果")
+
+        results = apply_authority_ranking(q, results, freshness=freshness_used)
+        emit_rag_step("⚖️", "权威度重排完成", f"保留 {len(results)} 条")
+
+        results, read_meta = read_top_pages(results)
+        if read_meta.get("enabled"):
+            emit_rag_step(
+                "📖",
+                "读页",
+                f"成功 {read_meta.get('ok', 0)}/{read_meta.get('attempted', 0)}",
+            )
+
+        if not results:
+            return _empty_msg(q)
+
+        return _finalize(results)
+
+    async def _aweb_search(
+        query: str,
+        freshness: str | None = None,
+        site: str | None = None,
+        extra_query: str | None = None,
+    ) -> str:
+        early = _guard_turn()
+        if early is not None:
+            return early
+
+        early, q, resolved_freshness, site_host, extra, detail = _resolve_args(
+            query, freshness, site, extra_query
+        )
+        if early is not None:
+            return early
+
+        emit_rag_step("🌐", "联网搜索", detail)
+        try:
+            results, provider_used, freshness_used = await _arun_searches(
+                [q, extra], resolved_freshness, site_host
+            )
+        except Exception as e:
+            logger.warning("联网搜索失败: %s", e)
+            return _fail_msg()
+
+        emit_rag_step(
+            "🔍",
+            "联网搜索召回",
+            f"{len(results)} 条（{provider_used}，freshness={freshness_used}）",
+        )
+
+        if not results:
+            return _empty_msg(q)
+
+        results, rerank_meta = await _arerank_web_results(q, results)
+        _emit_rerank(rerank_meta, results, provider_used)
+
+        if not results:
+            return _empty_msg("重排后无高于阈值的结果")
+
+        results = apply_authority_ranking(q, results, freshness=freshness_used)
+        emit_rag_step("⚖️", "权威度重排完成", f"保留 {len(results)} 条")
+
+        results, read_meta = await aread_top_pages(results)
+        if read_meta.get("enabled"):
+            emit_rag_step(
+                "📖",
+                "读页",
+                f"成功 {read_meta.get('ok', 0)}/{read_meta.get('attempted', 0)}",
+            )
+
+        if not results:
+            return _empty_msg(q)
+
+        return _finalize(results)
+
+    options = {
+        "name": "web_search",
+        "description": (
             "联网搜索（实时网页结果）。"
             "何时使用：用户问题涉及最新/实时信息（新闻、价格、版本发布、天气股价、赛事比分、近期事件等），"
             "或你的知识无法确定且需要查证的公开事实。"
@@ -337,18 +420,23 @@ def make_web_search_tool() -> StructuredTool:
             "结果不足以回答时如实说明，不得编造事实或来源链接。"
             "调用约束：同一用户提问轮次内调用次数有限。"
         ),
-        args_schema=_WebSearchArgs,
-        func=_web_search,
-    )
+        "args_schema": _WebSearchArgs,
+    }
+    if prefer_async:
+        return StructuredTool.from_function(coroutine=_aweb_search, **options)
+    return StructuredTool.from_function(func=_web_search, **options)
 
 
-def make_fetch_url_tool() -> StructuredTool:
-    """读取用户或搜索结果给出的单个 http(s) 页面正文。"""
+def make_fetch_url_tool(*, prefer_async: bool = False) -> StructuredTool:
+    """读取用户或搜索结果给出的单个 http(s) 页面正文。
+
+    :param prefer_async: True 时注册 coroutine 版（对话异步 Agent 专用）
+    """
 
     class _FetchUrlArgs(BaseModel):
         url: str = Field(description="要读取的公开 http(s) 网页地址。")
 
-    def _fetch_url(url: str) -> str:
+    def _guard_turn() -> str | None:
         if not is_web_search_allowed_this_turn():
             limit_msg = fetch_url_disabled_this_turn_msg()
             log_kb_tool_return_to_terminal(limit_msg, tool_label="fetch_url")
@@ -361,28 +449,27 @@ def make_fetch_url_tool() -> StructuredTool:
             )
             log_kb_tool_return_to_terminal(limit_msg, tool_label="fetch_url")
             return limit_msg
+        return None
 
+    def _validate_url(url: str) -> tuple[str | None, str]:
         u = (url or "").strip()
         if not u:
-            return "错误：url 为空。"
+            return "错误：url 为空。", ""
         if not u.lower().startswith(("http://", "https://")):
-            return "错误：url 仅支持 http(s)。"
+            return "错误：url 仅支持 http(s)。", ""
+        return None, u
 
-        emit_rag_step("🔗", "读取网页", u)
-        max_chars = max(80, int(getattr(settings, "WEB_SEARCH_FETCH_MAX_CHARS", 4000) or 4000))
-        page = fetch_page(u, max_chars=max_chars)
-        if not page.get("ok"):
-            err = (page.get("error") or "unknown")[:200]
-            logger.info("fetch_url 读页失败: %s", err)
-            emit_rag_step("⚠️", "读页失败", "")
-            _set_last_rag_context({"web_sources": []})
-            err_msg = (
-                "FETCH_URL_FAILED: 无法读取该网页。"
-                "请如实告知用户未能打开该链接；不得编造页面正文或来源。"
-            )
-            log_kb_tool_return_to_terminal(err_msg, tool_label="fetch_url")
-            return err_msg
+    def _fail_msg() -> str:
+        emit_rag_step("⚠️", "读页失败", "")
+        _set_last_rag_context({"web_sources": []})
+        err_msg = (
+            "FETCH_URL_FAILED: 无法读取该网页。"
+            "请如实告知用户未能打开该链接；不得编造页面正文或来源。"
+        )
+        log_kb_tool_return_to_terminal(err_msg, tool_label="fetch_url")
+        return err_msg
 
+    def _finalize(page: dict, u: str) -> str:
         title = (page.get("title") or "").strip() or "(无标题)"
         final_url = (page.get("url") or u).strip()
         text = (page.get("text") or "").strip()
@@ -404,9 +491,45 @@ def make_fetch_url_tool() -> StructuredTool:
         _set_last_rag_context({"web_sources": [src]})
         return out
 
-    return StructuredTool.from_function(
-        name="fetch_url",
-        description=(
+    def _fetch_url(url: str) -> str:
+        early = _guard_turn()
+        if early is not None:
+            return early
+
+        early, u = _validate_url(url)
+        if early is not None:
+            return early
+
+        emit_rag_step("🔗", "读取网页", u)
+        max_chars = max(80, int(getattr(settings, "WEB_SEARCH_FETCH_MAX_CHARS", 4000) or 4000))
+        page = fetch_page(u, max_chars=max_chars)
+        if not page.get("ok"):
+            err = (page.get("error") or "unknown")[:200]
+            logger.info("fetch_url 读页失败: %s", err)
+            return _fail_msg()
+        return _finalize(page, u)
+
+    async def _afetch_url(url: str) -> str:
+        early = _guard_turn()
+        if early is not None:
+            return early
+
+        early, u = _validate_url(url)
+        if early is not None:
+            return early
+
+        emit_rag_step("🔗", "读取网页", u)
+        max_chars = max(80, int(getattr(settings, "WEB_SEARCH_FETCH_MAX_CHARS", 4000) or 4000))
+        page = await afetch_page(u, max_chars=max_chars)
+        if not page.get("ok"):
+            err = (page.get("error") or "unknown")[:200]
+            logger.info("fetch_url 读页失败: %s", err)
+            return _fail_msg()
+        return _finalize(page, u)
+
+    options = {
+        "name": "fetch_url",
+        "description": (
             "读取指定公开网页的正文（静态 HTML）。"
             "何时使用：用户直接给出 http(s) 链接；或 web_search 已返回某条 URL、需要精读该页。"
             "何时不要使用：没有具体网址时请用 web_search；不要用本工具打开内网或需要登录的页面。"
@@ -414,8 +537,8 @@ def make_fetch_url_tool() -> StructuredTool:
             "回答纪律：仅依据摘录作答，引用必须标注 [来源1]；读取失败时如实说明，不得编造正文。"
             "调用约束：同一轮次数有限。"
         ),
-        args_schema=_FetchUrlArgs,
-        func=_fetch_url,
-    )
-
-
+        "args_schema": _FetchUrlArgs,
+    }
+    if prefer_async:
+        return StructuredTool.from_function(coroutine=_afetch_url, **options)
+    return StructuredTool.from_function(func=_fetch_url, **options)

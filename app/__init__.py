@@ -58,11 +58,14 @@ async def lifespan(app: FastAPI):
     yield
     stop_loop_monitor()
     try:
-        from app.utils.egress import close_pinned_llm_clients
+        from app.chat.web_search_providers import close_async_search_clients
+        from app.utils.egress import close_pinned_async_http_clients, close_pinned_llm_clients
 
         await close_pinned_llm_clients()
+        await close_pinned_async_http_clients()
+        await close_async_search_clients()
     except Exception as e:
-        logger.warning("关闭缓存的 LLM 客户端失败（不影响退出）: %s", e)
+        logger.warning("关闭缓存的 LLM/出站客户端失败（不影响退出）: %s", e)
     await Tortoise.close_connections()
 
 

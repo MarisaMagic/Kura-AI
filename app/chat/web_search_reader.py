@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -9,8 +10,13 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 import httpx
 
+from app.chat.web_search_providers import _shared_async_client
 from app.settings import settings
-from app.utils.egress import assert_httpx_response_public, build_pinned_sync_client
+from app.utils.egress import (
+    assert_httpx_response_public,
+    build_pinned_sync_client,
+    get_or_build_pinned_async_client,
+)
 from app.utils.ssrf import UnsafeUrlError, validate_public_http_url
 
 logger = logging.getLogger(__name__)
@@ -299,4 +305,148 @@ def read_top_pages(results: list[dict]) -> tuple[list[dict], dict]:
         take = min(top_n - meta["ok"], 3)
         batch, rest = rest[:take], rest[take:]
         _run_batch(batch)
+    return out, meta
+
+
+# ================================================================
+# P2：异步读页（对话异步 Agent 专用；语义与同步版逐行对齐）
+# pinned 客户端按 host 复用（egress 缓存）；DNS 校验/HTML 解析在线程中执行。
+# ================================================================
+
+
+async def _arequest_with_proxy(url: str, timeout: float) -> httpx.Response:
+    """异步版 _request_with_proxy（共享 proxy 客户端）。"""
+    client = _shared_async_client("reader_html", proxy=_proxy(), headers=_READ_HEADERS)
+    return await client.get(url, timeout=timeout)
+
+
+async def _arequest_pinned(url: str, timeout: float) -> httpx.Response:
+    """异步版 _request_pinned（按 host 复用 pinned AsyncClient）。"""
+    client = get_or_build_pinned_async_client(url, timeout=timeout)
+    return await client.get(url, headers=_READ_HEADERS)
+
+
+async def _aredirect_target(resp: httpx.Response) -> str | None:
+    """异步版 _redirect_target（重定向目标的 SSRF 校验在线程执行）。"""
+    if not resp.is_redirect:
+        return None
+    location = resp.headers.get("location")
+    if not location:
+        return None
+    await asyncio.to_thread(assert_httpx_response_public, resp)
+    return str(resp.url.join(location))
+
+
+async def _afetch_html(url: str) -> tuple[str, str]:
+    """异步版 _fetch_html（每跳先经 SSRF 校验；pinned/proxy 二选一）。"""
+    timeout = _timeout_seconds()
+    max_bytes = _max_bytes()
+    current = (url or "").strip()
+    for _ in range(_MAX_REDIRECTS + 1):
+        await asyncio.to_thread(validate_public_http_url, current)
+        if _proxy():
+            resp = await _arequest_with_proxy(current, timeout)
+        else:
+            resp = await _arequest_pinned(current, timeout)
+        nxt = await _aredirect_target(resp)
+        if nxt:
+            current = nxt
+            continue
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise RuntimeError(f"HTTP {resp.status_code}")
+        if not _is_html_content_type(resp.headers.get("content-type") or ""):
+            raise RuntimeError("non-html content-type")
+        raw = resp.content
+        if len(raw) > max_bytes:
+            raise RuntimeError("body too large")
+        html = decode_html_bytes(raw, content_type=resp.headers.get("content-type") or "")
+        return html, str(resp.url) or current
+    raise RuntimeError("too many redirects")
+
+
+async def afetch_page(url: str, *, max_chars: int | None = None) -> dict:
+    """异步版 fetch_page（供异步 web_search / fetch_url 复用；返回结构与同步版一致）。"""
+    limit = max_chars if max_chars is not None else _max_chars()
+    limit = max(80, int(limit))
+    try:
+        html, final_url = await _afetch_html(url)
+        text = await asyncio.to_thread(extract_main_text, html, limit)
+        title = await asyncio.to_thread(extract_html_title, html)
+        if len(text) < _MIN_EXTRACT_CHARS:
+            return {
+                "ok": False,
+                "title": title,
+                "text": "",
+                "url": final_url,
+                "error": "extracted_too_short",
+            }
+        return {"ok": True, "title": title, "text": text, "url": final_url, "error": ""}
+    except (UnsafeUrlError, httpx.HTTPError, RuntimeError, ValueError, OSError) as e:
+        logger.info("读页失败 url=%s: %s", (url or "")[:160], e)
+        return {"ok": False, "title": "", "text": "", "url": (url or "").strip(), "error": str(e)[:300]}
+
+
+async def aread_top_pages(results: list[dict]) -> tuple[list[dict], dict]:
+    """
+    异步版 read_top_pages：并行读取前 N 条正文（Semaphore 限 3）；失败按序补位；
+    总 deadline 到点后取消未完成任务（保护 CancelledError 正常传播）。
+    :return: (copies, meta)
+    """
+    out = [dict(item) for item in results]
+    for item in out:
+        item["read_ok"] = False
+        item.pop("page_text", None)
+    meta = {"attempted": 0, "ok": 0, "enabled": True}
+    if not bool(getattr(settings, "WEB_SEARCH_READ_ENABLED", True)):
+        meta["enabled"] = False
+        return out, meta
+    top_n = max(0, int(getattr(settings, "WEB_SEARCH_READ_TOP_N", 3) or 3))
+    indices = [i for i, item in enumerate(out) if (item.get("url") or "").strip()]
+    if not indices or top_n <= 0:
+        return out, meta
+
+    started = time.monotonic()
+    sem = asyncio.Semaphore(3)
+
+    async def _read_one_guarded(url: str) -> str | None:
+        async with sem:
+            page = await afetch_page(url)
+        if page.get("ok"):
+            return str(page.get("text") or "")
+        return None
+
+    async def _run_batch(idxs: list[int]) -> None:
+        left = _OVERALL_DEADLINE_SECONDS - (time.monotonic() - started)
+        if left <= 0.4 or not idxs:
+            return
+        tasks = {
+            asyncio.create_task(_read_one_guarded((out[i].get("url") or "").strip())): i
+            for i in idxs
+        }
+        done, pending = await asyncio.wait(tasks.keys(), timeout=left)
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for t in done:
+            meta["attempted"] += 1
+            idx = tasks[t]
+            try:
+                text = t.result()
+            except Exception as e:
+                logger.info("读页任务异常: %s", e)
+                continue
+            if text:
+                out[idx]["page_text"] = text
+                out[idx]["read_ok"] = True
+                meta["ok"] += 1
+
+    first, rest = indices[:top_n], indices[top_n:]
+    await _run_batch(first)
+    while meta["ok"] < top_n and rest:
+        if _OVERALL_DEADLINE_SECONDS - (time.monotonic() - started) <= 0.4:
+            break
+        take = min(top_n - meta["ok"], 3)
+        batch, rest = rest[:take], rest[take:]
+        await _run_batch(batch)
     return out, meta

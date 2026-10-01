@@ -145,14 +145,95 @@ def _rerank_web_results(query: str, results: list[dict]) -> tuple[list[dict], di
         proxy = _web_search_proxy()
         if proxy:
             client_kwargs["proxy"] = proxy
-        with httpx.Client(**client_kwargs) as client:
-            resp = client.post(
+        # 博查重排与 KB 重排共享全局配额门（跨副本；等待超时/熔断按失败敞开处理）
+        from app.utils.upstream_quota import rerank_quota
+
+        with rerank_quota().hold_sync():
+            with httpx.Client(**client_kwargs) as client:
+                resp = client.post(
+                    endpoint,
+                    headers={
+                        "Authorization": f"Bearer {_bocha_api_key()}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+                body = resp.json()
+        if isinstance(body, dict):
+            code = body.get("code")
+            if code not in (None, 200, 0, "200", "0"):
+                msg = body.get("msg") or body.get("message") or ""
+                raise RuntimeError(f"博查重排失败 code={code} {msg}".strip())
+        ranked_raw = _parse_rerank_results(body)
+        if not ranked_raw:
+            raise RuntimeError("empty_rerank_results")
+        kept: list[dict] = []
+        for row in ranked_raw:
+            idx = row.get("index")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(results):
+                continue
+            score = row.get("relevance_score")
+            try:
+                score_f = float(score)
+            except (TypeError, ValueError):
+                continue
+            if score_f < min_score:
+                continue
+            item = dict(results[idx])
+            item["rerank_score"] = score_f
+            kept.append(item)
+        meta["applied"] = True
+        return kept, meta
+    except Exception as e:
+        logger.warning("博查 rerank 失败，按召回原序交给后续排序: %s", e)
+        meta["error"] = str(e)[:300]
+        meta["fallback"] = True
+        return results, meta
+
+
+async def _arerank_web_results(query: str, results: list[dict]) -> tuple[list[dict], dict]:
+    """
+    异步版 _rerank_web_results（P2：共享 AsyncClient + 全局重排配额门；失败敞开原序）。
+    :return: (ranked_or_fallback, meta)
+    """
+    meta: dict = {"applied": False, "error": None, "fallback": False}
+    if not results:
+        return [], meta
+    if not _rerank_enabled():
+        return results, meta
+
+    endpoint = (
+        (getattr(settings, "WEB_SEARCH_RERANK_ENDPOINT", "") or "").strip()
+        or _DEFAULT_RERANK_ENDPOINT
+    )
+    model = (getattr(settings, "WEB_SEARCH_RERANK_MODEL", "") or "").strip() or "gte-rerank"
+    timeout = max(3, int(getattr(settings, "WEB_SEARCH_RERANK_TIMEOUT_SECONDS", 10) or 10))
+    min_score = float(getattr(settings, "WEB_SEARCH_RERANK_MIN_SCORE", 0.2) or 0.0)
+
+    from app.chat.web_search_providers import _shared_async_client
+    from app.utils.upstream_quota import rerank_quota
+
+    try:
+        documents = [_build_rerank_document(item) for item in results]
+        payload = {
+            "model": model,
+            "query": query,
+            "documents": documents,
+            "top_n": len(documents),
+            "return_documents": False,
+        }
+        client = _shared_async_client(f"bocha_rerank:{endpoint}", proxy=_web_search_proxy())
+        async with rerank_quota().acquire():
+            resp = await client.post(
                 endpoint,
                 headers={
                     "Authorization": f"Bearer {_bocha_api_key()}",
                     "Content-Type": "application/json",
                 },
                 json=payload,
+                timeout=timeout,
             )
             if resp.status_code >= 400:
                 raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")

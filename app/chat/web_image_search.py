@@ -11,6 +11,7 @@ Provider：
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -155,6 +156,8 @@ from app.chat.web_search_providers import (  # noqa: E402
     _normalize_ddgs_region,
     _normalize_site,
     _resolve_ddgs_backend,
+    _shared_async_client,
+    _unique_queries,
     _web_search_proxy,
 )
 
@@ -441,6 +444,37 @@ def _post_vl_rerank(
     return resp.status_code, text, items
 
 
+async def _apost_vl_rerank(
+    client,
+    *,
+    endpoint: str,
+    headers: dict,
+    model: str,
+    query: str,
+    documents: list[dict],
+    timeout: float | None = None,
+) -> tuple[int, str, list]:
+    """异步版 _post_vl_rerank（共享 AsyncClient；返回结构与同步版一致）。"""
+    payload = {
+        "model": model,
+        "input": {"query": {"text": query}, "documents": documents},
+        "parameters": {"top_n": len(documents), "return_documents": False},
+    }
+    post_kwargs: dict = {"headers": headers, "json": payload}
+    if timeout is not None:
+        post_kwargs["timeout"] = timeout
+    resp = await client.post(endpoint, **post_kwargs)
+    raw_text = getattr(resp, "text", None)
+    text = raw_text[:500] if isinstance(raw_text, str) else ""
+    if resp.status_code >= 400:
+        return resp.status_code, text, []
+    body = resp.json()
+    items = (body.get("output") or {}).get("results") if isinstance(body, dict) else None
+    if not isinstance(items, list) or not items:
+        return resp.status_code, text or "empty_rerank_results", []
+    return resp.status_code, text, items
+
+
 def _rerank_web_images(query: str, results: list[dict]) -> tuple[list[dict], dict]:
     """
     DashScope qwen3-vl-rerank：query 文本 + https 原图 URL。
@@ -577,6 +611,139 @@ def _rerank_web_images(query: str, results: list[dict]) -> tuple[list[dict], dic
         return [dict(item) for item in results], meta
 
 
+async def _arerank_web_images(query: str, results: list[dict]) -> tuple[list[dict], dict]:
+    """
+    异步版 _rerank_web_images（P2：共享 AsyncClient；逐张重试/超时预算语义与同步版一致）。
+    取消信号 CancelledError 不经 except Exception 吞掉，正常向上传播。
+    """
+    meta: dict = {
+        "applied": False,
+        "fallback": False,
+        "error": None,
+        "skipped": None,
+        "skipped_bad": 0,
+    }
+    if not results:
+        return results, meta
+    if not _image_vl_rerank_enabled():
+        meta["skipped"] = "disabled"
+        return results, meta
+
+    import httpx
+
+    started = time.monotonic()
+    model = (getattr(settings, "RERANK_MODEL", None) or "").strip()
+    key = (getattr(settings, "RERANK_API_KEY", None) or "").strip()
+    endpoint = _dashscope_rerank_endpoint()
+    if not endpoint:
+        meta["skipped"] = "no_endpoint"
+        return results, meta
+
+    cap = max(1, min(40, int(getattr(settings, "RERANK_MAX_CANDIDATES", 30) or 30)))
+    out = [dict(item) for item in results]
+    send_idx: list[int] = []
+    documents: list[dict] = []
+    for i, item in enumerate(out):
+        url = (item.get("contentUrl") or "").strip()
+        if not _is_https_url(url):
+            continue
+        if len(documents) >= cap:
+            break
+        send_idx.append(i)
+        documents.append({"image": url})
+    if not documents:
+        meta["skipped"] = "no_https"
+        return out, meta
+
+    timeout = max(5, int(getattr(settings, "RERANK_TIMEOUT_SECONDS", 15) or 15))
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    client = _shared_async_client(f"dashscope_rerank:{endpoint}", proxy=_web_search_proxy())
+
+    def _finish_applied(wrote: int, skipped_bad: int) -> tuple[list[dict], dict]:
+        if wrote <= 0:
+            meta["fallback"] = True
+            meta["error"] = meta.get("error") or "empty_rerank_results"
+            return [dict(item) for item in results], meta
+        meta["applied"] = True
+        meta["skipped_bad"] = skipped_bad
+        return out, meta
+
+    try:
+        status, text, items = await _apost_vl_rerank(
+            client,
+            endpoint=endpoint,
+            headers=headers,
+            model=model,
+            query=query,
+            documents=documents,
+            timeout=timeout,
+        )
+        if items:
+            wrote = _apply_vl_rerank_rows(out, send_idx, items)
+            return _finish_applied(wrote, 0)
+        if status == 0:
+            raise RuntimeError(text or "empty_rerank_results")
+        # 整批超时不再逐张，避免把延迟拉满
+        err_msg = f"HTTP {status}: {text}" if status >= 400 else (text or "empty_rerank_results")
+        if not _is_vl_download_url_error(status, text):
+            raise RuntimeError(err_msg)
+        logger.info("搜图 VL 整批拉图失败，改为逐张重试: %s", err_msg[:200])
+        wrote = 0
+        skipped_bad = 0
+        retried = 0
+        for local_i, doc in enumerate(documents):
+            remaining = _VL_RETRY_BUDGET_SECONDS - (time.monotonic() - started)
+            if remaining < _VL_RETRY_MIN_REMAINING or retried >= _VL_RETRY_MAX_IMAGES:
+                skipped_bad += len(documents) - local_i
+                break
+            retried += 1
+            per_timeout = min(float(timeout), max(1.0, remaining))
+            try:
+                st, body, rows = await _apost_vl_rerank(
+                    client,
+                    endpoint=endpoint,
+                    headers=headers,
+                    model=model,
+                    query=query,
+                    documents=[doc],
+                    timeout=per_timeout,
+                )
+            except httpx.TimeoutException:
+                skipped_bad += 1
+                continue
+            except Exception:
+                skipped_bad += 1
+                continue
+            if rows:
+                wrote += _apply_vl_rerank_rows(
+                    out, send_idx, rows, index_map=[send_idx[local_i]]
+                )
+                continue
+            if _is_vl_download_url_error(st, body) or st >= 400:
+                skipped_bad += 1
+                continue
+            skipped_bad += 1
+        if wrote <= 0:
+            meta["error"] = err_msg[:300]
+            meta["skipped_bad"] = skipped_bad
+            meta["fallback"] = True
+            return [dict(item) for item in results], meta
+        return _finish_applied(wrote, skipped_bad)
+    except httpx.TimeoutException as e:
+        logger.warning("搜图 VL rerank 超时，按召回原序: %s", e)
+        meta["error"] = str(e)[:300]
+        meta["fallback"] = True
+        return [dict(item) for item in results], meta
+    except Exception as e:
+        logger.warning("搜图 VL rerank 失败，按召回原序: %s", e)
+        meta["error"] = str(e)[:300]
+        meta["fallback"] = True
+        return [dict(item) for item in results], meta
+
+
 def _rank_image_results(query: str, results: list[dict]) -> list[dict]:
     """先丢掉过小图（若还有更大图），再按视觉相关分 + 来源权威度 + 尺寸融合，聚合站靠后。"""
     top_k = _image_max_results()
@@ -630,6 +797,23 @@ def _prepare_ranked_images(query: str, results: list[dict]) -> list[dict]:
     pool = _drop_already_shown_images(_dedupe_images(results))
     pool = _filter_tiny_images(pool)
     pool, meta = _rerank_web_images(query, pool)
+    if meta.get("fallback"):
+        emit_rag_step("⚠️", "重排失败，已按原序", "")
+    elif meta.get("applied"):
+        n_scored = sum(1 for x in pool if x.get("rerank_score") is not None)
+        skipped = int(meta.get("skipped_bad") or 0)
+        detail = f"{n_scored} 条"
+        if skipped:
+            detail += f"（跳过 {skipped} 条坏链）"
+        emit_rag_step("📑", "图片语义重排", detail)
+    return _rank_image_results(query, pool)
+
+
+async def _aprepare_ranked_images(query: str, results: list[dict]) -> list[dict]:
+    """异步版 _prepare_ranked_images（本轮去重 → 过小图过滤 → VL 重排 → 权威度融合截断）。"""
+    pool = _drop_already_shown_images(_dedupe_images(results))
+    pool = _filter_tiny_images(pool)
+    pool, meta = await _arerank_web_images(query, pool)
     if meta.get("fallback"):
         emit_rag_step("⚠️", "重排失败，已按原序", "")
     elif meta.get("applied"):
@@ -726,6 +910,46 @@ def _search_images_with_ddgs(query: str, max_results: int, timeout: int) -> list
     return out
 
 
+async def _asearch_images_with_bocha(query: str, max_results: int, timeout: int) -> list[dict]:
+    """异步版 _search_images_with_bocha（共享 AsyncClient；只消费 images 列表）。"""
+    key = _bocha_api_key()
+    if not key:
+        raise RuntimeError("未配置 WEB_SEARCH_BOCHA_API_KEY")
+    endpoint = (
+        (getattr(settings, "WEB_SEARCH_BOCHA_ENDPOINT", "") or "").strip()
+        or _DEFAULT_BOCHA_ENDPOINT
+    )
+    count = max(1, min(50, int(max_results)))
+    client = _shared_async_client(f"bocha:{endpoint}", proxy=_web_search_proxy())
+    resp = await client.post(
+        endpoint,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "query": query,
+            "count": count,
+            "summary": True,
+            "freshness": "noLimit",
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    if isinstance(payload, dict):
+        code = payload.get("code")
+        if code not in (None, 200, 0, "200", "0"):
+            msg = payload.get("msg") or payload.get("message") or ""
+            raise RuntimeError(f"博查搜图失败 code={code} {msg}".strip())
+    return _parse_bocha_images(payload)
+
+
+async def _asearch_images_with_ddgs(query: str, max_results: int, timeout: int) -> list[dict]:
+    """异步版 ddgs 搜图：库无异步接口，整体在线程中执行（不阻塞事件循环）。"""
+    return await asyncio.to_thread(_search_images_with_ddgs, query, max_results, timeout)
+
+
 def _run_image_search(query: str) -> tuple[list[dict], str]:
     """
     按 WEB_SEARCH_PROVIDER 调度图片检索（不做 bing_html、不走网页 rerank/读页）。
@@ -776,15 +1000,7 @@ def _run_image_search(query: str) -> tuple[list[dict], str]:
 
 def _run_image_searches(queries: list[str]) -> tuple[list[dict], str]:
     """最多两路并行搜图，按 contentUrl 去重后截断。"""
-    qs = [q.strip() for q in queries if (q or "").strip()]
-    seen_q: set[str] = set()
-    uniq: list[str] = []
-    for q in qs:
-        key = q.casefold()
-        if key not in seen_q:
-            seen_q.add(key)
-            uniq.append(q)
-    uniq = uniq[:2]
+    uniq = _unique_queries(queries)
     if not uniq:
         return [], ""
     if len(uniq) == 1:
@@ -805,6 +1021,75 @@ def _run_image_searches(queries: list[str]) -> tuple[list[dict], str]:
                 merged.extend(results)
                 provider = provider or prov
     return _prepare_ranked_images(uniq[0], _dedupe_images(merged)), provider or "none"
+
+
+async def _arun_image_search(query: str) -> tuple[list[dict], str]:
+    """异步版 _run_image_search（provider 优先级与同步版逐行对齐）。"""
+    provider = (getattr(settings, "WEB_SEARCH_PROVIDER", "auto") or "auto").strip().lower()
+    candidate_n = _image_candidate_count()
+    timeout = int(settings.WEB_SEARCH_TIMEOUT_SECONDS)
+
+    async def _try_bocha() -> tuple[list[dict], str] | None:
+        if not _bocha_api_key():
+            return None
+        try:
+            results = _dedupe_images(await _asearch_images_with_bocha(query, candidate_n, timeout))
+            if results:
+                return results, "bocha"
+            logger.info("博查搜图结果经 https/去重后为空")
+        except Exception as e:
+            logger.warning("博查搜图失败: %s", e)
+        return None
+
+    async def _try_ddgs() -> tuple[list[dict], str] | None:
+        try:
+            results = _dedupe_images(await _asearch_images_with_ddgs(query, candidate_n, timeout))
+            if results:
+                return results, "ddgs"
+            logger.info("ddgs 搜图结果经 https/去重后为空")
+        except Exception as e:
+            logger.warning("ddgs 搜图失败: %s", e)
+        return None
+
+    if provider == "ddgs":
+        results = _dedupe_images(await _asearch_images_with_ddgs(query, candidate_n, timeout))
+        return results, "ddgs"
+    if provider == "bocha":
+        results = _dedupe_images(await _asearch_images_with_bocha(query, candidate_n, timeout))
+        return results, "bocha"
+
+    hit = await _try_bocha()
+    if hit:
+        return hit
+    hit = await _try_ddgs()
+    if hit:
+        return hit
+    return [], "none"
+
+
+async def _arun_image_searches(queries: list[str]) -> tuple[list[dict], str]:
+    """异步版 _run_image_searches：两路 asyncio.gather 并行，按 contentUrl 去重后截断。"""
+    uniq = _unique_queries(queries)
+    if not uniq:
+        return [], ""
+    if len(uniq) == 1:
+        results, provider = await _arun_image_search(uniq[0])
+        return await _aprepare_ranked_images(uniq[0], results), provider
+
+    merged: list[dict] = []
+    provider = ""
+    outcomes = await asyncio.gather(
+        *(_arun_image_search(q) for q in uniq), return_exceptions=True
+    )
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException):
+            logger.warning("一路图片搜索失败: %s", outcome)
+            continue
+        results, prov = outcome
+        if results:
+            merged.extend(results)
+            provider = provider or prov
+    return await _aprepare_ranked_images(uniq[0], _dedupe_images(merged)), provider or "none"
 
 
 def _clean_image_title_text(title: str) -> str:
@@ -896,8 +1181,11 @@ def _merge_image_web_sources(new_sources: list[dict]) -> None:
         _set_last_rag_context(ctx)
 
 
-def make_web_image_search_tool() -> StructuredTool:
-    """文字搜图：返回现成 Markdown 图片行，供模型原样复制到回答中。"""
+def make_web_image_search_tool(*, prefer_async: bool = False) -> StructuredTool:
+    """文字搜图：返回现成 Markdown 图片行，供模型原样复制到回答中。
+
+    :param prefer_async: True 时注册 coroutine 版（对话异步 Agent 专用）
+    """
 
     class _WebImageSearchArgs(BaseModel):
         query: str = Field(
@@ -914,7 +1202,7 @@ def make_web_image_search_tool() -> StructuredTool:
             ),
         )
 
-    def _web_image_search(query: str, extra_query: str | None = None) -> str:
+    def _guard_turn() -> str | None:
         if not is_web_search_allowed_this_turn():
             limit_msg = web_image_search_disabled_this_turn_msg()
             log_kb_tool_return_to_terminal(limit_msg, tool_label="web_image_search")
@@ -927,39 +1215,26 @@ def make_web_image_search_tool() -> StructuredTool:
             )
             log_kb_tool_return_to_terminal(limit_msg, tool_label="web_image_search")
             return limit_msg
+        return None
 
-        q = (query or "").strip()
-        if not q:
-            return "错误：query 为空。"
-
-        extra = (extra_query or "").strip()
-        detail = q + ("（双查询）" if extra else "")
-        emit_rag_step("🖼️", "图片搜索", detail)
-        try:
-            results, provider_used = _run_image_searches([q, extra])
-        except Exception as e:
-            logger.warning("图片搜索失败: %s", e)
-            emit_rag_step("⚠️", "图片搜索失败", "")
-            err_msg = (
-                "WEB_IMAGE_SEARCH_FAILED: 本次联网搜图失败，可稍后重试。"
-                "请如实告知用户；不得编造图片或图片链接。"
-            )
-            log_kb_tool_return_to_terminal(err_msg, tool_label="web_image_search")
-            return err_msg
-
-        emit_rag_step(
-            "🔍",
-            "图片搜索召回",
-            f"{len(results)} 条（{provider_used or 'none'}）",
+    def _fail_msg() -> str:
+        emit_rag_step("⚠️", "图片搜索失败", "")
+        err_msg = (
+            "WEB_IMAGE_SEARCH_FAILED: 本次联网搜图失败，可稍后重试。"
+            "请如实告知用户；不得编造图片或图片链接。"
         )
-        if not results:
-            empty_msg = (
-                "WEB_IMAGE_SEARCH_NO_RESULTS: 本次联网搜图未找到可用的 https 图片。"
-                "请如实告知用户未搜到相关图片（可建议换个关键词重试），不得编造图片或图片链接。"
-            )
-            log_kb_tool_return_to_terminal(empty_msg, tool_label="web_image_search")
-            return empty_msg
+        log_kb_tool_return_to_terminal(err_msg, tool_label="web_image_search")
+        return err_msg
 
+    def _empty_msg() -> str:
+        empty_msg = (
+            "WEB_IMAGE_SEARCH_NO_RESULTS: 本次联网搜图未找到可用的 https 图片。"
+            "请如实告知用户未搜到相关图片（可建议换个关键词重试），不得编造图片或图片链接。"
+        )
+        log_kb_tool_return_to_terminal(empty_msg, tool_label="web_image_search")
+        return empty_msg
+
+    def _finalize(results: list[dict]) -> str:
         image_sources: list[dict] = []
         for i, item in enumerate(results, start=1):
             title = _image_display_title(item)
@@ -980,9 +1255,65 @@ def make_web_image_search_tool() -> StructuredTool:
         _merge_image_web_sources(image_sources)
         return out
 
-    return StructuredTool.from_function(
-        name="web_image_search",
-        description=(
+    def _web_image_search(query: str, extra_query: str | None = None) -> str:
+        early = _guard_turn()
+        if early is not None:
+            return early
+
+        q = (query or "").strip()
+        if not q:
+            return "错误：query 为空。"
+
+        extra = (extra_query or "").strip()
+        detail = q + ("（双查询）" if extra else "")
+        emit_rag_step("🖼️", "图片搜索", detail)
+        try:
+            results, provider_used = _run_image_searches([q, extra])
+        except Exception as e:
+            logger.warning("图片搜索失败: %s", e)
+            return _fail_msg()
+
+        emit_rag_step(
+            "🔍",
+            "图片搜索召回",
+            f"{len(results)} 条（{provider_used or 'none'}）",
+        )
+        if not results:
+            return _empty_msg()
+
+        return _finalize(results)
+
+    async def _aweb_image_search(query: str, extra_query: str | None = None) -> str:
+        early = _guard_turn()
+        if early is not None:
+            return early
+
+        q = (query or "").strip()
+        if not q:
+            return "错误：query 为空。"
+
+        extra = (extra_query or "").strip()
+        detail = q + ("（双查询）" if extra else "")
+        emit_rag_step("🖼️", "图片搜索", detail)
+        try:
+            results, provider_used = await _arun_image_searches([q, extra])
+        except Exception as e:
+            logger.warning("图片搜索失败: %s", e)
+            return _fail_msg()
+
+        emit_rag_step(
+            "🔍",
+            "图片搜索召回",
+            f"{len(results)} 条（{provider_used or 'none'}）",
+        )
+        if not results:
+            return _empty_msg()
+
+        return _finalize(results)
+
+    options = {
+        "name": "web_image_search",
+        "description": (
             "联网文字搜图（公开 https 图片）。"
             "何时使用：用户需要配图、外观、示例图、某角色/物品的其它图。"
             "何时不要使用：查新闻/事实/价格/版本等文字信息请用 web_search；用户给出具体网页请用 fetch_url。"
@@ -994,8 +1325,10 @@ def make_web_image_search_tool() -> StructuredTool:
             "禁止改写成 /api/v1/media/、禁止编造或改写括号内图片地址；看不清或工具失败时如实说明。"
             "调用约束：同一用户提问轮次内调用次数有限。"
         ),
-        args_schema=_WebImageSearchArgs,
-        func=_web_image_search,
-    )
+        "args_schema": _WebImageSearchArgs,
+    }
+    if prefer_async:
+        return StructuredTool.from_function(coroutine=_aweb_image_search, **options)
+    return StructuredTool.from_function(func=_web_image_search, **options)
 
 

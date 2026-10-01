@@ -204,6 +204,30 @@ def build_pinned_clients(
     return sync_client, async_client
 
 
+def build_pinned_async_client(
+    url: str,
+    *,
+    timeout: httpx.Timeout | float | None = None,
+    verify: bool | str = True,
+) -> httpx.AsyncClient:
+    """异步 pinned client（联网搜索读页/搜索专用；同步路径不要创建 AsyncClient）。"""
+    upstream = validate_public_http_url(url)
+    from app.settings import settings
+
+    limits = _http_pool_limits()
+    if not bool(getattr(settings, "EGRESS_PIN_DNS", True)):
+        return httpx.AsyncClient(
+            timeout=timeout, verify=verify, trust_env=False, follow_redirects=False, limits=limits
+        )
+    return httpx.AsyncClient(
+        transport=PinnedAsyncHTTPTransport(upstream, verify=verify),
+        timeout=timeout,
+        trust_env=False,
+        follow_redirects=False,
+        limits=limits,
+    )
+
+
 def build_mcp_httpx_client_factory(url: str):
     upstream = validate_public_http_url(url)
     from app.settings import settings
@@ -297,6 +321,67 @@ async def close_pinned_llm_clients() -> None:
             pass
         try:
             await async_client.aclose()
+        except Exception:
+            pass
+
+
+# 进程级联网搜索出站 AsyncClient 注册表：读页目标 host 不固定，
+# 高并发下每请求新建连接池会造成重复握手/fd 压力，按 scheme://host:port 复用。
+# LRU 淘汰项不主动 aclose（acclose 为异步，淘汰发生在同步锁内），后台连接交给 GC。
+_ASYNC_HTTP_CLIENT_CACHE: OrderedDict[str, httpx.AsyncClient] = OrderedDict()
+_ASYNC_HTTP_CLIENT_CACHE_LOCK = threading.Lock()
+_ASYNC_HTTP_CLIENT_CACHE_MAX = 64
+
+
+def _async_http_cache_key(url: str) -> str:
+    import asyncio
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    try:
+        # AsyncClient 与事件循环绑定：跨 loop 复用会报 "Event loop is closed"
+        # （本地脚本/测试多次 asyncio.run 场景），key 须含 loop（与异步 DB 引擎每 loop 缓存同思路）
+        loop_id = id(asyncio.get_running_loop())
+    except RuntimeError:
+        loop_id = 0
+    return f"{loop_id}|{parsed.scheme}://{parsed.netloc}"
+
+
+def get_or_build_pinned_async_client(
+    url: str,
+    *,
+    timeout: httpx.Timeout | float | None = None,
+) -> httpx.AsyncClient:
+    """按 host 复用异步 pinned 客户端（读页/联网搜索异步链专用）。"""
+    key = _async_http_cache_key(url)
+    with _ASYNC_HTTP_CLIENT_CACHE_LOCK:
+        cached = _ASYNC_HTTP_CLIENT_CACHE.get(key)
+        if cached is not None:
+            _ASYNC_HTTP_CLIENT_CACHE.move_to_end(key)
+            return cached
+    # 建连（含 DNS 校验）放在锁外，避免阻塞其它调用
+    client = build_pinned_async_client(url, timeout=timeout)
+    with _ASYNC_HTTP_CLIENT_CACHE_LOCK:
+        cached = _ASYNC_HTTP_CLIENT_CACHE.get(key)
+        if cached is not None:
+            _ASYNC_HTTP_CLIENT_CACHE.move_to_end(key)
+            # 竞态落败：新建 client 尚未使用，交给 GC
+            return cached
+        _ASYNC_HTTP_CLIENT_CACHE[key] = client
+        _ASYNC_HTTP_CLIENT_CACHE.move_to_end(key)
+        while len(_ASYNC_HTTP_CLIENT_CACHE) > _ASYNC_HTTP_CLIENT_CACHE_MAX:
+            _ASYNC_HTTP_CLIENT_CACHE.popitem(last=False)
+    return client
+
+
+async def close_pinned_async_http_clients() -> None:
+    """关停时统一 aclose 联网搜索出站客户端（挂到 lifespan 收尾）。"""
+    with _ASYNC_HTTP_CLIENT_CACHE_LOCK:
+        items = list(_ASYNC_HTTP_CLIENT_CACHE.values())
+        _ASYNC_HTTP_CLIENT_CACHE.clear()
+    for client in items:
+        try:
+            await client.aclose()
         except Exception:
             pass
 

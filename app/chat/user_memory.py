@@ -18,12 +18,13 @@ import re
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import or_
+from sqlalchemy import delete, func, or_, select
 
 from app.chat.context_budget import estimate_tokens
-from app.chat.database import SessionLocal
+from app.chat.database import SessionLocal, get_async_session
 from app.chat.db_models import ChatUserMemory
 from app.settings import settings
+from app.utils.async_compat import sync_fallback_fn
 
 logger = logging.getLogger(__name__)
 
@@ -337,3 +338,183 @@ def purge_user_memory_for_agent(agent_id: int) -> int:
         return 0
     finally:
         db.close()
+
+
+# ================================================================
+# P2：异步长期记忆（对话异步 Agent 专用；纯 PG IO，真异步零线程）
+# 同步路径（/chat、压缩摘要线程）继续用上方同步实现；两边语义对齐。
+# ================================================================
+
+
+async def _aenforce_cap(adb: Any, user_id: int, agent_id: int) -> None:
+    """异步版 _enforce_cap：超上限按 updated_at 删最旧。"""
+    cap = _int_setting("CHAT_MEMORY_USER_FACT_MAX", 500)
+    if cap <= 0:
+        return
+    base_where = (
+        ChatUserMemory.user_id == int(user_id),
+        ChatUserMemory.agent_id == int(agent_id),
+    )
+    total = int(
+        (await adb.execute(select(func.count(ChatUserMemory.id)).where(*base_where))).scalar() or 0
+    )
+    if total <= cap:
+        return
+    victims = (
+        await adb.execute(
+            select(ChatUserMemory.id)
+            .where(*base_where)
+            .order_by(ChatUserMemory.updated_at.asc(), ChatUserMemory.id.asc())
+            .limit(total - cap)
+        )
+    ).all()
+    ids = [int(v[0]) for v in victims]
+    if ids:
+        await adb.execute(delete(ChatUserMemory).where(ChatUserMemory.id.in_(ids)))
+        await adb.commit()
+
+
+@sync_fallback_fn(store_user_facts)
+async def astore_user_facts(
+    user_id: int,
+    agent_id: int,
+    facts: list[dict[str, Any]],
+    *,
+    session_id: str = "",
+) -> dict[str, int]:
+    """异步版 store_user_facts（槽位 upsert + 行锁 + 两段 commit 语义复刻）。"""
+    out = {"inserted": 0, "skipped": 0, "updated": 0}
+    if not getattr(settings, "CHAT_USER_MEMORY_ENABLED", True):
+        return out
+    normalized = [f for f in (normalize_fact(x) for x in (facts or [])) if f]
+    if not normalized:
+        return out
+    by_key = {f["fact_key"]: f for f in normalized}
+
+    adb = get_async_session()
+    try:
+        now = datetime.utcnow()
+        for key, fact in by_key.items():
+            row = (
+                await adb.execute(
+                    select(ChatUserMemory)
+                    .where(
+                        ChatUserMemory.user_id == int(user_id),
+                        ChatUserMemory.agent_id == int(agent_id),
+                        ChatUserMemory.fact_key == key,
+                    )
+                    .with_for_update()
+                )
+            ).scalars().first()
+            if row is None:
+                adb.add(
+                    ChatUserMemory(
+                        user_id=int(user_id),
+                        agent_id=int(agent_id),
+                        fact_key=key,
+                        fact_type=fact["type"],
+                        subject=fact["subject"],
+                        content=fact["content"],
+                        why=fact["why"],
+                        how_to_apply=fact["how_to_apply"],
+                        content_hash=fact["content_hash"],
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                out["inserted"] += 1
+            elif str(row.content_hash or "") == fact["content_hash"]:
+                out["skipped"] += 1
+            else:
+                row.fact_type = fact["type"]
+                row.subject = fact["subject"]
+                row.content = fact["content"]
+                row.why = fact["why"]
+                row.how_to_apply = fact["how_to_apply"]
+                row.content_hash = fact["content_hash"]
+                row.updated_at = now
+                out["updated"] += 1
+        await adb.commit()
+        await _aenforce_cap(adb, int(user_id), int(agent_id))
+    except Exception:
+        await adb.rollback()
+        logger.exception("astore_user_facts failed session=%s", session_id)
+        return {"inserted": 0, "skipped": 0, "updated": 0}
+    finally:
+        await adb.close()
+    return out
+
+
+@sync_fallback_fn(list_user_facts)
+async def alist_user_facts(
+    user_id: int, agent_id: int, *, keyword: str = "", limit: int | None = None
+) -> list[dict[str, Any]]:
+    """异步版 list_user_facts（keyword 模糊匹配语义一致）。"""
+    max_items = max(1, int(limit or _int_setting("CHAT_MEMORY_READ_MAX_ITEMS", 50)))
+    adb = get_async_session()
+    try:
+        q = select(ChatUserMemory).where(
+            ChatUserMemory.user_id == int(user_id),
+            ChatUserMemory.agent_id == int(agent_id),
+        )
+        kw = (keyword or "").strip()
+        if kw:
+            like = f"%{kw}%"
+            q = q.where(
+                or_(
+                    ChatUserMemory.subject.ilike(like),
+                    ChatUserMemory.content.ilike(like),
+                    ChatUserMemory.why.ilike(like),
+                    ChatUserMemory.how_to_apply.ilike(like),
+                )
+            )
+        rows = (
+            (
+                await adb.execute(
+                    q.order_by(ChatUserMemory.updated_at.desc(), ChatUserMemory.id.desc()).limit(max_items)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return [_row_to_dict(r) for r in rows]
+    except Exception:
+        logger.exception("alist_user_facts failed")
+        return []
+    finally:
+        await adb.close()
+
+
+@sync_fallback_fn(delete_user_facts)
+async def adelete_user_facts(
+    user_id: int, agent_id: int, *, keyword: str = "", all: bool = False
+) -> int:
+    """异步版 delete_user_facts（all/关键词删除语义一致）。"""
+    kw = (keyword or "").strip()
+    if not all and not kw:
+        return 0
+    adb = get_async_session()
+    try:
+        conds = [
+            ChatUserMemory.user_id == int(user_id),
+            ChatUserMemory.agent_id == int(agent_id),
+        ]
+        if not all:
+            like = f"%{kw}%"
+            conds.append(
+                or_(
+                    ChatUserMemory.subject.ilike(like),
+                    ChatUserMemory.content.ilike(like),
+                    ChatUserMemory.why.ilike(like),
+                    ChatUserMemory.how_to_apply.ilike(like),
+                )
+            )
+        result = await adb.execute(delete(ChatUserMemory).where(*conds))
+        await adb.commit()
+        return int(result.rowcount or 0)
+    except Exception:
+        await adb.rollback()
+        logger.exception("adelete_user_facts failed")
+        return 0
+    finally:
+        await adb.close()

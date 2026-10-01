@@ -53,6 +53,17 @@ def read_path_turns(user_id: int, agent_id: int, session_id: str) -> list[dict[s
     :return: [{"turn_index", "turn_key", "user", "assistant", "error"}]
     """
     records = storage.get_session_messages(user_id, agent_id, session_id)
+    return _turns_from_records(records)
+
+
+async def aread_path_turns(user_id: int, agent_id: int, session_id: str) -> list[dict[str, Any]]:
+    """异步版 read_path_turns（P2：对话异步 Agent 专用；Redis/PG 走异步客户端）。"""
+    records = await storage.aget_session_messages(user_id, agent_id, session_id)
+    return _turns_from_records(records)
+
+
+def _turns_from_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """由消息记录切分轮次（同步/异步共用；纯 CPU 轻量）。"""
     turns: list[dict[str, Any]] = []
     cur: dict[str, Any] | None = None
     for rec in records:
@@ -144,15 +155,16 @@ def render_history(
     return "\n\n".join(lines)
 
 
-def make_session_history_tools(user_id: int, agent_id: int, session_id: str) -> list:
-    """构造 read_session_history 工具（每轮限用 2 次，防止模型反复翻库）。"""
+def make_session_history_tools(
+    user_id: int, agent_id: int, session_id: str, *, prefer_async: bool = False
+) -> list:
+    """构造 read_session_history 工具（每轮限用 2 次，防止模型反复翻库）。
 
-    def _read_session_history(
-        from_turn: int | None = None,
-        to_turn: int | None = None,
-        keyword: str = "",
-        max_chars: int = _DEFAULT_MAX_CHARS,
-    ) -> str:
+    P2：``prefer_async=True`` 时注册 coroutine 版（对话异步 Agent；
+    消息读取走异步存储客户端，Redis 键与 PG 查询零线程占用）。
+    """
+
+    def _guard() -> str | None:
         limit_msg = (
             "TOOL_CALL_LIMIT_REACHED: read_session_history 本轮调用次数已用完，"
             "请基于已取得的原文直接作答。"
@@ -160,18 +172,38 @@ def make_session_history_tools(user_id: int, agent_id: int, session_id: str) -> 
         if not try_acquire_history_tool_slot(_int_setting("CHAT_HISTORY_TOOL_MAX_CALLS", 2)):
             log_kb_tool_return_to_terminal(limit_msg, tool_label="read_session_history")
             return limit_msg
+        return None
+
+    def _render(
+        turns: list[dict[str, Any]],
+        from_turn: int | None,
+        to_turn: int | None,
+        keyword: str,
+        max_chars: int,
+    ) -> str:
+        return render_history(
+            turns,
+            from_turn=from_turn,
+            to_turn=to_turn,
+            keyword=keyword,
+            max_chars=min(max(500, int(max_chars or _DEFAULT_MAX_CHARS)), 40000),
+        )
+
+    def _read_session_history(
+        from_turn: int | None = None,
+        to_turn: int | None = None,
+        keyword: str = "",
+        max_chars: int = _DEFAULT_MAX_CHARS,
+    ) -> str:
+        early = _guard()
+        if early is not None:
+            return early
 
         label = (keyword or "").strip() or f"轮次 {from_turn}~{to_turn}"
         emit_rag_step("📜", "翻阅会话原文", label[:120])
         try:
             turns = read_path_turns(user_id, agent_id, session_id)
-            text = render_history(
-                turns,
-                from_turn=from_turn,
-                to_turn=to_turn,
-                keyword=keyword,
-                max_chars=min(max(500, int(max_chars or _DEFAULT_MAX_CHARS)), 40000),
-            )
+            text = _render(turns, from_turn, to_turn, keyword, max_chars)
         except Exception as e:  # noqa: BLE001
             logger.exception("read_session_history failed")
             emit_rag_step("⚠️", "翻阅会话原文失败", str(e)[:200])
@@ -180,19 +212,42 @@ def make_session_history_tools(user_id: int, agent_id: int, session_id: str) -> 
         log_kb_tool_return_to_terminal(text, tool_label="read_session_history")
         return text
 
-    return [
-        StructuredTool.from_function(
-            name="read_session_history",
-            description=(
-                "按轮次区间或关键词，从数据库读取**本会话较早轮次的逐字原文**（精确、可靠）。"
-                "何时使用：（1）对话摘要不够具体，需要原文里的代码、数字、表格、用户原话；"
-                "（2）摘要中标注了轮次编号，需要展开该轮完整内容；"
-                "（3）用户要求「把我之前发的那段原文再贴一次」。"
-                "轮次下标从 0 起，与压缩摘要中「覆盖轮次」的编号同一套。"
-                "参数：from_turn/to_turn 为闭区间轮次下标（都留空表示全部）；keyword 非空时改为关键词命中模式。"
-                "约束：同一用户提问轮次内最多成功调用 2 次；取得原文后请直接作答，不要反复翻阅。"
-                "跨会话的用户偏好/约束不在本工具范围，请用 read_user_memory。"
-            ),
-            func=_read_session_history,
-        )
-    ]
+    async def _aread_session_history(
+        from_turn: int | None = None,
+        to_turn: int | None = None,
+        keyword: str = "",
+        max_chars: int = _DEFAULT_MAX_CHARS,
+    ) -> str:
+        early = _guard()
+        if early is not None:
+            return early
+
+        label = (keyword or "").strip() or f"轮次 {from_turn}~{to_turn}"
+        emit_rag_step("📜", "翻阅会话原文", label[:120])
+        try:
+            turns = await aread_path_turns(user_id, agent_id, session_id)
+            text = _render(turns, from_turn, to_turn, keyword, max_chars)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("read_session_history failed")
+            emit_rag_step("⚠️", "翻阅会话原文失败", str(e)[:200])
+            text = f"读取会话原文出错：{e}"
+
+        log_kb_tool_return_to_terminal(text, tool_label="read_session_history")
+        return text
+
+    options = {
+        "name": "read_session_history",
+        "description": (
+            "按轮次区间或关键词，从数据库读取**本会话较早轮次的逐字原文**（精确、可靠）。"
+            "何时使用：（1）对话摘要不够具体，需要原文里的代码、数字、表格、用户原话；"
+            "（2）摘要中标注了轮次编号，需要展开该轮完整内容；"
+            "（3）用户要求「把我之前发的那段原文再贴一次」。"
+            "轮次下标从 0 起，与压缩摘要中「覆盖轮次」的编号同一套。"
+            "参数：from_turn/to_turn 为闭区间轮次下标（都留空表示全部）；keyword 非空时改为关键词命中模式。"
+            "约束：同一用户提问轮次内最多成功调用 2 次；取得原文后请直接作答，不要反复翻阅。"
+            "跨会话的用户偏好/约束不在本工具范围，请用 read_user_memory。"
+        ),
+    }
+    if prefer_async:
+        return [StructuredTool.from_function(coroutine=_aread_session_history, **options)]
+    return [StructuredTool.from_function(func=_read_session_history, **options)]

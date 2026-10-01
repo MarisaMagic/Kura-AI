@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from bisect import bisect_right # 二分查找
 from collections import Counter
 
-from app.chat.attachment_service import extract_attachment_plaintext
+from app.chat.attachment_service import (
+    AttachmentPlaintextExtract,
+    aextract_attachment_plaintext,
+    extract_attachment_plaintext,
+)
+from app.utils.async_compat import sync_fallback_fn
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]") # 中日韩字符正则表达式
 
@@ -185,7 +191,30 @@ def search_attachment_text_bm25(
     if err:
         return err
     assert ext is not None
+    return _render_bm25_result(
+        ext,
+        q,
+        top_k=top_k,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        expand_margin=expand_margin,
+        max_snippet_chars=max_snippet_chars,
+        max_index_chars=max_index_chars,
+    )
 
+
+def _render_bm25_result(
+    ext: AttachmentPlaintextExtract,
+    q: str,
+    *,
+    top_k: int = 5,
+    chunk_size: int = 800,
+    chunk_overlap: int = 120,
+    expand_margin: int = 200,
+    max_snippet_chars: int = 800,
+    max_index_chars: int = 500_000,
+) -> str:
+    """分块 BM25 打分并渲染扩窗片段（同步/异步共用；CPU 段）。"""
     text = ext.text
     truncated_note = ""
     if len(text) > max_index_chars:
@@ -232,3 +261,49 @@ def search_attachment_text_bm25(
         "提示：若需更多连续正文，可调用 read_session_attachment；长文档建议先本检索再按需精读。"
     )
     return "\n".join(lines).rstrip()
+
+
+@sync_fallback_fn(search_attachment_text_bm25)
+async def asearch_attachment_text_bm25(
+    attachment_id: str,
+    query: str,
+    *,
+    user_id: int,
+    agent_id: int,
+    session_id: str,
+    top_k: int = 5,
+    chunk_size: int = 800,
+    chunk_overlap: int = 120,
+    expand_margin: int = 200,
+    max_snippet_chars: int = 800,
+    max_index_chars: int = 500_000,
+) -> str:
+    """异步版 search_attachment_text_bm25（P2：对话异步 Agent 专用）。
+
+    附件抽取走异步服务（行查询 AsyncSession、对象存储 to_thread）；
+    分词/BM25 打分（jieba，CPU 段）在线程中执行，不阻塞事件循环。
+    """
+    q = (query or "").strip()
+    if not q:
+        return "错误：检索 query 为空。"
+
+    ext, err = await aextract_attachment_plaintext(
+        attachment_id.strip(),
+        user_id=user_id,
+        agent_id=agent_id,
+        session_id=session_id,
+    )
+    if err:
+        return err
+    assert ext is not None
+    return await asyncio.to_thread(
+        _render_bm25_result,
+        ext,
+        q,
+        top_k=top_k,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        expand_margin=expand_margin,
+        max_snippet_chars=max_snippet_chars,
+        max_index_chars=max_index_chars,
+    )

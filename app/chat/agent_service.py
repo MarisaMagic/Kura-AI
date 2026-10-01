@@ -314,11 +314,11 @@ def build_model_and_agent(
     kb_scope = kb_scope_for(ua.user_id, ua.id)
     llm_config = _sub_llm_config_from_ua(ua)
     tools: list[Any] = []
-    tools.extend(make_session_attachment_tools(user_id, agent_id, session_id))
+    tools.extend(make_session_attachment_tools(user_id, agent_id, session_id, prefer_async=async_tools))
     if getattr(settings, "WEB_SEARCH_ENABLED", True):
-        tools.append(make_web_search_tool())
-        tools.append(make_fetch_url_tool())
-        tools.append(make_web_image_search_tool())
+        tools.append(make_web_search_tool(prefer_async=async_tools))
+        tools.append(make_fetch_url_tool(prefer_async=async_tools))
+        tools.append(make_web_image_search_tool(prefer_async=async_tools))
     tools.append(
         make_search_knowledge_tool(
             kb_scope,
@@ -332,8 +332,8 @@ def build_model_and_agent(
     )
     if getattr(settings, "CHAT_USE_SESSION_MEMORY", True):
         if getattr(settings, "CHAT_USER_MEMORY_ENABLED", True):
-            tools.extend(make_user_memory_tools(user_id, agent_id))
-        tools.extend(make_session_history_tools(user_id, agent_id, session_id))
+            tools.extend(make_user_memory_tools(user_id, agent_id, prefer_async=async_tools))
+        tools.extend(make_session_history_tools(user_id, agent_id, session_id, prefer_async=async_tools))
     if extra_tools:
         tools.extend(extra_tools)
     tools = _sort_tools(tools)
