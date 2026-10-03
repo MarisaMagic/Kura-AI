@@ -304,11 +304,11 @@ docker compose -f docker-compose.prod.yml logs -f backend
 
 ### 部署形态
 
-Nginx 托管前端静态资源，并把 `/api/v1` 反代到 **4 个 backend 副本**（运行时 DNS 轮询实现负载均衡，SSE 事件存 Redis，订阅可落任意副本）；文档解析/向量化由独立的 **kb-worker 副本**消费 Redis 可靠队列，不与 API 争抢事件循环。
+Nginx 托管前端静态资源，并把 `/api/v1` 反代到 **4 个 backend 副本**（`upstream` + `server ... resolve` 动态解析 Docker DNS，`least_conn` 按活动连接数选副本，副本增减无需重载；SSE 事件存 Redis，订阅可落任意副本）；文档解析/向量化由独立的 **kb-worker 副本**消费 Redis 可靠队列，不与 API 争抢事件循环。
 
 ```
                       ┌────────────── Nginx (8088) ──────────────┐
-浏览器 ──► 静态资源    │  /api/v1  ──►  运行时 DNS 轮询 → backend ×4 │
+浏览器 ──► 静态资源    │  /api/v1  ──►  upstream+least_conn(resolve) → backend ×4 │
                       └──────────────────┬───────────────────────┘
                                          │
         ┌────────────────────────────────┼────────────────────────────────┐
@@ -332,7 +332,7 @@ Nginx 托管前端静态资源，并把 `/api/v1` 反代到 **4 个 backend 副�
 **3. 多副本安全**
 - 队列：`BRPOPLPUSH` 可靠出队 + 任务级处理锁（重复投递幂等）+ 原子 ack（只删自己那条）+ stale 回收分布式锁；
 - 会话锁/替换锁/限流均为 Redis 共享态，多副本语义一致；
-- nginx 以变量 `proxy_pass` 强制运行时解析 Docker DNS，副本增减无需重载。
+- nginx 用 `upstream { server backend:9999 resolve; }` 运行时解析 Docker DNS（副本增减无需重载），`least_conn` 选活动连接最少的副本，`max_fails/fail_timeout` 做被动健康检查，`keepalive` 复用后端连接。
 
 **4. 对话与检索链路全异步化（双轨设计）**
 - 检索链：`AsyncMilvusClient`（真协程 gRPC）+ DashScope `AioMultiModalEmbedding`（aiohttp）+ `httpx.AsyncClient` rerank + 异步 RAG 子图（`complex` 策略下 step-back/HyDE **并发生成**）；
