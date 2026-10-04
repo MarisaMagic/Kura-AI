@@ -3,7 +3,9 @@
 
 与 API 进程解耦后：
 - 解析/向量化不再抢占 API 事件循环与 GIL，接口在高负载下仍可响应；
-- 队列（Redis List，BRPOPLPUSH + processing 列表）提供背压与崩溃恢复；
+- 队列（默认 Redis Stream 消费者组：XREADGROUP 取任务、XACK+XDEL 确认、
+  XAUTOCLAIM 周期回收超时任务、投递计数超限转死信；亦可用 KB_UPLOAD_QUEUE_BACKEND=list
+  回退到旧 List + processing 可靠队列）提供背压与崩溃恢复；
 - 页面刷新/崩溃不影响已受理任务，处理进度照样写入 Redis 供前端查询。
 
 用法：python worker.py（或 docker compose 的 kb-worker 服务）。
@@ -11,7 +13,9 @@
 
 from __future__ import annotations
 
+import os
 import signal
+import socket
 import threading
 import time
 
@@ -19,6 +23,26 @@ from app.log import logger
 from app.settings import settings
 
 _stop = threading.Event()
+
+
+def _consumer_name(index: int) -> str:
+    """消费者名：主机-进程-线程，Stream 消费者组内唯一标识各 worker 线程。"""
+    return f"{socket.gethostname()}-{os.getpid()}-{index}"
+
+
+def _reclaim_interval() -> float:
+    """超时任务回收扫描间隔（秒）。"""
+    return max(5.0, float(getattr(settings, "KB_UPLOAD_RECLAIM_INTERVAL_SECONDS", 60) or 60))
+
+
+def _reclaim_once(consumer: str) -> int:
+    """执行一次超时任务回收（按后端分派），返回处理条目数。"""
+    from app.kb import kb_job
+
+    if kb_job.queue_backend() == "stream":
+        return kb_job.reclaim_stale_tasks(consumer)
+    stale = max(60, int(getattr(settings, "KB_UPLOAD_STALE_SECONDS", 900) or 900))
+    return kb_job.recover_stale_processing(stale)
 
 
 def _bootstrap() -> None:
@@ -58,23 +82,32 @@ def _bootstrap() -> None:
     try:
         from app.kb import kb_job
 
-        stale = max(60, int(getattr(settings, "KB_UPLOAD_STALE_SECONDS", 900) or 900))
-        kb_job.recover_stale_processing(stale)
+        if kb_job.queue_backend() == "stream":
+            # 建组（幂等）→ 迁移旧 List 在途任务 → 首次回收
+            kb_job.ensure_consumer_group()
+            moved = kb_job.migrate_list_to_stream()
+            if moved:
+                logger.info("旧 List 队列在途任务迁移至 Stream：{} 条", moved)
+            kb_job.reclaim_stale_tasks(_consumer_name(0))
+        else:
+            stale = max(60, int(getattr(settings, "KB_UPLOAD_STALE_SECONDS", 900) or 900))
+            kb_job.recover_stale_processing(stale)
     except Exception as e:  # noqa: BLE001
-        logger.warning("worker stale 任务回收失败: {}", e)
+        logger.warning("worker 队列初始化/回收失败: {}", e)
 
 
 def _run_one(worker_name: str) -> bool:
     """出队并执行一个任务；返回 False 表示队列空闲（用于退避）。"""
     from app.kb import kb_job
 
-    payload = kb_job.dequeue_task(timeout=3)
-    if not payload:
+    entry = kb_job.dequeue_task(timeout=3, consumer=worker_name)
+    if not entry:
         return False
+    token, payload = entry
     task_id = str(payload.get("task_id") or "")
     kind = str(payload.get("kind") or "kb_upload")
     if not task_id:
-        kb_job.ack_task(payload)
+        kb_job.ack_task(token)
         return True
     started = time.monotonic()
     try:
@@ -85,7 +118,7 @@ def _run_one(worker_name: str) -> bool:
     except Exception:  # noqa: BLE001
         logger.exception("{} 任务执行异常 task_id={}", worker_name, task_id)
     finally:
-        kb_job.ack_task(payload)
+        kb_job.ack_task(token)
     logger.info(
         "{} 任务完成 task_id={} 耗时={:.1f}s",
         worker_name,
@@ -96,10 +129,21 @@ def _run_one(worker_name: str) -> bool:
 
 
 def _worker_loop(index: int) -> None:
-    name = f"kb-worker-{index}"
+    name = _consumer_name(index)
     logger.info("{} 启动", name)
     idle = 0
+    next_reclaim = time.monotonic() + _reclaim_interval()
     while not _stop.is_set():
+        # 周期回收超时任务（stream: XAUTOCLAIM；list: processing 扫描），不依赖重启
+        now = time.monotonic()
+        if now >= next_reclaim:
+            next_reclaim = now + _reclaim_interval()
+            try:
+                recovered = _reclaim_once(name)
+                if recovered:
+                    logger.info("{} 回收超时任务 {} 条", name, recovered)
+            except Exception:  # noqa: BLE001
+                logger.exception("{} 超时任务回收异常", name)
         try:
             busy = _run_one(name)
         except Exception:  # noqa: BLE001

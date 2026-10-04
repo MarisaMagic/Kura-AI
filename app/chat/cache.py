@@ -341,6 +341,161 @@ class RedisCache:
         except Exception:
             return 0
 
+    # ---------------------------------------------------------------- Stream 队列原语
+
+    def xgroup_create(self, stream: str, group: str, start: str = "0") -> bool:
+        """创建消费者组（幂等：已存在 BUSYGROUP 视为成功）。
+
+        start="0" 使建组时流中存量条目可被消费——配合 ack 后 XDEL，
+        重启建组时流内仅剩未完成任务，正好被重新投递（即崩溃恢复）。
+        """
+        try:
+            self._get_client().xgroup_create(self._key(stream), group, start, mkstream=True)
+            return True
+        except Exception as e:
+            if "BUSYGROUP" in str(e):
+                return True
+            logger.warning("Redis xgroup_create 失败 stream={}: {}", stream, e)
+            return False
+
+    def xadd_json(self, stream: str, value: Any, maxlen: Optional[int] = None) -> Optional[str]:
+        """向 Stream 无条件追加一个 JSON 元素（死信等场景），返回消息 id。"""
+        try:
+            payload = json.dumps(value, ensure_ascii=False, default=str)
+            client = self._get_client()
+            if maxlen:
+                return client.xadd(
+                    self._key(stream), {"payload": payload}, maxlen=int(maxlen), approximate=True
+                )
+            return client.xadd(self._key(stream), {"payload": payload})
+        except Exception as e:
+            logger.warning("Redis xadd_json 失败 stream={}: {}", stream, e)
+            return None
+
+    # 原子「深度检查 + 入队」：XLEN 即未 ack 条目数（ack 时 XDEL），多副本下不超卖
+    _XADD_LIMITED_LUA = """
+    local depth = redis.call('XLEN', KEYS[1])
+    local maxd = tonumber(ARGV[2])
+    if maxd > 0 and depth >= maxd then
+      return false
+    end
+    return redis.call('XADD', KEYS[1], '*', 'payload', ARGV[1])
+    """
+
+    def xadd_limited_json(self, stream: str, value: Any, max_depth: int) -> Optional[str]:
+        """原子入队：流中未确认条目数达到 max_depth（<=0 不限制）时拒绝。
+
+        :return: 消息 id；超限或 Redis 不可用返回 None
+        """
+        try:
+            payload = json.dumps(value, ensure_ascii=False, default=str)
+            result = self._get_client().eval(
+                self._XADD_LIMITED_LUA, 1, self._key(stream), payload, str(int(max_depth))
+            )
+            return str(result) if result else None
+        except Exception as e:
+            logger.warning("Redis xadd_limited_json 失败 stream={}: {}", stream, e)
+            return None
+
+    def xreadgroup_json(
+        self, stream: str, group: str, consumer: str, block_ms: int = 0, count: int = 1
+    ) -> list[tuple[str, Any]]:
+        """消费者组阻塞读取新消息（'>' 仅投递未投递过的条目）；超时无消息返回 []。"""
+        try:
+            resp = self._get_client().xreadgroup(
+                group, consumer, {self._key(stream): ">"}, count=int(count), block=int(block_ms)
+            )
+        except Exception as e:
+            logger.warning("Redis xreadgroup_json 失败 stream={}: {}", stream, e)
+            return []
+        return self._parse_stream_entries(resp)
+
+    def xack_del(self, stream: str, group: str, msg_id: str) -> int:
+        """确认消息并原子删除（XACK+XDEL）；ack 后 XLEN 即未完成条目数。"""
+        lua = """
+        local acked = redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+        redis.call('XDEL', KEYS[1], ARGV[2])
+        return acked
+        """
+        try:
+            return int(self._get_client().eval(lua, 1, self._key(stream), group, str(msg_id)) or 0)
+        except Exception as e:
+            logger.warning("Redis xack_del 失败 stream={}: {}", stream, e)
+            return 0
+
+    def xautoclaim_json(
+        self, stream: str, group: str, consumer: str, min_idle_ms: int, count: int = 100
+    ) -> list[tuple[str, Any]]:
+        """回收持有者空闲超过 min_idle_ms 的待确认消息（投递计数递增），返回 [(id, payload)]。"""
+        out: list[tuple[str, Any]] = []
+        try:
+            client = self._get_client()
+            next_start = "0-0"
+            for _ in range(100):  # 防御性上限：cursor 异常时避免死循环
+                resp = client.xautoclaim(
+                    self._key(stream), group, consumer, int(min_idle_ms), next_start, count=int(count)
+                )
+                next_start = str(resp[0])
+                out.extend(self._parse_stream_entries([["_", resp[1] or []]]))
+                if next_start in ("0-0", "0") or not resp[1]:
+                    break
+        except Exception as e:
+            logger.warning("Redis xautoclaim_json 失败 stream={}: {}", stream, e)
+        return out
+
+    def xpending_count(self, stream: str, group: str) -> int:
+        """待确认（已投递未 ack）消息数。"""
+        try:
+            resp = self._get_client().xpending(self._key(stream), group)
+            if isinstance(resp, dict):
+                return int(resp.get("pending") or 0)
+            return int(resp[0]) if resp else 0
+        except Exception:
+            return 0
+
+    def xpending_delivery_count(self, stream: str, group: str, msg_id: str) -> int:
+        """指定消息的累计投递次数（重试计数 / 死信判定）。
+
+        redis-py 7.x 的 XPENDING 明细走 xpending_range（旧扩展版 xpending 已移除）。
+        """
+        try:
+            rows = self._get_client().xpending_range(
+                self._key(stream), group, str(msg_id), str(msg_id), 1
+            )
+        except Exception as e:
+            logger.warning("Redis xpending_delivery_count 失败 stream={}: {}", stream, e)
+            return 0
+        for row in rows or []:
+            # redis-py 7.x 返回 dict（times_delivered）；兼容旧版元组行
+            if isinstance(row, dict):
+                value = row.get("times_delivered")
+                return int(value) if value is not None else 0
+            if len(row) >= 4:
+                return int(row[3])
+        return 0
+
+    def xlen(self, stream: str) -> int:
+        """Stream 长度（ack 后 XDEL，故等于未完成条目数）。"""
+        try:
+            return int(self._get_client().xlen(self._key(stream)))
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _parse_stream_entries(resp: Any) -> list[tuple[str, Any]]:
+        """把 xreadgroup/xautoclaim 的 [[stream, [(id, fields)]]] 解析为 [(id, payload_obj)]。"""
+        out: list[tuple[str, Any]] = []
+        for _stream, entries in resp or []:
+            for msg_id, fields in entries or []:
+                raw = (fields or {}).get("payload")
+                if raw is None:
+                    continue
+                try:
+                    out.append((str(msg_id), json.loads(raw)))
+                except (TypeError, ValueError):
+                    continue
+        return out
+
     def expire(self, key: str, seconds: int) -> None:
         try:
             self._get_client().expire(self._key(key), seconds)

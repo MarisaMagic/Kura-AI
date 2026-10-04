@@ -2,8 +2,11 @@
 知识库文档上传任务：受理与处理解耦（进度写 Redis，前端批量轮询状态）。
 
 - 队列模式（KB_UPLOAD_MODE=queue，生产默认）：上传接口把文件流式落对象存储 pending 区，
-  写任务 meta 后 RPUSH 到 Redis 队列立即返回 task_id；worker.py（独立进程）消费队列执行
-  解析/向量化/入库。页面崩溃、API 重启都不影响已受理任务。
+  写任务 meta 后入队立即返回 task_id；worker.py（独立进程）消费队列执行解析/向量化/入库。
+  页面崩溃、API 重启都不影响已受理任务。队列后端由 KB_UPLOAD_QUEUE_BACKEND 选择：
+  - stream（默认）：Redis Stream + 消费者组，按消息 ack（XACK+XDEL）、XAUTOCLAIM 超时回收、
+    投递计数超限转死信；XLEN 即未完成深度。
+  - list（回滚通道）：旧 List + processing 可靠队列（BRPOPLPUSH + LREM）。
 - 内联模式（KB_UPLOAD_MODE=inline，本地开发默认）：API 进程内线程池执行（保留旧行为）。
 
 取消标记、用户活动计数均走 Redis，跨进程生效。
@@ -37,8 +40,30 @@ from app.utils.upstream_quota import QuotaBreakerOpenError, QuotaTimeoutError
 
 TERMINAL_STATUSES = ("completed", "failed", "timeout", "cancelled")
 
+# 旧 List 后端 key（回滚通道 / 一次性迁移源）
 _QUEUE_KEY = "kb_upload_job:queue"
 _PROCESSING_KEY = "kb_upload_job:processing"
+
+
+def _stream_key() -> str:
+    """Stream key（读配置，便于按需改名）。"""
+    return str(getattr(settings, "KB_UPLOAD_STREAM_KEY", "kb_upload_job:stream") or "kb_upload_job:stream")
+
+
+def _consumer_group() -> str:
+    """消费者组名（多副本共用同一组实现负载均衡）。"""
+    return str(getattr(settings, "KB_UPLOAD_CONSUMER_GROUP", "kb_upload_workers") or "kb_upload_workers")
+
+
+def _dead_stream_key() -> str:
+    """死信 stream key（超过最大投递次数仍失败的任务转存审计）。"""
+    return str(getattr(settings, "KB_UPLOAD_DEAD_STREAM", "kb_upload_job:dead") or "kb_upload_job:dead")
+
+
+# 兼容测试/调用方直接引用常量（读取当前配置值）
+_STREAM_KEY = _stream_key()
+_CONSUMER_GROUP = _consumer_group()
+_DEAD_STREAM_KEY = _dead_stream_key()
 
 
 def _meta_key(task_id: str) -> str:
@@ -70,6 +95,12 @@ def upload_mode() -> str:
     """上传受理模式：queue（独立 worker）| inline（API 进程线程池）。"""
     mode = str(getattr(settings, "KB_UPLOAD_MODE", "inline") or "inline").strip().lower()
     return mode if mode in ("queue", "inline") else "inline"
+
+
+def queue_backend() -> str:
+    """队列后端：stream（Redis Stream 消费者组，默认）| list（旧 List 可靠队列，回滚通道）。"""
+    backend = str(getattr(settings, "KB_UPLOAD_QUEUE_BACKEND", "stream") or "stream").strip().lower()
+    return backend if backend in ("stream", "list") else "stream"
 
 
 def is_terminal_status(status: Any) -> bool:
@@ -115,7 +146,9 @@ def _get_pool() -> ThreadPoolExecutor:
 
 
 def queue_depth() -> int:
-    """排队 + 处理中的任务总数。"""
+    """排队 + 处理中（未 ack）的任务总数。stream 后端下 XLEN 即为该值。"""
+    if queue_backend() == "stream":
+        return cache.xlen(_stream_key())
     return cache.llen(_QUEUE_KEY) + cache.llen(_PROCESSING_KEY)
 
 
@@ -153,29 +186,55 @@ def enqueue_task(task_id: str) -> bool:
     """入队上传任务：原子检查「排队 + 处理中」深度上限（多副本并发下不超卖）。
 
     KB_UPLOAD_QUEUE_MAX<=0 时仅做普通入队；超限或 Redis 不可用返回 False。
+    stream 后端用 XADD 限深（XLEN 即未 ack 数）；list 后端沿用 RPUSH 限深。
     """
     payload = {"kind": "kb_upload", "task_id": task_id}
     queue_max = max(0, int(getattr(settings, "KB_UPLOAD_QUEUE_MAX", 0) or 0))
+    if queue_backend() == "stream":
+        return cache.xadd_limited_json(_stream_key(), payload, queue_max) is not None
     return cache.rpush_json_with_limit(_QUEUE_KEY, _PROCESSING_KEY, payload, queue_max)
 
 
-def dequeue_task(timeout: int = 5) -> dict[str, Any] | None:
-    """可靠出队：原子移入 processing 列表，任务完成后 ack；崩溃可回收重投。"""
-    payload = cache.brpoplpush_json(_QUEUE_KEY, _PROCESSING_KEY, timeout)
-    return payload if isinstance(payload, dict) else None
+def dequeue_task(timeout: int = 5, consumer: str = "") -> tuple[Any, dict[str, Any]] | None:
+    """出队一个任务，返回 (ack_token, payload)；无任务返回 None。
 
-
-def ack_task(payload: dict[str, Any]) -> None:
-    """任务完成确认：仅移除自己消费的那一条（count=1）。
-
-    多副本下同一 payload 可能因崩溃恢复出现多条，count=0 会误删其它副本仍在处理的条目。
+    stream 后端：消费者组阻塞读取，ack_token 为消息 id（按 id 精确 ack）；
+    list 后端：BRPOPLPUSH 移入 processing，ack_token 为 payload 本身。
     """
-    cache.lrem_json(_PROCESSING_KEY, payload, count=1)
+    if queue_backend() == "stream":
+        block_ms = max(1, int(getattr(settings, "KB_UPLOAD_READ_BLOCK_MS", 3000) or 3000))
+        entries = cache.xreadgroup_json(
+            _stream_key(), _consumer_group(), consumer or "kb-worker", block_ms, count=1
+        )
+        for msg_id, payload in entries:
+            if isinstance(payload, dict):
+                return msg_id, payload
+        return None
+    payload = cache.brpoplpush_json(_QUEUE_KEY, _PROCESSING_KEY, timeout)
+    return (payload, payload) if isinstance(payload, dict) else None
+
+
+def ack_task(token: Any) -> None:
+    """任务完成确认。
+
+    stream：按消息 id 执行 XACK+XDEL（精确、无需值匹配）；
+    list：仅移除自己消费的那一条（count=1），避免误删其它副本仍在处理的条目。
+    """
+    if queue_backend() == "stream":
+        cache.xack_del(_stream_key(), _consumer_group(), str(token))
+        return
+    cache.lrem_json(_PROCESSING_KEY, token, count=1)
 
 
 def requeue_task(payload: dict[str, Any]) -> None:
+    """list 后端重投（保留兼容）；stream 后端用 XAUTOCLAIM 回收，不需要重投。"""
     cache.lrem_json(_PROCESSING_KEY, payload, count=1)
     cache.rpush_json(_QUEUE_KEY, payload)
+
+
+def ensure_consumer_group() -> bool:
+    """确保 Stream 消费者组存在（worker 启动时调用；幂等）。"""
+    return cache.xgroup_create(_stream_key(), _consumer_group(), "0")
 
 
 def _processing_lock_key(task_id: str) -> str:
@@ -257,6 +316,112 @@ def recover_stale_processing(stale_seconds: int) -> int:
         return recovered
     finally:
         cache.delete(lock_key)
+
+
+def reclaim_stale_tasks(consumer: str) -> int:
+    """stream 后端超时回收：XAUTOCLAIM 认领其它消费者空闲超过阈值的待确认消息。
+
+    与 recover_stale_processing 的差异：
+    - 只遍历待确认列表（PEL），非全表 LRANGE 扫描；
+    - 按累计投递次数判死（超过 KB_UPLOAD_MAX_DELIVERIES 判失败并转死信）；
+    - 可周期调用，不依赖 worker 重启。
+    :return: 处理（回收执行/判死/清理）的条目数
+    """
+    stale = max(60, int(getattr(settings, "KB_UPLOAD_STALE_SECONDS", 900) or 900))
+    min_idle_ms = stale * 1000
+    max_deliveries = max(1, int(getattr(settings, "KB_UPLOAD_MAX_DELIVERIES", 3) or 3))
+    stream = _stream_key()
+    group = _consumer_group()
+    claimed = cache.xautoclaim_json(stream, group, consumer, min_idle_ms)
+    handled = 0
+    for msg_id, payload in claimed:
+        task_id = str(payload.get("task_id") or "") if isinstance(payload, dict) else ""
+        if not task_id:
+            cache.xack_del(stream, group, msg_id)
+            handled += 1
+            continue
+        meta = cache.get_json(_meta_key(task_id))
+        if not isinstance(meta, dict) or is_terminal_status(meta.get("status")):
+            # 已终态 / meta 丢失：清理待确认条目
+            cache.xack_del(stream, group, msg_id)
+            handled += 1
+            continue
+        delivery = cache.xpending_delivery_count(stream, group, msg_id)
+        user_id = int(meta.get("user_id") or 0)
+        if delivery > max_deliveries:
+            identity = _identity_from_meta(meta)
+            logger.error(
+                "知识库上传任务超过最大投递次数，判失败并转死信 task_id={} 次数={}", task_id, delivery
+            )
+            _update_meta(
+                task_id,
+                identity,
+                status="failed",
+                error="处理进程反复中断/超时，已超过最大重试次数，请重新上传",
+                error_type="failed",
+                updated_at=time.time(),
+            )
+            cache.xadd_json(
+                _dead_stream_key(),
+                {"kind": "kb_upload", "task_id": task_id, "user_id": user_id, "deliveries": delivery},
+            )
+            _remove_user_active(user_id, task_id)
+            cache.xack_del(stream, group, msg_id)
+            handled += 1
+            continue
+        # 有效但超时：清旧锁 → 重置 meta → 立即处理（消息已认领到本消费者），完成后 ack
+        identity = _identity_from_meta(meta)
+        _release_processing_lock(task_id)
+        _update_meta(
+            task_id,
+            identity,
+            status="queued",
+            stage="queued",
+            percent=0,
+            recovered=True,
+            updated_at=time.time(),
+        )
+        try:
+            run_upload_task_from_source(task_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("知识库上传任务回收执行异常 task_id={}", task_id)
+        finally:
+            cache.xack_del(stream, group, msg_id)
+        handled += 1
+    if handled:
+        logger.info("知识库上传任务 Stream 回收完成：{} 条", handled)
+    return handled
+
+
+def migrate_list_to_stream() -> int:
+    """一次性把旧 List 后端的在途任务迁入 Stream（零停机）。
+
+    分布式锁保证多副本下仅一个执行；迁一条删一条，避免重复处理。
+    :return: 迁移条目数
+    """
+    lock_key = "kb_upload_job:migrate_to_stream"
+    if not cache.set_nx(lock_key, {"ts": time.time()}, 300):
+        return 0
+    moved = 0
+    try:
+        for key in (_QUEUE_KEY, _PROCESSING_KEY):
+            for raw in cache.lrange_str(key, 0, -1):
+                try:
+                    payload = json.loads(raw)
+                except (TypeError, ValueError):
+                    cache.lrem_raw(key, raw, count=1)
+                    continue
+                if not isinstance(payload, dict):
+                    cache.lrem_raw(key, raw, count=1)
+                    continue
+                cache.xadd_json(_stream_key(), payload)
+                cache.lrem_raw(key, raw, count=1)
+                moved += 1
+        if moved:
+            logger.info("旧 List 队列任务迁移至 Stream 完成：{} 条", moved)
+    finally:
+        cache.delete(lock_key)
+    return moved
 
 
 # ---------------------------------------------------------------- 任务创建

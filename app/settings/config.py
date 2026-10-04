@@ -288,6 +288,19 @@ class Settings(BaseSettings):
     # 重试退避基数（秒）：第 n 次重试等待 base * 2**(n-1)，上限 KB_UPLOAD_EMBEDDING_RETRY_MAX_SECONDS
     KB_UPLOAD_EMBEDDING_RETRY_BASE_SECONDS: float = 1.0
     KB_UPLOAD_EMBEDDING_RETRY_MAX_SECONDS: float = 8.0
+    # 队列后端：stream=Redis Stream 消费者组（推荐）；list=旧 List+processing 可靠队列（回滚通道）
+    KB_UPLOAD_QUEUE_BACKEND: str = "stream"
+    # Stream key 与消费者组名（多副本共用同一组实现负载均衡）
+    KB_UPLOAD_STREAM_KEY: str = "kb_upload_job:stream"
+    KB_UPLOAD_CONSUMER_GROUP: str = "kb_upload_workers"
+    # 死信 stream：投递次数超过上限仍失败的任务转存此处供审计
+    KB_UPLOAD_DEAD_STREAM: str = "kb_upload_job:dead"
+    # 单任务最大投递次数：超过后判失败并转死信，避免坏任务无限重投
+    KB_UPLOAD_MAX_DELIVERIES: int = 3
+    # Stream 出队阻塞毫秒数（无任务时等待该时长后返回，用于空闲退避）
+    KB_UPLOAD_READ_BLOCK_MS: int = 3000
+    # 超时任务回收扫描间隔（秒）；回收 min-idle 阈值复用 KB_UPLOAD_STALE_SECONDS
+    KB_UPLOAD_RECLAIM_INTERVAL_SECONDS: int = 60
     # 全局并发调用嵌入 API 的上限（跨所有上传线程共享），避免并发过高触发服务商限流
     EMBEDDING_MAX_CONCURRENCY: int = 4
     # 等待嵌入并发额度的最长时间（秒），超时按调用失败处理
