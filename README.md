@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/MarisaMagic/Kura-AI">
-    <img alt="Kura AI Logo" width="200" src="deploy/sample-picture/logo.svg">
+    <img alt="Kura AI Logo" width="200" src="/deploy/sample-picture/logo.svg">
   </a>
 </p>
 
@@ -84,8 +84,119 @@
 
 ---
 
+## 环境变量配置
 
-## 部署方式 1: 本地启动项目（适用于开发者）
+将仓库根目录的 `.env.example` 复制为 `.env`，再填写密钥（填好的 `.env` 勿提交仓库）：
+
+```sh
+# Linux / macOS
+cp .env.example .env
+
+# Windows PowerShell
+Copy-Item .env.example .env
+```
+
+至少填写：
+
+- `SECRET_KEY`（生成：`openssl rand -hex 32`）
+- `INITIAL_ADMIN_PASSWORD`（至少 8 位，含字母与数字）
+- `EMBEDDING_API_KEY`
+- 启用知识库重排时再填 `RERANK_API_KEY`
+- 国内联网搜索可填 `WEB_SEARCH_BOCHA_API_KEY`（默认同时启用博查 Semantic Reranker）
+
+完整项与注释见 `.env.example`。公网上线请再对照下方「公网部署清单」。
+
+---
+
+> **怎么选**：只想快速跑起来看效果 → **部署方式 1（Docker 一键）**；想改代码 / 调试 → **部署方式 2（本地开发）**。
+
+---
+
+## 部署方式 1: 一键快速部署（Docker，推荐）
+
+### 运行命令
+
+前置：已安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)（需 Docker Compose v2.20+，`docker-compose.prod.yml` 使用了 `include:`），并已按「环境变量配置」一节准备好根目录 `.env`（至少填写 `SECRET_KEY`、`INITIAL_ADMIN_PASSWORD`、`EMBEDDING_API_KEY`）。
+
+在项目根目录运行命令：
+
+```sh
+# 首次或代码有变更时加 --build
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+该命令会一并启动：
+
+- `docker-compose.yml` 里的数据服务（PostgreSQL、Redis、Milvus、MinIO）；
+- `backend`：FastAPI / uvicorn，处理对话、检索与上传受理；
+- `kb-worker`：独立的文档解析/向量化进程，消费 Redis 可靠队列，不与 API 争抢事件循环；
+- `frontend`：Nginx，托管前端静态资源并反代 `/api/v1`。
+
+启动成功：
+
+![](/deploy/sample-picture/docker-compose-prod.png)
+
+启动成功后浏览器打开 **http://localhost:8088** 即可访问（端口可用 `.env` 里的 `WEB_PORT` 更改）。
+
+---
+
+### 多副本部署（水平扩容）
+
+`backend` 与 `kb-worker` 都没有固定 `container_name`，可用 `--scale` 起多个副本；Nginx 通过 `upstream` + `server ... resolve` 运行时解析 Docker DNS、`least_conn` 按活动连接数选副本，副本增减无需重载（需 nginx ≥ 1.27.3，前端镜像已锁 `1.28-alpine`）。
+
+```sh
+# 4 个 backend 副本 + 2 个 kb-worker 副本
+docker compose -f docker-compose.prod.yml up -d --build --scale backend=4 --scale kb-worker=2
+```
+
+说明：
+
+- 推荐「每容器 1 进程 + `--scale`」：保持 `WEB_CONCURRENCY=1`（默认），容器数即进程数，线程池/连接池/闸门额度核算最直观；
+- `frontend`（Nginx）固定单实例，不支持 `--scale`；
+- **扩副本要重算总账**：数据库 `max_connections` 必须大于「所有副本连接池之和」（`docker-compose.yml` 已调到 240，对应 4 副本），上游配额与生成闸门也会按副本数倍增，不是越多越好。详见 [`benchmarks/high-concurrency.md`](benchmarks/high-concurrency.md)。
+
+---
+
+### 常用命令与说明
+
+一键快速部署通过把 Vue 打成静态文件由 Nginx 托管，FastAPI 单独一个容器；Nginx 将 `/api/v1` 反代到后端（和本地 `pnpm dev` 的 Vite 代理同一思路）。数据库仍用现有 `docker-compose.yml`。
+
+首次构建会拉 Python / Node / Milvus 等镜像，并执行 `pnpm build` 与 `pip install`，可能需要十几分钟。之后再启动会快很多。
+
+常用命令：
+
+```sh
+# 查看状态
+docker compose -f docker-compose.prod.yml ps
+
+# 只停前后端，数据库继续跑（方便切回本地 python / pnpm 开发）
+docker compose -f docker-compose.prod.yml stop backend frontend
+
+# 停止全部容器（保留容器与数据卷）
+docker compose -f docker-compose.prod.yml stop
+
+# 停止并删除全部容器（volumes/ 里的数据仍保留，下次 up 复用）
+docker compose -f docker-compose.prod.yml down
+
+# 看后端 / 文档处理 worker 日志
+docker compose -f docker-compose.prod.yml logs -f backend
+docker compose -f docker-compose.prod.yml logs -f kb-worker
+```
+
+说明：
+
+- 已在跑 `docker compose up -d`（仅数据库）时，再执行上面的 prod 命令只会补起 `backend` / `kb-worker` / `frontend`，数据目录共用 `volumes/`。
+- 容器内会覆盖 `.env` 里的本机地址：`DATABASE_URL` / `REDIS_URL` / `MILVUS_HOST` 改为 Docker 服务名，`UVICORN_HOST=0.0.0.0`，并把 `KB_UPLOAD_MODE` 设为 `queue`（文档交给 kb-worker）。本机开发不受影响。
+- 后端不对外暴露 9999；浏览器只访问 Nginx 的 `WEB_PORT`。
+- 公网请把 `PROD_PUBLIC_API_BASE` 设为站点根地址（如 `https://your.domain`），并继续核对下面的清单。
+
+相关文件：`deploy/Dockerfile.backend`、`deploy/Dockerfile.frontend`、`deploy/nginx.conf`、`docker-compose.prod.yml`。
+
+数据库结构/数据补丁：启动时自动应用版本化补丁（见 [`app/core/schema_patches.py`](app/core/schema_patches.py)，按 `schema_patch_log` 表去重）。
+
+---
+
+## 部署方式 2: 本地启动项目（适用于开发者）
 
 ### 后端
 
@@ -202,7 +313,7 @@ docker compose up -d
 
 启动数据库镜像服务成功输出:
 
-![](deploy/sample-picture/docker-compose-up.png)
+![](/deploy/sample-picture/docker-compose-up.png)
 
 停止所有数据库服务:
 
@@ -212,168 +323,17 @@ docker compose stop
 
 停止数据库镜像服务成功输出:
 
-![](deploy/sample-picture/docker-compose-stop.png)
+![](/deploy/sample-picture/docker-compose-stop.png)
 
-二次开发：用上面的命令只起数据库，再分别 `python run.py` 与 `pnpm dev`。若要把前后端也打进镜像、一条命令访问网页，见下方「快速一键部署」。
-
----
-
-### 环境变量配置
-
-将仓库根目录的 `.env.example` 复制为 `.env`，再填写密钥（填好的 `.env` 勿提交仓库）：
-
-```sh
-# Linux / macOS
-cp .env.example .env
-
-# Windows PowerShell
-Copy-Item .env.example .env
-```
-
-至少填写：
-
-- `SECRET_KEY`（生成：`openssl rand -hex 32`）
-- `INITIAL_ADMIN_PASSWORD`（至少 8 位，含字母与数字）
-- `EMBEDDING_API_KEY`
-- 启用知识库重排时再填 `RERANK_API_KEY`
-- 国内联网搜索可填 `WEB_SEARCH_BOCHA_API_KEY`（默认同时启用博查 Semantic Reranker）
-
-完整项与注释见 `.env.example`。公网上线请再对照下方「公网部署清单」。
+本地开发只需上述命令起数据库，再分别运行 `python run.py` 与 `pnpm dev`。若要把前后端也打进镜像、一条命令访问网页，见上方「部署方式 1」。
 
 ---
 
-## 部署方式2: 一键快速部署（Docker）
+## 高并发与性能
 
-### 运行命令
+面向「单机多容器 + 百级并发对话」做了一轮系统性并发治理：Nginx 反代多个**无状态 backend 副本**、`kb-worker` 独立消费可靠队列、四类存储分离；统一并发闸门 + 跨进程上游配额保护 + 对话/检索链路全异步化。实测 Linux 4 副本、100 并发活跃流成功率 100%、loop lag P99 26ms；上游配额瓶颈定位在 rerank（有效容量约 10~20 QPS）。
 
-前置：已安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，并已按上一节准备好根目录 `.env`（至少填写 `SECRET_KEY`、`INITIAL_ADMIN_PASSWORD`、`EMBEDDING_API_KEY`）。
-
-在项目根目录运行命令：
-
-```sh
-# 首次或代码有变更时加 --build
-docker compose -f docker-compose.prod.yml up -d --build
-```
-
-启动成功：
-
-![](deploy/sample-picture/docker-compose-prod.png)
-
-启动成功后浏览器打开 **http://localhost:8088** 即可访问（端口可用 `.env` 里的 `WEB_PORT` 更改）。
-
----
-
-### 常用命令与说明
-
-一键快速部署通过把 Vue 打成静态文件由 Nginx 托管，FastAPI 单独一个容器；Nginx 将 `/api/v1` 反代到后端（和本地 `pnpm dev` 的 Vite 代理同一思路）。数据库仍用现有 `docker-compose.yml`。
-
-首次构建会拉 Python / Node / Milvus 等镜像，并执行 `pnpm build` 与 `pip install`，可能需要十几分钟。之后再启动会快很多。
-
-常用命令：
-
-```sh
-# 查看状态
-docker compose -f docker-compose.prod.yml ps
-
-# 只停前后端，数据库继续跑（方便切回本地 python / pnpm 开发）
-docker compose -f docker-compose.prod.yml stop backend frontend
-
-# 停止全部（含数据库）
-docker compose -f docker-compose.prod.yml stop
-
-# 看后端日志
-docker compose -f docker-compose.prod.yml logs -f backend
-```
-
-说明：
-
-- 已在跑 `docker compose up -d`（仅数据库）时，再执行上面的 prod 命令只会补起 `backend` / `frontend`，数据目录共用 `volumes/`。
-- 容器内会覆盖 `.env` 里的本机地址：`DATABASE_URL` / `REDIS_URL` / `MILVUS_HOST` 改为 Docker 服务名，`UVICORN_HOST=0.0.0.0`。本机开发不受影响。
-- 后端不对外暴露 9999；浏览器只访问 Nginx 的 `WEB_PORT`。
-- 公网请把 `PROD_PUBLIC_API_BASE` 设为站点根地址（如 `https://your.domain`），并继续核对下面的清单。
-
-相关文件：`deploy/Dockerfile.backend`、`deploy/Dockerfile.frontend`、`deploy/nginx.conf`、`docker-compose.prod.yml`。
-
-数据库结构/数据补丁：启动时自动应用版本化补丁（见 [`app/core/schema_patches.py`](app/core/schema_patches.py)，按 `schema_patch_log` 表去重）。
-
----
-
-## 高并发架构设计与实测
-
-面向「单机多容器 + 百级并发对话 + 知识库批量上传」场景的一轮系统性并发治理（4 个阶段 + 2 期深度异步化），全部改动均附真实压测数据。
-
-### 部署形态
-
-Nginx 托管前端静态资源，并把 `/api/v1` 反代到 **4 个 backend 副本**（`upstream` + `server ... resolve` 动态解析 Docker DNS，`least_conn` 按活动连接数选副本，副本增减无需重载；SSE 事件存 Redis，订阅可落任意副本）；文档解析/向量化由独立的 **kb-worker 副本**消费 Redis 可靠队列，不与 API 争抢事件循环。
-
-```
-                      ┌────────────── Nginx (8088) ──────────────┐
-浏览器 ──► 静态资源    │  /api/v1  ──►  upstream+least_conn(resolve) → backend ×4 │
-                      └──────────────────┬───────────────────────┘
-                                         │
-        ┌────────────────────────────────┼────────────────────────────────┐
-        ▼                                ▼                                ▼
- backend ×4（FastAPI/uvicorn）      kb-worker ×2（可靠队列消费）      PostgreSQL / Redis / Milvus / MinIO
-```
-
-### 四项关键设计
-
-**1. 事件循环解阻塞与统一并发闸门**（`app/utils/concurrency.py`）
-- 所有同步 IO（DB/Redis/MinIO/Milvus）均不直接跑在事件循环上：早期统一 `run_sync` 移入线程池，深度异步化后热路径直接走异步客户端；
-- 默认线程池显式扩容（96/副本），`loop lag` 监控（后台采样 P50/P99）暴露阻塞，`/api/v1/base/status` 可实时观测；
-- LLM 并发闸门统一覆盖 `/chat`、`/chat/stream`、`/chat/jobs` 三个入口（`LLM_MAX_INFLIGHT` 按副本分摊），排队有事件反馈、超时快速失败。
-
-**2. 上游配额保护与快速降级**（`app/utils/upstream_quota.py`，面向个人账号低配额）
-- 跨进程 Redis Lua 闸门（并发 + QPS 双维度，API 副本与 kb-worker 共享），替代进程内信号量；
-- 熔断器：连续 429 后短路冷却，期间调用直接降级；
-- 快速降级链：rerank 限流 → 按向量分排序；embedding 熔断 → 检索返回「知识库暂时繁忙」、跳过查询扩展；`KB_EMBEDDING_YIELD`：批量上传在配额紧张时自动为前台检索让路；
-- 查询向量 Redis 缓存：相同 query 零上游调用。
-
-**3. 多副本安全**
-- 队列：`BRPOPLPUSH` 可靠出队 + 任务级处理锁（重复投递幂等）+ 原子 ack（只删自己那条）+ stale 回收分布式锁；
-- 会话锁/替换锁/限流均为 Redis 共享态，多副本语义一致；
-- nginx 用 `upstream { server backend:9999 resolve; }` 运行时解析 Docker DNS（副本增减无需重载），`least_conn` 选活动连接最少的副本，`max_fails/fail_timeout` 做被动健康检查，`keepalive` 复用后端连接。
-
-**4. 对话与检索链路全异步化（双轨设计）**
-- 检索链：`AsyncMilvusClient`（真协程 gRPC）+ DashScope `AioMultiModalEmbedding`（aiohttp）+ `httpx.AsyncClient` rerank + 异步 RAG 子图（`complex` 策略下 step-back/HyDE **并发生成**）；
-- 对话链：SQLAlchemy `AsyncSession`（psycopg async）承接全部消息读写，Redis 走 `redis.asyncio`；
-- **双轨**：同步实现完整保留供 `/chat`、工具线程、实验与 worker 使用；引入 `sync_fallback` 兼容层——Windows Proactor 事件循环下 psycopg 异步不可用时自动退化线程池，生产 Linux 走真异步；
-- 工具层按 Agent 路径分派：异步 Agent 注入 `coroutine=` 版知识库工具、同步路径沿用线程模型。
-
-### 实测数据（本机 Docker，真实压测）
-
-**① 对话链路**（mock LLM 零配额消耗；4 副本 × 闸门 25 = 100 并发活跃流）：
-
-| 环境 | 并发 | 成功率 | P50 | loop lag P99 |
-|---|---|---|---|---|
-| Windows 单进程 | 100 | 100% | 4.4s | **184ms** |
-| Linux 4 副本（异步化前）| 100 | 100% | 4.4s | **41ms** |
-| Linux 4 副本（异步化后）| 100×2 轮 | 100% | 3.6s | **26ms** |
-
-**② 线程占用**（20 并发，真实 DashScope/Milvus/Redis）：
-
-| 路径 | 执行器线程增量 |
-|---|---|
-| 检索（同步链 to_thread） | **+20** |
-| 检索（异步协程链） | **+0** |
-| DB 写入（同步 to_thread） | **+20** |
-| DB 写入（AsyncSession） | **+0** |
-
-**③ 上游配额拐点**（真实 DashScope 个人账号，不同 query 探测）：
-
-| 档位 | 桶配置 | 并发 | 结果 |
-|---|---|---|---|
-| A2 | 生产默认（2/2） | 30 | 14 成功 + 16 快速降级（贴 8s 上限） |
-| B | 放开 QPS | 10 | 17 成功 + 3 次 rerank 429（~15%） |
-| C | 放开 QPS | 30 | 20 成功 + 20 次 rerank 429（~50%） |
-| **D** | **调优（emb 5/5、rerank 3/3、等待 5s）** | 30 | **25 成功 + 5 降级，零上游 429** |
-
-结论：**rerank 为配额瓶颈**（有效容量约 10~20 QPS），embedding 配额较宽；调优参数已写入 `.env.example` 注释。
-
-### 压测复现
-
-- `tests/load/mock_llm_server.py`：零依赖 OpenAI 兼容 Mock LLM（流式，延迟可控），配合 `docker-compose.test.yml` 起容器版，压测不消耗上游配额；
-- `tests/load/load_test.py`：对话阶梯并发压测（jobs/SSE 双路径 + 在线状态采样），用法见脚本头注释。
+设计细节、部署形态与完整压测数据见：[`benchmarks/high-concurrency.md`](benchmarks/high-concurrency.md)。
 
 ---
 

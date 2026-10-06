@@ -1,20 +1,12 @@
-## 快速开始
+# Kura AI 前端
 
-进入前端目录
+本目录是 Kura AI 的 Vue 3 前端。安装与启动说明统一放在主仓库 README：
 
-```sh
-cd web
-```
+- [前端启动步骤](../README.md#前端)
 
-安装依赖(建议使用pnpm: https://pnpm.io/zh/installation)
+快速开始：
 
 ```sh
-npm i -g pnpm # 已安装可忽略
-pnpm i # 或者 npm i
-```
-
-启动
-
-```sh
+pnpm i
 pnpm dev
 ```
