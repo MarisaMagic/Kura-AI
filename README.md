@@ -127,9 +127,9 @@ docker compose -f docker-compose.prod.yml up -d --build
 
 该命令会一并启动：
 
-- `docker-compose.yml` 里的数据服务（PostgreSQL、Redis、Milvus、MinIO）；
+- `docker-compose.yml` 里的数据服务（PostgreSQL、Redis、Kafka、Milvus、MinIO）；
 - `backend`：FastAPI / uvicorn，处理对话、检索与上传受理；
-- `kb-worker`：独立的文档解析/向量化进程，消费 Redis 可靠队列，不与 API 争抢事件循环；
+- `kb-worker`：独立的文档解析/向量化进程，消费 Kafka 上传队列，不与 API 争抢事件循环；
 - `frontend`：Nginx，托管前端静态资源并反代 `/api/v1`。
 
 启动成功：
@@ -186,7 +186,7 @@ docker compose -f docker-compose.prod.yml logs -f kb-worker
 说明：
 
 - 已在跑 `docker compose up -d`（仅数据库）时，再执行上面的 prod 命令只会补起 `backend` / `kb-worker` / `frontend`，数据目录共用 `volumes/`。
-- 容器内会覆盖 `.env` 里的本机地址：`DATABASE_URL` / `REDIS_URL` / `MILVUS_HOST` 改为 Docker 服务名，`UVICORN_HOST=0.0.0.0`，并把 `KB_UPLOAD_MODE` 设为 `queue`（文档交给 kb-worker）。本机开发不受影响。
+- 容器内会覆盖 `.env` 里的本机地址：`DATABASE_URL` / `REDIS_URL` / `MILVUS_HOST` 改为 Docker 服务名，`KAFKA_BOOTSTRAP_SERVERS=kafka:9092`，`UVICORN_HOST=0.0.0.0`，并把 `KB_UPLOAD_MODE` 设为 `queue`、`KB_UPLOAD_QUEUE_BACKEND` 设为 `kafka`（文档交给 kb-worker）。回滚 Redis Stream 时把后端改回 `stream` 并先排空在途任务。本机开发默认 `inline`，不连接 Kafka。
 - 后端不对外暴露 9999；浏览器只访问 Nginx 的 `WEB_PORT`。
 - 公网请把 `PROD_PUBLIC_API_BASE` 设为站点根地址（如 `https://your.domain`），并继续核对下面的清单。
 

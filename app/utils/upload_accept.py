@@ -90,7 +90,7 @@ async def prepare_document_upload(
         )
         if not created:
             await asyncio.to_thread(obs.delete_key, source_key)
-            return None, (503, "任务状态初始化失败（Redis 暂不可用），请稍后重试")
+            return None, (503, "任务状态初始化失败（队列暂不可用），请稍后重试")
         return created, None
 
     # 内联模式（本地开发）：读入内存后交 API 线程池

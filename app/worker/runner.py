@@ -3,9 +3,9 @@
 
 与 API 进程解耦后：
 - 解析/向量化不再抢占 API 事件循环与 GIL，接口在高负载下仍可响应；
-- 队列（默认 Redis Stream 消费者组：XREADGROUP 取任务、XACK+XDEL 确认、
-  XAUTOCLAIM 周期回收超时任务、投递计数超限转死信；亦可用 KB_UPLOAD_QUEUE_BACKEND=list
-  回退到旧 List + processing 可靠队列）提供背压与崩溃恢复；
+- 队列提供背压与崩溃恢复。生产为 Kafka（手动提交位点，投递超限转死信）；
+  KB_UPLOAD_QUEUE_BACKEND=stream 回滚到 Redis Stream（XREADGROUP / XACK+XDEL / XAUTOCLAIM），
+  =list 回滚到旧 List + processing 可靠队列；
 - 页面刷新/崩溃不影响已受理任务，处理进度照样写入 Redis 供前端查询。
 
 用法：python worker.py（或 docker compose 的 kb-worker 服务）。
@@ -39,8 +39,12 @@ def _reclaim_once(consumer: str) -> int:
     """执行一次超时任务回收（按后端分派），返回处理条目数。"""
     from app.kb import kb_job
 
-    if kb_job.queue_backend() == "stream":
+    backend = kb_job.queue_backend()
+    if backend == "stream":
         return kb_job.reclaim_stale_tasks(consumer)
+    # Kafka 由消费组在进程退出后重投未提交位点，不扫描 Redis List
+    if backend == "kafka":
+        return 0
     stale = max(60, int(getattr(settings, "KB_UPLOAD_STALE_SECONDS", 900) or 900))
     return kb_job.recover_stale_processing(stale)
 
@@ -82,13 +86,17 @@ def _bootstrap() -> None:
     try:
         from app.kb import kb_job
 
-        if kb_job.queue_backend() == "stream":
+        backend = kb_job.queue_backend()
+        if backend == "stream":
             # 建组（幂等）→ 迁移旧 List 在途任务 → 首次回收
             kb_job.ensure_consumer_group()
             moved = kb_job.migrate_list_to_stream()
             if moved:
                 logger.info("旧 List 队列在途任务迁移至 Stream：{} 条", moved)
             kb_job.reclaim_stale_tasks(_consumer_name(0))
+        elif backend == "kafka":
+            if not kb_job.ensure_kafka_topics():
+                logger.error("Kafka 主题初始化失败（出队时会重试建主题）")
         else:
             stale = max(60, int(getattr(settings, "KB_UPLOAD_STALE_SECONDS", 900) or 900))
             kb_job.recover_stale_processing(stale)
@@ -112,7 +120,9 @@ def _run_one(worker_name: str) -> bool:
     started = time.monotonic()
     try:
         if kind == "kb_upload":
-            kb_job.run_upload_task_from_source(task_id)
+            # 超限转死信或已终态：不再执行，finally 里仍提交位点
+            if kb_job.queue_backend() != "kafka" or kb_job.accept_kafka_delivery(task_id):
+                kb_job.run_upload_task_from_source(task_id)
         else:
             logger.warning("未知任务类型 kind={} task_id={}（已跳过）", kind, task_id)
     except Exception:  # noqa: BLE001
@@ -134,7 +144,7 @@ def _worker_loop(index: int) -> None:
     idle = 0
     next_reclaim = time.monotonic() + _reclaim_interval()
     while not _stop.is_set():
-        # 周期回收超时任务（stream: XAUTOCLAIM；list: processing 扫描），不依赖重启
+        # 周期回收超时任务（stream: XAUTOCLAIM；list: processing 扫描；kafka: 跳过）
         now = time.monotonic()
         if now >= next_reclaim:
             next_reclaim = now + _reclaim_interval()
@@ -155,6 +165,15 @@ def _worker_loop(index: int) -> None:
         idle += 1
         # 队列空闲时逐级退避，避免空转
         _stop.wait(min(1.0 + idle * 0.5, 5.0))
+    try:
+        from app.kb import kb_job
+
+        if kb_job.queue_backend() == "kafka":
+            from app.kb import kafka_queue
+
+            kafka_queue.close_consumer()
+    except Exception:  # noqa: BLE001
+        logger.exception("{} 关闭 Kafka 消费者失败", name)
     logger.info("{} 退出", name)
 
 

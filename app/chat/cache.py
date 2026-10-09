@@ -481,6 +481,66 @@ class RedisCache:
         except Exception:
             return 0
 
+    # Kafka 上传队列的深度不能与 produce 做成一次原子操作，用计数器限深。
+    _INCR_IF_BELOW_LUA = """
+    local maxd = tonumber(ARGV[1])
+    local cur = tonumber(redis.call('GET', KEYS[1]) or '0')
+    if maxd > 0 and cur >= maxd then
+      return 0
+    end
+    local n = redis.call('INCR', KEYS[1])
+    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+    return n
+    """
+    _DECR_FLOOR_LUA = """
+    local cur = tonumber(redis.call('GET', KEYS[1]) or '0')
+    if cur <= 0 then
+      redis.call('SET', KEYS[1], '0')
+      redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
+      return 0
+    end
+    local n = redis.call('DECR', KEYS[1])
+    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
+    return n
+    """
+
+    def incr_if_below(self, key: str, max_depth: int, ttl: int = 604800) -> Optional[int]:
+        """原子加一。达到 max_depth（>0）时返回 0；Redis 不可用返回 None；成功返回新值。"""
+        try:
+            result = self._get_client().eval(
+                self._INCR_IF_BELOW_LUA,
+                1,
+                self._key(key),
+                str(int(max_depth)),
+                str(max(60, int(ttl))),
+            )
+            return int(result)
+        except Exception as e:
+            logger.warning("Redis incr_if_below 失败 key={}: {}", key, e)
+            return None
+
+    def decr_floor(self, key: str, ttl: int = 604800) -> Optional[int]:
+        """原子减一，不低于 0。Redis 不可用返回 None。"""
+        try:
+            result = self._get_client().eval(
+                self._DECR_FLOOR_LUA, 1, self._key(key), str(max(60, int(ttl)))
+            )
+            return int(result)
+        except Exception as e:
+            logger.warning("Redis decr_floor 失败 key={}: {}", key, e)
+            return None
+
+    def get_int(self, key: str) -> int:
+        """读取整型计数；缺失或 Redis 不可用时返回 0。"""
+        try:
+            raw = self._get_client().get(self._key(key))
+            return int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            return 0
+        except Exception as e:
+            logger.warning("Redis get_int 失败 key={}: {}", key, e)
+            return 0
+
     @staticmethod
     def _parse_stream_entries(resp: Any) -> list[tuple[str, Any]]:
         """把 xreadgroup/xautoclaim 的 [[stream, [(id, fields)]]] 解析为 [(id, payload_obj)]。"""

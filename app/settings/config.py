@@ -288,9 +288,16 @@ class Settings(BaseSettings):
     # 重试退避基数（秒）：第 n 次重试等待 base * 2**(n-1)，上限 KB_UPLOAD_EMBEDDING_RETRY_MAX_SECONDS
     KB_UPLOAD_EMBEDDING_RETRY_BASE_SECONDS: float = 1.0
     KB_UPLOAD_EMBEDDING_RETRY_MAX_SECONDS: float = 8.0
-    # 队列后端：stream=Redis Stream 消费者组（推荐）；list=旧 List+processing 可靠队列（回滚通道）
+    # 队列后端：kafka=Kafka 主题（生产 compose 覆盖）；stream=Redis Stream 消费者组（回滚）；
+    # list=旧 List+processing 可靠队列（回滚通道）
     KB_UPLOAD_QUEUE_BACKEND: str = "stream"
-    # Stream key 与消费者组名（多副本共用同一组实现负载均衡）
+    # 本机开发连 docker-compose 映射端口；容器内由 compose 覆盖为 kafka:9092
+    KAFKA_BOOTSTRAP_SERVERS: str = "127.0.0.1:9094"
+    KAFKA_UPLOAD_TOPIC: str = "kb-upload-jobs"
+    KAFKA_UPLOAD_DEAD_TOPIC: str = "kb-upload-dead"
+    # 分区数须 ≥ worker 线程数 × 副本数，否则多出来的消费者分不到分区
+    KAFKA_UPLOAD_PARTITIONS: int = 16
+    # Stream key 与消费者组名（多副本共用同一组实现负载均衡；Kafka 消费组复用此名）
     KB_UPLOAD_STREAM_KEY: str = "kb_upload_job:stream"
     KB_UPLOAD_CONSUMER_GROUP: str = "kb_upload_workers"
     # 死信 stream：投递次数超过上限仍失败的任务转存此处供审计

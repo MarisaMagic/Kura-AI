@@ -1,6 +1,6 @@
 """KB 上传队列 Stream 后端：入队/出队/ack/超时回收/旧列表迁移。不依赖真实 Redis。
 
-后端由 KB_UPLOAD_QUEUE_BACKEND 选择（stream|list），默认 stream；list 为回滚通道。
+后端由 KB_UPLOAD_QUEUE_BACKEND 选择（stream|list|kafka），默认 stream；list / kafka 见各自测试。
 """
 
 from __future__ import annotations

@@ -4,7 +4,9 @@
 - 队列模式（KB_UPLOAD_MODE=queue，生产默认）：上传接口把文件流式落对象存储 pending 区，
   写任务 meta 后入队立即返回 task_id；worker.py（独立进程）消费队列执行解析/向量化/入库。
   页面崩溃、API 重启都不影响已受理任务。队列后端由 KB_UPLOAD_QUEUE_BACKEND 选择：
-  - stream（默认）：Redis Stream + 消费者组，按消息 ack（XACK+XDEL）、XAUTOCLAIM 超时回收、
+  - kafka（生产 compose）：Kafka 主题 + 手动提交位点；深度用 Redis 计数器限流，
+    投递次数写入 meta，超限转死信主题。进度/取消/处理锁仍在 Redis。
+  - stream（代码默认，回滚）：Redis Stream + 消费者组，按消息 ack（XACK+XDEL）、XAUTOCLAIM 超时回收、
     投递计数超限转死信；XLEN 即未完成深度。
   - list（回滚通道）：旧 List + processing 可靠队列（BRPOPLPUSH + LREM）。
 - 内联模式（KB_UPLOAD_MODE=inline，本地开发默认）：API 进程内线程池执行（保留旧行为）。
@@ -98,9 +100,14 @@ def upload_mode() -> str:
 
 
 def queue_backend() -> str:
-    """队列后端：stream（Redis Stream 消费者组，默认）| list（旧 List 可靠队列，回滚通道）。"""
+    """队列后端：kafka | stream（默认，回滚）| list（旧 List 可靠队列）。"""
     backend = str(getattr(settings, "KB_UPLOAD_QUEUE_BACKEND", "stream") or "stream").strip().lower()
-    return backend if backend in ("stream", "list") else "stream"
+    return backend if backend in ("kafka", "stream", "list") else "stream"
+
+
+# Kafka 模式的排队深度（与 produce 分离，用 Redis 计数做原子限深）
+_KAFKA_DEPTH_KEY = "kb_upload_job:kafka_depth"
+_KAFKA_DEPTH_TTL = 7 * 24 * 3600
 
 
 def is_terminal_status(status: Any) -> bool:
@@ -146,9 +153,12 @@ def _get_pool() -> ThreadPoolExecutor:
 
 
 def queue_depth() -> int:
-    """排队 + 处理中（未 ack）的任务总数。stream 后端下 XLEN 即为该值。"""
-    if queue_backend() == "stream":
+    """排队 + 处理中（未 ack）的任务总数。stream 用 XLEN；kafka 用 Redis 计数器。"""
+    backend = queue_backend()
+    if backend == "stream":
         return cache.xlen(_stream_key())
+    if backend == "kafka":
+        return cache.get_int(_KAFKA_DEPTH_KEY)
     return cache.llen(_QUEUE_KEY) + cache.llen(_PROCESSING_KEY)
 
 
@@ -182,15 +192,31 @@ def _remove_user_active(user_id: int, task_id: str) -> None:
 # ---------------------------------------------------------------- 队列原语
 
 
+def _enqueue_kafka(payload: dict[str, Any], queue_max: int) -> bool:
+    """先占深度名额再 produce；写入失败则退还名额，避免计数泄漏把队列撑满。"""
+    from app.kb import kafka_queue
+
+    reserved = cache.incr_if_below(_KAFKA_DEPTH_KEY, queue_max, ttl=_KAFKA_DEPTH_TTL)
+    if not reserved:
+        return False
+    if kafka_queue.produce_json(payload):
+        return True
+    cache.decr_floor(_KAFKA_DEPTH_KEY, ttl=_KAFKA_DEPTH_TTL)
+    return False
+
+
 def enqueue_task(task_id: str) -> bool:
     """入队上传任务：原子检查「排队 + 处理中」深度上限（多副本并发下不超卖）。
 
-    KB_UPLOAD_QUEUE_MAX<=0 时仅做普通入队；超限或 Redis 不可用返回 False。
-    stream 后端用 XADD 限深（XLEN 即未 ack 数）；list 后端沿用 RPUSH 限深。
+    KB_UPLOAD_QUEUE_MAX<=0 时仅做普通入队；超限或后端不可用返回 False。
+    kafka 用 Redis 计数器限深后再 produce；stream 用 XADD 限深；list 沿用 RPUSH 限深。
     """
     payload = {"kind": "kb_upload", "task_id": task_id}
     queue_max = max(0, int(getattr(settings, "KB_UPLOAD_QUEUE_MAX", 0) or 0))
-    if queue_backend() == "stream":
+    backend = queue_backend()
+    if backend == "kafka":
+        return _enqueue_kafka(payload, queue_max)
+    if backend == "stream":
         return cache.xadd_limited_json(_stream_key(), payload, queue_max) is not None
     return cache.rpush_json_with_limit(_QUEUE_KEY, _PROCESSING_KEY, payload, queue_max)
 
@@ -198,10 +224,17 @@ def enqueue_task(task_id: str) -> bool:
 def dequeue_task(timeout: int = 5, consumer: str = "") -> tuple[Any, dict[str, Any]] | None:
     """出队一个任务，返回 (ack_token, payload)；无任务返回 None。
 
-    stream 后端：消费者组阻塞读取，ack_token 为消息 id（按 id 精确 ack）；
-    list 后端：BRPOPLPUSH 移入 processing，ack_token 为 payload 本身。
+    kafka：手动提交前的消息对象作为 ack_token（须由拉取它的线程提交）；
+    stream：消费者组阻塞读取，ack_token 为消息 id；
+    list：BRPOPLPUSH 移入 processing，ack_token 为 payload 本身。
     """
-    if queue_backend() == "stream":
+    backend = queue_backend()
+    if backend == "kafka":
+        from app.kb import kafka_queue
+
+        block_ms = max(1, int(getattr(settings, "KB_UPLOAD_READ_BLOCK_MS", 3000) or 3000))
+        return kafka_queue.poll_one(consumer or "kb-worker", block_ms)
+    if backend == "stream":
         block_ms = max(1, int(getattr(settings, "KB_UPLOAD_READ_BLOCK_MS", 3000) or 3000))
         entries = cache.xreadgroup_json(
             _stream_key(), _consumer_group(), consumer or "kb-worker", block_ms, count=1
@@ -217,10 +250,18 @@ def dequeue_task(timeout: int = 5, consumer: str = "") -> tuple[Any, dict[str, A
 def ack_task(token: Any) -> None:
     """任务完成确认。
 
+    kafka：提交位点成功后才减少深度计数（提交失败则消息会重投，计数保持）；
     stream：按消息 id 执行 XACK+XDEL（精确、无需值匹配）；
     list：仅移除自己消费的那一条（count=1），避免误删其它副本仍在处理的条目。
     """
-    if queue_backend() == "stream":
+    backend = queue_backend()
+    if backend == "kafka":
+        from app.kb import kafka_queue
+
+        if kafka_queue.commit(token):
+            cache.decr_floor(_KAFKA_DEPTH_KEY, ttl=_KAFKA_DEPTH_TTL)
+        return
+    if backend == "stream":
         cache.xack_del(_stream_key(), _consumer_group(), str(token))
         return
     cache.lrem_json(_PROCESSING_KEY, token, count=1)
@@ -235,6 +276,55 @@ def requeue_task(payload: dict[str, Any]) -> None:
 def ensure_consumer_group() -> bool:
     """确保 Stream 消费者组存在（worker 启动时调用；幂等）。"""
     return cache.xgroup_create(_stream_key(), _consumer_group(), "0")
+
+
+def ensure_kafka_topics() -> bool:
+    """确保上传主题与死信主题存在（worker 启动时调用；幂等）。"""
+    from app.kb import kafka_queue
+
+    return kafka_queue.ensure_topics()
+
+
+def accept_kafka_delivery(task_id: str) -> bool:
+    """记录一次 Kafka 投递。返回 True 表示应执行流水线。
+
+    已终态或 meta 缺失时返回 False（调用方仍提交位点）。
+    累计次数超过 KB_UPLOAD_MAX_DELIVERIES 时标失败、写入死信并返回 False，
+    避免毒消息在提交前被无限重投。
+    """
+    meta = cache.get_json(_meta_key(task_id))
+    if not isinstance(meta, dict) or is_terminal_status(meta.get("status")):
+        return False
+    max_deliveries = max(1, int(getattr(settings, "KB_UPLOAD_MAX_DELIVERIES", 3) or 3))
+    deliveries = int(meta.get("deliveries") or 0) + 1
+    identity = _identity_from_meta(meta)
+    now = time.time()
+    if deliveries > max_deliveries:
+        user_id = int(meta.get("user_id") or 0)
+        logger.error(
+            "知识库上传任务超过最大投递次数，判失败并转死信 task_id={} 次数={}",
+            task_id,
+            deliveries,
+        )
+        _update_meta(
+            task_id,
+            identity,
+            status="failed",
+            error="处理进程反复中断/超时，已超过最大重试次数，请重新上传",
+            error_type="failed",
+            deliveries=deliveries,
+            updated_at=now,
+        )
+        from app.kb import kafka_queue
+
+        kafka_queue.produce_json(
+            {"kind": "kb_upload", "task_id": task_id, "user_id": user_id, "deliveries": deliveries},
+            topic_name=kafka_queue.dead_topic(),
+        )
+        _remove_user_active(user_id, task_id)
+        return False
+    _update_meta(task_id, identity, deliveries=deliveries, updated_at=now)
+    return True
 
 
 def _processing_lock_key(task_id: str) -> str:
@@ -507,7 +597,7 @@ async def create_kb_upload_job(
     if content is None and upload_mode() == "queue":
         enqueued = await asyncio.to_thread(enqueue_task, tid)
         if not enqueued:
-            logger.error("知识库上传任务入队失败（Redis 不可用）task_id={}", tid)
+            logger.error("知识库上传任务入队失败（队列不可用或已满）task_id={}", tid)
             await cache.adelete(_meta_key(tid))
             await asyncio.to_thread(_remove_user_active, user_id, tid)
             return None
